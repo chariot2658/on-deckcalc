@@ -696,10 +696,24 @@
       groups.get(key).charts.push(c);
     }
 
-    // Candidate member cards: per character, those not dominated in (point bonus, item bonus, raw power).
-    const baseSum = new Map(
-      members.map((v) => [v, memberBase(m, v, ctx).reduce((a, b, i) => a + b + pctOf(b, v.bandItemPct[i]), 0)]),
-    );
+    // Candidate member cards: per character, drop a card another card beats in every respect that feeds the deck: event
+    // bonuses, every stat, and the same card type, tags and skill categories (song bonus, snap type link, leader
+    // targets), song bonus rates and leader skill. At most 4 are kept per character, the most promising first.
+    const statBase = new Map(members.map((v) => [v, memberBase(m, v, ctx).map((b, i) => b + pctOf(b, v.bandItemPct[i]))]));
+    const baseSum = new Map(members.map((v) => [v, statBase.get(v).reduce((a, b) => a + b, 0)]));
+    const sameList = (x, y) => x.length === y.length && x.every((e) => y.includes(e));
+    const leaderAsGood = (b, a) =>
+      !isUsefulLeader(a) || (a.leaderSkillId === b.leaderSkillId && b.leaderSkillLevel >= a.leaderSkillLevel);
+    const dominates = (b, a) => {
+      if (b.cardType !== a.cardType || !sameList(b.tags, a.tags) || !sameList(b.liveSkillCategories, a.liveSkillCategories)) return false;
+      if (b.musicTypeRate < a.musicTypeRate || b.musicTagRate < a.musicTagRate || !leaderAsGood(b, a)) return false;
+      const ea = ctx.memberBonus.get(a), eb = ctx.memberBonus.get(b);
+      const sa = statBase.get(a), sb = statBase.get(b);
+      if (eb.point < ea.point || eb.item < ea.item || sb.some((x, i) => x < sa[i])) return false;
+      const gt = eb.point > ea.point || eb.item > ea.item || sb.some((x, i) => x > sa[i]) ||
+        b.musicTypeRate > a.musicTypeRate || b.musicTagRate > a.musicTagRate || b.leaderSkillLevel > a.leaderSkillLevel;
+      return gt || !leaderAsGood(a, b) || b.id < a.id;
+    };
     const byChar = new Map();
     for (const v of members) {
       if (!byChar.has(v.characterId)) byChar.set(v.characterId, []);
@@ -707,16 +721,9 @@
     }
     const candidates = [];
     for (const list of byChar.values()) {
-      const kept = list.filter((a) => {
-        const ea = ctx.memberBonus.get(a);
-        return !list.some((b) => {
-          if (b === a) return false;
-          const eb = ctx.memberBonus.get(b);
-          const ge = eb.point >= ea.point && eb.item >= ea.item && baseSum.get(b) >= baseSum.get(a);
-          const gt = eb.point > ea.point || eb.item > ea.item || baseSum.get(b) > baseSum.get(a);
-          return ge && (gt || b.id < a.id) && a.leaderSkillId === b.leaderSkillId ? true : ge && gt && !isUsefulLeader(a);
-        });
-      });
+      const kept = list.filter((a) => !list.some((b) => b !== a && dominates(b, a)));
+      const bonusOf = (v) => ctx.memberBonus.get(v).point * W.point + ctx.memberBonus.get(v).item * W.item;
+      kept.sort((a, b) => bonusOf(b) - bonusOf(a) || baseSum.get(b) - baseSum.get(a));
       candidates.push(kept.slice(0, 4));
     }
     function isUsefulLeader(v) {
