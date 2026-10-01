@@ -25,7 +25,7 @@
     difficulties: ["easy", "normal", "hard", "expert"],
     objective: "points",
     topK: 5,
-    powerCal: 1.023,
+    powerCal: 1.0,
     scoreCal: 1.0,
     importMaxLevel: false,
     songSort: "live",
@@ -1222,7 +1222,7 @@
           <label class="field"><span>T.G.W CARD 等級</span><input type="number" id="vip" min="1" max="30" value="${p.vipRank || 1}"></label>
           <label><input type="checkbox" id="eventParam" ${p.eventParameters ? "checked" : ""}> 計入活動「數值」加成</label>
         </div>
-        <p class="note">模型有角色等級、強化樂團與 T.G.W CARD 加成，其餘差距由綜合力校正補上。預設 1.023 是在沒填角色等級時，用你兩次截圖（107,679、135,778）算出來的；填好下面的等級後，建議在計算頁用一張編成截圖重新校正。
+        <p class="note">模型有角色等級、強化樂團與 T.G.W CARD 加成，其餘差距由綜合力校正補上。填好角色等級和 T.G.W CARD 等級後模型與遊戲完全一致（378,423 實測），校正應為 1.000。
         分數校正 1.0 表示不計演出技能；實測一場後可在結果卡片上回報，讓工具自動算。</p>
       </div>
       <div class="panel">

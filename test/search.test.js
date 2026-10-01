@@ -28,12 +28,15 @@ assert.strictEqual(pay.cp.get(3) * rate, 60);
 assert.strictEqual(E.eventPoints(10000, rate, pay.points.get(4)), 1050);
 assert.strictEqual(E.eventItems(pay.items.get(4), 17600, rate), 1738);
 assert.strictEqual(pay.cp.get(4) * rate, 75);
+// Solo B on 夢現妄想世界 EXPERT at +80% / +150% (results/IMG_0040): 945 pt / 1575 items / 75 CP.
+assert.strictEqual(E.eventPoints(8000, rate, pay.points.get(4)), 945);
+assert.strictEqual(E.eventItems(pay.items.get(4), 15000, rate), 1575);
 // Room thresholds for 5 players are 5 × base; TearJerker B needs a room total of 20638445.
 assert.strictEqual(E.battleRequiredScore(4127689, 5), 20638445);
 {
   const input = {
     master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
-    perPowerByScore: perPower, maxLevel: 27, powerCalibration: 1.023, boosts: 3, topK: 1, musicIds: [100094],
+    perPowerByScore: perPower, maxLevel: 27, powerCalibration: 1.0, boosts: 3, topK: 1, musicIds: [100094],
     now: new Date("2026-10-01T12:00:00+08:00"),
   };
   const solo = E.search(input).results[0];
@@ -59,7 +62,7 @@ for (const mode of ["normal", "challenge"]) {
     player: roster.player,
     perPowerByScore: perPower,
     maxLevel: 27,
-    powerCalibration: 1.023,
+    powerCalibration: 1.0,
     calibration: 1.0,
     boosts: mode === "challenge" ? 200 : 3,
     topK: 5,
@@ -80,7 +83,7 @@ for (const mode of ["normal", "challenge"]) {
   const t0 = Date.now();
   const plan = E.planEvent({
     master: m, event, members: roster.members, snaps: roster.snaps, player: roster.player, perPowerByScore: perPower,
-    maxLevel: 27, powerCalibration: 1.023, calibration: 1.0, boosts: 3, topK: 5, now: new Date("2026-10-01T12:00:00+08:00"),
+    maxLevel: 27, powerCalibration: 1.0, calibration: 1.0, boosts: 3, topK: 5, now: new Date("2026-10-01T12:00:00+08:00"),
   });
   console.log(`== plan (${Date.now() - t0} ms): 1 CP = ${plan.cpValue.toFixed(2)} pt`);
   for (const d of plan.normal.results) {
@@ -99,7 +102,7 @@ for (const mode of ["normal", "challenge"]) {
   const t0 = Date.now();
   const input = {
     master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
-    perPowerByScore: perPower, lengthByScore: E.chartLengthsFromMusicData(md), maxLevel: 27, powerCalibration: 1.023,
+    perPowerByScore: perPower, lengthByScore: E.chartLengthsFromMusicData(md), maxLevel: 27, powerCalibration: 1.0,
     calibration: 1.0, boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
   };
   const out = E.search({ ...input, compareSongs: true });
@@ -125,7 +128,7 @@ for (const mode of ["normal", "challenge"]) {
   const lengths = E.chartLengthsFromMusicData(md);
   const input = {
     master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
-    perPowerByScore: perPower, lengthByScore: lengths, maxLevel: 27, powerCalibration: 1.023,
+    perPowerByScore: perPower, lengthByScore: lengths, maxLevel: 27, powerCalibration: 1.0,
     calibration: 1.0, boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
   };
   const perLive = E.search(input).results[0];

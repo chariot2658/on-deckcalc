@@ -10,14 +10,29 @@ for (const t of E.TABLES) raw[t] = JSON.parse(fs.readFileSync(path.join(dir, t +
 const m = E.buildMaster(raw, "_traditionalChinese");
 const event = m.events.get(1);
 
-function power(team, player = {}) {
+function power(team, player = {}, musicId = 100015) {
   const members = team.map(([id, level]) => E.memberView(m, { id, level, awake: 1, rank: 1 }, player));
-  const snaps = team.map(([, , sid, slv]) => (sid ? E.snapView(m, { id: sid, level: slv, rank: 1 }) : null));
+  const snaps = team.map(([, , sid, slv, srank]) => (sid ? E.snapView(m, { id: sid, level: slv, rank: srank || 1 }) : null));
   const ctx = E.makeContext(m, player, event._id, members, snaps.filter(Boolean));
-  return E.deckPower(m, members, snaps, E.musicView(m, 100015), ctx);
+  return E.deckPower(m, members, snaps, E.musicView(m, musicId), ctx);
 }
 
-// [member id, level, snap id, snap level]; slot 2 (index 2) is the leader.
+// Character ranks of 2026-10-02 (my_screenshots/my_player_ranks), as in presets/my-roster.json.
+const ranks20261002 = {
+  1: 9, 2: 6, 3: 6, 4: 6, 5: 5, 6: 7, 7: 7, 8: 7, 9: 7, 10: 9, 11: 8, 12: 6, 13: 8, 14: 7, 15: 6,
+  16: 9, 17: 5, 18: 6, 19: 5, 20: 5, 21: 10, 22: 8, 23: 8, 24: 7, 25: 7,
+};
+
+// Exact: with character ranks and T.G.W CARD (VIP) rank 4 the model equals the game (results/IMG_0038, 夢現妄想世界).
+{
+  const team = [[32, 40, 56, 50], [59, 50, 63, 50], [60, 50, 60, 70, 3], [11, 30, 37, 40], [39, 40, 61, 70, 3]];
+  const p = power(team, { vipRank: 4, characterRanks: ranks20261002 }, 100054);
+  console.log("IMG_0038 (378423) model", p, "(exact)");
+  require("assert").strictEqual(p, 378423);
+}
+
+// Older screenshots, taken with lower character ranks than recorded; no account bonuses, so the ratio is the gap.
+// [member id, level, snap id, snap level, snap rank]; slot 2 (index 2) is the leader.
 const cases = [
   {
     name: "IMG_0017 (107679)",
