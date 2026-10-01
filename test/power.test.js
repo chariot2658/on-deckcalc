@@ -10,10 +10,10 @@ for (const t of E.TABLES) raw[t] = JSON.parse(fs.readFileSync(path.join(dir, t +
 const m = E.buildMaster(raw, "_traditionalChinese");
 const event = m.events.get(1);
 
-function power(team, player = {}, musicId = 100015) {
+function power(team, player = {}, musicId = 100015, mode = "normal") {
   const members = team.map(([id, level]) => E.memberView(m, { id, level, awake: 1, rank: 1 }, player));
   const snaps = team.map(([, , sid, slv, srank]) => (sid ? E.snapView(m, { id: sid, level: slv, rank: srank || 1 }) : null));
-  const ctx = E.makeContext(m, player, event._id, members, snaps.filter(Boolean));
+  const ctx = E.makeContext(m, player, event._id, members, snaps.filter(Boolean), mode);
   return E.deckPower(m, members, snaps, E.musicView(m, musicId), ctx);
 }
 
@@ -29,6 +29,17 @@ const ranks20261002 = {
   const p = power(team, { vipRank: 4, characterRanks: ranks20261002 }, 100054);
   console.log("IMG_0038 (378423) model", p, "(exact)");
   require("assert").strictEqual(p, 378423);
+}
+
+// Exact: a challenge live adds the event parameter bonus (type 2) to the power, which normal lives do not
+// (results/IMG_0041, 夢我夢中 challenge deck, 244053; character ranks as synced from the browser on 2026-10-02).
+{
+  const ranks = { ...ranks20261002, 9: 8, 11: 9, 12: 7 };
+  const team = [[11, 30, 61, 70, 3], [12, 30, 56, 50], [39, 40, 63, 50], [13, 30, 13, 50, 3], [15, 30, 37, 40]];
+  const player = { vipRank: 4, characterRanks: ranks };
+  const p = power(team, player, 100109, "challenge");
+  console.log("IMG_0041 (244053) model", p, "(exact, challenge)", "without the parameter bonus", power(team, player, 100109));
+  require("assert").strictEqual(p, 244053);
 }
 
 // Older screenshots, taken with lower character ranks than recorded; no account bonuses, so the ratio is the gap.

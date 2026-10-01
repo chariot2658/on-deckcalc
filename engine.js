@@ -420,7 +420,7 @@
   }
 
   /** Player-level context shared by every deck. */
-  function makeContext(m, player, eventId, memberViews, snapViews) {
+  function makeContext(m, player, eventId, memberViews, snapViews, mode) {
     const effects = eventId ? eventEffects(m, eventId) : [];
     const ranks = (player && player.characterRanks) || {};
     let totalRank = 0;
@@ -435,9 +435,10 @@
       memberBonus: new Map(),
       snapBonus: new Map(),
     };
-    // The parameter bonus (type 2) is not in the in-game formation power nor in a solo live's score (checked against
-    // screenshots), so it is off unless asked for.
-    const withParam = !!player.eventParameters;
+    // The parameter bonus (type 2) is not in a normal live's formation power nor its solo score (results/IMG_0038,
+    // IMG_0040), but a challenge live applies it to both (results/IMG_0041: 244053 shown = model with it). Normal lives
+    // count it only when asked for.
+    const withParam = mode === "challenge" || !!player.eventParameters;
     const bonus = (v) => {
       const b = cardEventBonus(effects, v);
       if (!withParam) b.param = 0;
@@ -654,7 +655,7 @@
     const exclude = new Set((input.excludeMemberIds || []).map(Number));
     const members = input.members.filter((o) => !exclude.has(Number(o.id))).map((o) => memberView(m, o, player)).filter(Boolean);
     const snaps = input.snaps.map((o) => snapView(m, o)).filter(Boolean);
-    const ctx = makeContext(m, player, event._id, members, snaps);
+    const ctx = makeContext(m, player, event._id, members, snaps, mode);
     const pay = payoff(m, event, mode);
     const rate = boostRate(m, mode, input.boosts || 0);
     const W = input.objective === "items" ? { point: 1, item: 1e6 } : { point: 1e6, item: 1 };

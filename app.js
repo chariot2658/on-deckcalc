@@ -253,7 +253,7 @@
         <td class="num tag-param">${range(vals[2])}</td></tr>`)
       .join("");
     return `<table class="rules"><thead><tr><th>對象</th><th>條件</th><th>活動點數</th><th>活動道具</th><th>數值</th></tr></thead><tbody>${body}</tbody></table>
-      <p class="note">數值是 rank 1 → rank 5 的加成，同一張卡符合多個條件時會疊加。成員卡的加成決定活動點數，快照的加成決定活動道具（已用遊戲結算畫面驗證）。「數值」加成目前沒有反映在遊戲顯示的綜合力與分數上，預設不計入。</p>`;
+      <p class="note">數值是 rank 1 → rank 5 的加成，同一張卡符合多個條件時會疊加。成員卡的加成決定活動點數，快照的加成決定活動道具（已用遊戲結算畫面驗證）。「數值」加成只在挑戰 Live 反映在遊戲顯示的綜合力與分數上（已驗證），一般 Live 預設不計入。</p>`;
   }
 
   // --- calc tab ---
@@ -1220,9 +1220,10 @@
           <label class="field"><span>綜合力校正（遊戲顯示 ÷ 模型）</span><input type="number" step="0.001" id="powerCal" value="${s.powerCal}"></label>
           <label class="field"><span>分數校正（技能與準度）</span><input type="number" step="0.001" id="scoreCal" value="${s.scoreCal}"></label>
           <label class="field"><span>T.G.W CARD 等級</span><input type="number" id="vip" min="1" max="30" value="${p.vipRank || 1}"></label>
-          <label><input type="checkbox" id="eventParam" ${p.eventParameters ? "checked" : ""}> 計入活動「數值」加成</label>
+          <label><input type="checkbox" id="eventParam" ${p.eventParameters ? "checked" : ""}> 一般 Live 也計入活動「數值」加成</label>
         </div>
         <p class="note">模型有角色等級、強化樂團與 T.G.W CARD 加成，其餘差距由綜合力校正補上。填好角色等級和 T.G.W CARD 等級後模型與遊戲完全一致（378,423 實測），校正應為 1.000。
+        活動「數值」加成在挑戰 Live 一律計入（244,053 實測），一般 Live 不計入，除非勾選上面的選項。
         分數校正 1.0 表示不計演出技能；實測一場後可在結果卡片上回報，讓工具自動算。</p>
       </div>
       <div class="panel">
