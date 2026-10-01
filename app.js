@@ -27,6 +27,7 @@
     topK: 5,
     powerCal: 1.023,
     scoreCal: 1.0,
+    importMaxLevel: false,
   };
 
   const state = {
@@ -829,10 +830,37 @@
     }
   }
 
+  /**
+   * What applying an import entry writes: {level, awake} for a member, {level, rank} for a snap, or null to leave a
+   * registered card alone. Awakening and snap rank are raised only as far as the level read needs (they are not
+   * visible in the list screens); with "importMaxLevel" the level then goes to the cap of that awakening/rank.
+   */
+  function importTarget(e) {
+    const m = state.master;
+    const toMax = state.settings.importMaxLevel;
+    if (e.kind === "member") {
+      const lim = Engine.memberLimits(m, m.memberCards.get(e.id));
+      const own = state.roster.members[e.id];
+      if (own && !e.level && !toMax) return null;
+      let awake = own ? own.awake || 1 : 1;
+      while (awake < lim.maxAwake && lim.limit(awake) < (e.level || 1)) awake++;
+      const level = toMax ? lim.limit(awake) : e.level || 1;
+      return own && own.level === level && (own.awake || 1) === awake ? null : { level, awake };
+    }
+    const sc = m.snaps.get(e.id);
+    const own = state.roster.snaps[e.id];
+    if (own && !e.level && !toMax) return null;
+    let rank = own ? own.rank || 1 : 1;
+    while (rank < 5 && Engine.snapLimit(m, sc, rank) < (e.level || 1)) rank++;
+    const level = toMax ? Engine.snapLimit(m, sc, rank) : e.level || 1;
+    return own && own.level === level && (own.rank || 1) === rank ? null : { level, rank };
+  }
+
   function importStatus(e) {
     const own = e.kind === "member" ? state.roster.members[e.id] : state.roster.snaps[e.id];
-    if (!own) return '<span class="good">新增</span>';
-    if (e.level && own.level !== e.level) return `<span class="warn">Lv ${own.level} → ${e.level}</span>`;
+    const t = importTarget(e);
+    if (!own) return `<span class="good">新增${t.level !== e.level ? ` Lv ${t.level}` : ""}</span>`;
+    if (t && own.level !== t.level) return `<span class="warn">Lv ${own.level} → ${t.level}</span>`;
     return '<span class="muted">已登錄</span>';
   }
 
@@ -903,6 +931,7 @@
         ${groups}
         <div class="row imp-actions">
           <button id="imp-apply" ${chosen ? "" : "disabled"}>套用 ${chosen} 張到清單</button>
+          <label><input type="checkbox" id="imp-max" ${state.settings.importMaxLevel ? "checked" : ""}> 等級直接設成上限（目前特訓／Rank 能升到的最高等，方便先排隊伍再升級）</label>
           <label><input type="checkbox" id="imp-remove" ${imp.removeMissing ? "checked" : ""}> 同時移除清單裡、截圖中沒出現的${[...new Set(imp.shots.filter((s) => s.kind).map((s) => KIND_LABEL[s.kind]))].join("和")}（截圖涵蓋全部持有卡時才勾）</label>
           <button class="ghost" id="imp-clear">清除結果</button>
         </div>
@@ -938,6 +967,11 @@
           renderImport();
         };
     });
+    $("#imp-max", el).onchange = (ev) => {
+      state.settings.importMaxLevel = ev.target.checked;
+      saveSettings();
+      renderImport();
+    };
     $("#imp-remove", el).onchange = (ev) => (imp.removeMissing = ev.target.checked);
     $("#imp-apply", el).onclick = applyImport;
     $("#imp-clear", el).onclick = () => {
@@ -949,44 +983,20 @@
   }
 
   function applyImport() {
-    const m = state.master;
     const chosen = [...imp.found.values()].filter((e) => e.include);
     const seen = { member: new Set(), snap: new Set() };
     let added = 0, updated = 0, removed = 0;
     for (const e of chosen) {
       seen[e.kind].add(e.id);
-      if (e.kind === "member") {
-        const lim = Engine.memberLimits(m, m.memberCards.get(e.id));
-        const awakeFor = (lv, a) => {
-          while (a < lim.maxAwake && lim.limit(a) < lv) a++;
-          return a;
-        };
-        const own = state.roster.members[e.id];
-        if (!own) {
-          state.roster.members[e.id] = { level: e.level || 1, awake: awakeFor(e.level || 1, 1), rank: 1 };
-          added++;
-        } else if (e.level && e.level !== own.level) {
-          own.level = e.level;
-          own.awake = awakeFor(e.level, own.awake || 1);
-          delete own.guess;
-          updated++;
-        }
-      } else {
-        const sc = m.snaps.get(e.id);
-        const rankFor = (lv, r) => {
-          while (r < 5 && Engine.snapLimit(m, sc, r) < lv) r++;
-          return r;
-        };
-        const own = state.roster.snaps[e.id];
-        if (!own) {
-          state.roster.snaps[e.id] = { level: e.level || 1, rank: rankFor(e.level || 1, 1) };
-          added++;
-        } else if (e.level && e.level !== own.level) {
-          own.level = e.level;
-          own.rank = rankFor(e.level, own.rank || 1);
-          delete own.guess;
-          updated++;
-        }
+      const list = e.kind === "member" ? state.roster.members : state.roster.snaps;
+      const t = importTarget(e);
+      if (!list[e.id]) {
+        list[e.id] = e.kind === "member" ? { ...t, rank: 1 } : t;
+        added++;
+      } else if (t) {
+        Object.assign(list[e.id], t);
+        delete list[e.id].guess;
+        updated++;
       }
     }
     if (imp.removeMissing) {
@@ -1004,7 +1014,7 @@
     imp.found.clear();
     imp.shots = [];
     imp.removeMissing = false;
-    imp.msg = `已套用：新增 ${added} 張、更新等級 ${updated} 張` + (removed ? `、移除 ${removed} 張` : "") + "。";
+    imp.msg = `已套用：新增 ${added} 張、更新 ${updated} 張` + (removed ? `、移除 ${removed} 張` : "") + "。";
     renderMembers();
     renderSnaps();
     renderCalc();
