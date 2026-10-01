@@ -29,6 +29,7 @@
     scoreCal: 1.0,
     importMaxLevel: false,
     songSort: "live",
+    songPick: "live",
     songOverhead: 40,
     multi: false,
     multiPlayers: 5,
@@ -311,6 +312,14 @@
             <select id="cp">${[200, 400, 800, 1600].map((v) => `<option ${v === s.cp ? "selected" : ""}>${v}</option>`).join("")}</select></label>
           <label class="field"><span>可穩定打的最高等級</span><input type="number" id="maxLevel" min="1" max="40" value="${s.maxLevel}"></label>
           <div class="field"><span>難度</span><div class="chips">${diffChips}</div></div>
+          <div class="field"><span>選歌</span>
+            <div class="chips">
+              <label><input type="radio" name="songPick" value="live" ${s.songPick !== "minute" ? "checked" : ""}>每場收益最高</label>
+              <label><input type="radio" name="songPick" value="minute" ${s.songPick === "minute" ? "checked" : ""}>每分鐘收益最高</label>
+            </div>
+          </div>
+          <label class="field" ${s.songPick === "minute" ? "" : "hidden"}><span>每場額外時間（載入＋結算，秒）</span>
+            <input type="number" id="pickOverhead" min="0" max="300" value="${s.songOverhead}" style="width:80px"></label>
           <div class="field"><span>優先</span>
             <div class="chips">
               <label><input type="radio" name="objective" value="points" ${s.objective === "points" ? "checked" : ""}>活動點數</label>
@@ -342,6 +351,16 @@
       s.difficulties = [...el.querySelectorAll("input[name=diff]:checked")].map((x) => x.value);
       saveSettings();
     }));
+    el.querySelectorAll("input[name=songPick]").forEach((r) => (r.onchange = () => {
+      s.songPick = r.value;
+      s.songSort = r.value;
+      saveSettings();
+      renderCalc();
+    }));
+    $("#pickOverhead").onchange = (e) => {
+      s.songOverhead = clamp(Number(e.target.value), 0, 300);
+      saveSettings();
+    };
     el.querySelectorAll("input[name=multi]").forEach((r) => (r.onchange = () => {
       s.multi = r.value === "multi";
       saveSettings();
@@ -393,13 +412,14 @@
       topK: s.topK,
       compareSongs: true,
       multi: s.mode === "normal" && s.multi ? { players: s.multiPlayers, othersScore: s.multiOthersAvg * (s.multiPlayers - 1) } : null,
+      perMinute: s.songPick === "minute" ? { overhead: s.songOverhead } : null,
     };
     try {
       // Normal lives also earn CP (by rank only). Value it at what the best challenge deck turns it into, so the
       // ranking weighs rank (CP) and point bonus together.
       let cpPlan = null;
       if (s.mode === "normal" && s.objective === "points") {
-        const ch = await runSearch({ ...input, mode: "challenge", boosts: 200, topK: 1, compareSongs: false }, ev._id);
+        const ch = await runSearch({ ...input, mode: "challenge", boosts: 200, topK: 1, compareSongs: false, perMinute: null }, ev._id);
         const best = ch.results && ch.results[0];
         if (best) {
           cpPlan = { value: best.points / 200, rankName: best.rankName, chart: best.chart, pointBonus: best.pointBonus };
@@ -454,6 +474,13 @@
           ${
             out.cpPlan && d.cp
               ? `<div class="small">CP 換算約 ${fmt(Math.round(d.cpPoints))} pt，合計約 <b class="points">${fmt(Math.round(d.points + d.cpPoints))} pt</b></div>`
+              : ""
+          }
+          ${
+            d.minutes
+              ? `<div class="small">每分鐘約 <b>${fmt(Math.round((out.input.objective === "items" ? d.items : d.points + (d.cpPoints || 0)) / d.minutes))} ${
+                  out.input.objective === "items" ? "道具" : "pt"
+                }</b>（一場約 ${mmss(d.minutes * 60)}，含載入＋結算 ${fmt(out.input.perMinute.overhead)} 秒）</div>`
               : ""
           }
           <div class="muted small">${esc(label)} · ${unit} · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}</div></div>
@@ -537,6 +564,10 @@
           out.cpPlan
             ? `<br>一般 Live 拿到的 CP 只看評級（不吃加成），排名時已換算成 pt 一起比較：用目前最佳的挑戰隊（${esc(out.cpPlan.rankName)}、點數加成 +${pct(out.cpPlan.pointBonus)}、${esc(musicTitle(out.cpPlan.chart.musicId))} ${DIFF_NAMES[out.cpPlan.chart.difficulty]}）清 CP，1 CP ≈ ${out.cpPlan.value.toFixed(1)} pt。挑戰隊請切到「挑戰 Live」模式查看。`
             : ""
+        }${
+          out.input.perMinute
+            ? `<br>選歌依「每分鐘收益」：每支隊伍都改選每分鐘（歌曲長度＋每場額外 ${fmt(out.input.perMinute.overhead)} 秒）賺最多的歌和評級，所以可能故意選短歌、拿低一級的評級。LB 有限、會用完的話，請改回「每場收益最高」。`
+            : ""
         }${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>
       </div>${cards || '<div class="panel">沒有結果。</div>'}${hasSongs ? `<div class="panel" id="songs"></div><div id="song-deck"></div>` : ""}`;
     bindCalibration(el, decks);
@@ -600,7 +631,7 @@
           <label><input type="radio" name="songSort" value="minute" ${s.songSort === "minute" ? "checked" : ""}>每分鐘</label>
         </div></div>
         <label class="field"><span>每場額外時間（載入＋結算，秒）</span>
-          <input type="number" id="songOverhead" min="0" max="300" value="${s.songOverhead}" style="width:80px"></label>
+          <input type="number" id="songOverhead" min="0" max="300" value="${s.songOverhead}" style="width:80px">${out.input.perMinute ? '<span class="muted small">（上方推薦隊伍要重新計算才會套用）</span>' : ""}</label>
       </div>
       <div class="table-scroll"><table class="rules songs">
         <thead><tr><th>#</th><th>歌曲</th><th>評級</th><th class="num">每場（${u}）</th><th class="num">長度</th><th class="num">每分鐘（${u}）</th><th class="num">餘裕</th><th class="num">下一級需要</th></tr></thead>

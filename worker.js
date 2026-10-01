@@ -25,6 +25,7 @@ function slim(d) {
     cp: d.cp,
     cpPoints: d.cpPoints,
     estScore: d.estScore,
+    minutes: d.minutes || null,
   };
 }
 

@@ -609,7 +609,9 @@
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
    *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds,
    *         multi: {players, othersScore} for a multiplayer (激奏) normal live: the rank is the room's, reached when the
-   *         player's score plus othersScore (the other players' total) meets the battle threshold}
+   *         player's score plus othersScore (the other players' total) meets the battle threshold,
+   *         perMinute: {overhead} to choose the chart and rank paying the most per minute (song length + overhead
+   *         seconds) instead of per live; a deck's `score` is then per minute and `minutes` is one live's duration}
    */
   function search(input) {
     const t0 = Date.now();
@@ -636,6 +638,8 @@
         ? c.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
         : c.thresholds;
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
+    const perMinute = input.perMinute ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
+    const minutesOf = (c) => ((c.lengthSec || 0) + (perMinute ? perMinute.overhead : 0)) / 60;
 
     const musicIds = mode === "challenge"
       ? m.t.MasterChallengeMusic.filter((r) => r._eventId === event._id).map((r) => r._liveMusicId)
@@ -751,16 +755,52 @@
         for (const r of rankList) if (need.get(r).power <= power) return r;
         return rankList[rankList.length - 1];
       };
-      return { need, rankList, rankFor };
+      // Per minute: per rank, the charts not beaten by one needing no more power and taking no longer, by power.
+      let frontier = null;
+      if (perMinute) {
+        frontier = new Map();
+        for (const r of rankList) {
+          const opts = [];
+          for (const c of list) {
+            const th = ownThresholds(c).find((x) => x[0] === r);
+            if (th && c.lengthSec) opts.push({ power: Math.ceil(th[1] / (c.perPower * calib) / pcal), chart: c, min: minutesOf(c) });
+          }
+          opts.sort((a, b) => a.power - b.power || a.min - b.min || a.chart.level - b.chart.level);
+          const kept = [];
+          for (const o of opts) if (!kept.length || o.min < kept[kept.length - 1].min) kept.push(o);
+          frontier.set(r, kept);
+        }
+      }
+      return { need, rankList, rankFor, frontier };
     }
-    const upperBound = (s, bf, rt) => {
-      const r = rt.rankFor(bf.f + s.g);
-      return scoreOf(
-        eventPoints(s.pt + maxSnapPoint, rate, pay.points.get(r) || 0),
-        eventItems(pay.items.get(r) || 0, s.it + maxSnapItem, rate),
-        r,
-      );
-    };
+    // Rank and chart a deck of `power` with bonuses pb/ib plays: the best rank (per live), or the best rank and chart
+    // pair per minute. Monotone in power and bonuses, so it also gives the upper bounds.
+    function choose(rt, power, pb, ib) {
+      const at = (r, chart, needPower, min) => {
+        const points = eventPoints(pb, rate, pay.points.get(r) || 0);
+        const items = eventItems(pay.items.get(r) || 0, ib, rate);
+        const sc = scoreOf(points, items, r);
+        return { rank: r, chart, needPower, points, items, sc: min ? sc / min : sc };
+      };
+      if (rt.frontier) {
+        let best = null;
+        for (const r of rt.rankList) {
+          let o = null;
+          for (const x of rt.frontier.get(r)) {
+            if (x.power > power) break;
+            o = x;
+          }
+          if (!o) continue;
+          const v = at(r, o.chart, o.power, o.min);
+          if (!best || v.sc > best.sc) best = v;
+        }
+        if (best) return best;
+      }
+      const r = rt.rankFor(power);
+      const n = rt.need.get(r);
+      return at(r, n.chart, n.power, rt.frontier && n.chart.lengthSec ? minutesOf(n.chart) : 0);
+    }
+    const upperBound = (s, bf, rt) => choose(rt, bf.f + s.g, s.pt + maxSnapPoint, s.it + maxSnapItem).sc;
     // The exact best deck of a member set: leader from bestF, snaps from the slot-mask DP.
     function evaluate(s, bf, rt, music) {
       evaluated++;
@@ -770,13 +810,10 @@
       let best = null;
       for (const st of snapStates(G, snapPoint, snapItem, snaps.length)) {
         const power = bf.f + st.power;
-        const rank = rt.rankFor(power);
         const pb = s.pt + st.pt;
         const ib = s.it + st.it;
-        const points = eventPoints(pb, rate, pay.points.get(rank) || 0);
-        const items = eventItems(pay.items.get(rank) || 0, ib, rate);
-        const sc = scoreOf(points, items, rank);
-        if (!best || sc > best.sc || (sc === best.sc && power > best.power)) best = { sc, power, rank, pb, ib, points, items, st };
+        const v = choose(rt, power, pb, ib);
+        if (!best || v.sc > best.sc || (v.sc === best.sc && power > best.power)) best = { ...v, power, pb, ib, st };
       }
       const snapObjs = pickToSnaps(best.st.pick).map((j) => (j === null ? null : snaps[j]));
       const deck = {
@@ -786,9 +823,9 @@
         displayPower: Math.floor(best.power * pcal),
         rank: best.rank,
         rankName: RANK_NAMES[best.rank] || String(best.rank),
-        chart: rt.need.get(best.rank).chart,
-        needPower: rt.need.get(best.rank).power,
-        needDisplayPower: Math.ceil(rt.need.get(best.rank).power * pcal),
+        chart: best.chart,
+        needPower: best.needPower,
+        needDisplayPower: Math.ceil(best.needPower * pcal),
         pointBonus: best.pb,
         itemBonus: best.ib,
         points: best.points,
@@ -798,12 +835,21 @@
         score: best.sc,
         music,
       };
+      // Next rank: on any chart of the table per live, on the same chart per minute.
       const nextRank = rt.rankList.slice().reverse().find((r) => r > best.rank);
       if (nextRank) {
-        deck.nextRank = nextRank;
-        deck.nextRankName = RANK_NAMES[nextRank];
-        deck.nextNeedDisplayPower = Math.ceil(rt.need.get(nextRank).power * pcal);
+        let need = rt.need.get(nextRank).power;
+        if (perMinute) {
+          const th = ownThresholds(best.chart).find((x) => x[0] === nextRank);
+          need = th ? Math.ceil(th[1] / (best.chart.perPower * calib) / pcal) : null;
+        }
+        if (need !== null) {
+          deck.nextRank = nextRank;
+          deck.nextRankName = RANK_NAMES[nextRank];
+          deck.nextNeedDisplayPower = Math.ceil(need * pcal);
+        }
       }
+      if (perMinute) deck.minutes = minutesOf(best.chart);
       deck.estScore = Math.floor(best.power * pcal * deck.chart.perPower * calib);
       return deck;
     }

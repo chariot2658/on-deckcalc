@@ -118,3 +118,27 @@ for (const mode of ["normal", "challenge"]) {
     );
   }
 }
+
+// Per minute: the chart and rank paying the most per (length + overhead). The best deck must be the best song's,
+// a song restricted search must agree, and it must pay at least as much per minute as the per-live pick.
+{
+  const lengths = E.chartLengthsFromMusicData(md);
+  const input = {
+    master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
+    perPowerByScore: perPower, lengthByScore: lengths, maxLevel: 27, powerCalibration: 1.023,
+    calibration: 1.0, boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
+  };
+  const perLive = E.search(input).results[0];
+  const out = E.search({ ...input, perMinute: { overhead: 40 }, compareSongs: true });
+  const best = out.results[0];
+  const pm = (d) => (d.points + d.cp * 22) / (((d.chart.lengthSec || 0) + 40) / 60);
+  assert.ok(Math.abs(best.score / 1e6 - pm(best)) < 1e-6 * pm(best));
+  assert.ok(Math.abs(best.minutes - (best.chart.lengthSec + 40) / 60) < 1e-9);
+  assert.ok(pm(best) >= pm(perLive) - 1e-9, `per minute ${pm(best)} < per-live pick ${pm(perLive)}`);
+  assert.strictEqual(out.songs[0].score, best.score);
+  const one = E.search({ ...input, perMinute: { overhead: 40 }, musicIds: [best.chart.musicId], topK: 1 }).results[0];
+  assert.strictEqual(one.score, best.score);
+  const title = (d) => m.text(m.musics.get(d.chart.musicId)._titleTextID);
+  console.log(`== per minute: per live ${title(perLive)} ${perLive.rankName} ${Math.round(perLive.chart.lengthSec)} s ${Math.round(pm(perLive))}/min` +
+    ` -> ${title(best)} ${best.chart.difficulty} ${best.rankName} ${Math.round(best.chart.lengthSec)} s ${Math.round(pm(best))}/min`);
+}
