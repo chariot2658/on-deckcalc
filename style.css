@@ -243,3 +243,22 @@ textarea { width: 100%; min-height: 120px; font-family: ui-monospace, Consolas, 
   .slot { font-size: 10px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
 }
+
+/* song comparison */
+.table-scroll { overflow-x: auto; }
+table.songs td { vertical-align: top; }
+table.songs th { white-space: nowrap; }
+table.songs th.num { text-align: right; }
+table.songs .song-row { cursor: pointer; }
+table.songs .song-row:hover { background: var(--accent-soft); }
+table.songs .song-row.sel { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.song-best {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--accent);
+  color: #fff;
+  white-space: nowrap;
+}

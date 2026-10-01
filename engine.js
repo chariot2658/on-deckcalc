@@ -439,7 +439,7 @@
   }
 
   /**
-   * Playable charts: {scoreId, musicId, difficulty, level, perPower, thresholds}. perPower is the no-skill score per
+   * Playable charts: {scoreId, musicId, difficulty, level, perPower, thresholds, lengthSec}. perPower is the no-skill score per
    * unit of power (music-data.json offSeeds, Gekisou off, every note Perfect); charts without it are skipped.
    */
   function charts(m, perPowerByScore, opts) {
@@ -459,7 +459,8 @@
         if (opts.difficulties && !opts.difficulties.includes(diff)) continue;
         const per = perPowerByScore.get(sid);
         if (!per) continue;
-        out.push({ scoreId: sid, musicId: mu._id, difficulty: diff, level: sc._musicScoreLevel, perPower: per, thresholds: th });
+        const lengthSec = (opts.lengthByScore && opts.lengthByScore.get(sid)) || null;
+        out.push({ scoreId: sid, musicId: mu._id, difficulty: diff, level: sc._musicScoreLevel, perPower: per, thresholds: th, lengthSec });
       }
     }
     return out;
@@ -587,7 +588,8 @@
    * input: {master, event, mode: "normal"|"challenge", members: [owned], snaps: [owned], player, perPowerByScore,
    *         maxLevel, difficulties, calibration (score multiplier), powerCalibration (in-game / model power),
    *         boosts, objective: "points"|"items", topK, musicIds, fixed: {memberIds, excludeMemberIds},
-   *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn)}
+   *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
+   *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds}
    */
   function search(input) {
     const t0 = Date.now();
@@ -617,6 +619,7 @@
       difficulties: input.difficulties,
       musicIds,
       now: input.now,
+      lengthByScore: input.lengthByScore,
     });
     if (chartList.length === 0) return { error: "no-charts", results: [] };
 
@@ -707,13 +710,10 @@
       }
     }
 
-    const found = [];
-    let evaluated = 0;
-    for (const group of groups.values()) {
-      const music = group.music;
-      // Per rank, the chart of the group needing the least power.
+    // Per rank, the chart needing the least power among `list`; rankFor(power) is the best rank that power reaches.
+    function rankTable(list) {
       const need = new Map();
-      for (const c of group.charts) {
+      for (const c of list) {
         for (const [r, req] of c.thresholds) {
           const p = Math.ceil(req / (c.perPower * calib) / pcal);
           const cur = need.get(r);
@@ -725,6 +725,69 @@
         for (const r of rankList) if (need.get(r).power <= power) return r;
         return rankList[rankList.length - 1];
       };
+      return { need, rankList, rankFor };
+    }
+    const upperBound = (s, bf, rt) => {
+      const r = rt.rankFor(bf.f + s.g);
+      return scoreOf(
+        eventPoints(s.pt + maxSnapPoint, rate, pay.points.get(r) || 0),
+        eventItems(pay.items.get(r) || 0, s.it + maxSnapItem, rate),
+        r,
+      );
+    };
+    // The exact best deck of a member set: leader from bestF, snaps from the slot-mask DP.
+    function evaluate(s, bf, rt, music) {
+      evaluated++;
+      const order = s.vs.slice();
+      [order[bf.leader], order[LEADER_SLOT]] = [order[LEADER_SLOT], order[bf.leader]];
+      const G = order.map((v) => Gm.get(v));
+      let best = null;
+      for (const st of snapStates(G, snapPoint, snapItem, snaps.length)) {
+        const power = bf.f + st.power;
+        const rank = rt.rankFor(power);
+        const pb = s.pt + st.pt;
+        const ib = s.it + st.it;
+        const points = eventPoints(pb, rate, pay.points.get(rank) || 0);
+        const items = eventItems(pay.items.get(rank) || 0, ib, rate);
+        const sc = scoreOf(points, items, rank);
+        if (!best || sc > best.sc || (sc === best.sc && power > best.power)) best = { sc, power, rank, pb, ib, points, items, st };
+      }
+      const snapObjs = pickToSnaps(best.st.pick).map((j) => (j === null ? null : snaps[j]));
+      const deck = {
+        members: order,
+        snaps: snapObjs,
+        power: best.power,
+        displayPower: Math.floor(best.power * pcal),
+        rank: best.rank,
+        rankName: RANK_NAMES[best.rank] || String(best.rank),
+        chart: rt.need.get(best.rank).chart,
+        needPower: rt.need.get(best.rank).power,
+        needDisplayPower: Math.ceil(rt.need.get(best.rank).power * pcal),
+        pointBonus: best.pb,
+        itemBonus: best.ib,
+        points: best.points,
+        items: best.items,
+        cp: cpOf(best.rank),
+        cpPoints: cpOf(best.rank) * cpValue,
+        score: best.sc,
+        music,
+      };
+      const nextRank = rt.rankList.slice().reverse().find((r) => r > best.rank);
+      if (nextRank) {
+        deck.nextRank = nextRank;
+        deck.nextRankName = RANK_NAMES[nextRank];
+        deck.nextNeedDisplayPower = Math.ceil(rt.need.get(nextRank).power * pcal);
+      }
+      deck.estScore = Math.floor(best.power * pcal * deck.chart.perPower * calib);
+      return deck;
+    }
+
+    const found = [];
+    const songs = [];
+    let evaluated = 0;
+    for (const group of groups.values()) {
+      const music = group.music;
+      const rt = rankTable(group.charts);
       const fNo = new Map(allCand.map((v) => [v, slotF(m, v, [0, 0, 0], music, ctx)]));
 
       // Best leader F of each set: simple leaders from precomputed terms, others exactly.
@@ -751,70 +814,49 @@
         return best;
       };
 
-      const scored = sets.map((s) => {
-        const bf = bestF(s.vs);
-        const ubRank = rankFor(bf.f + s.g);
-        const ub = scoreOf(
-          eventPoints(s.pt + maxSnapPoint, rate, pay.points.get(ubRank) || 0),
-          eventItems(pay.items.get(ubRank) || 0, s.it + maxSnapItem, rate),
-          ubRank,
-        );
-        return { s, bf, ub };
-      });
+      const bfs = sets.map((s) => bestF(s.vs));
+      const scored = sets.map((s, i) => ({ s, bf: bfs[i], ub: upperBound(s, bfs[i], rt) }));
       scored.sort((a, b) => b.ub - a.ub);
 
       const groupFound = [];
       let kth = -Infinity;
       for (const { s, bf, ub } of scored) {
         if (groupFound.length >= topK && ub < kth) break;
-        evaluated++;
-        const order = s.vs.slice();
-        [order[bf.leader], order[LEADER_SLOT]] = [order[LEADER_SLOT], order[bf.leader]];
-        const G = order.map((v) => Gm.get(v));
-        let best = null;
-        for (const st of snapStates(G, snapPoint, snapItem, snaps.length)) {
-          const power = bf.f + st.power;
-          const rank = rankFor(power);
-          const pb = s.pt + st.pt;
-          const ib = s.it + st.it;
-          const points = eventPoints(pb, rate, pay.points.get(rank) || 0);
-          const items = eventItems(pay.items.get(rank) || 0, ib, rate);
-          const sc = scoreOf(points, items, rank);
-          if (!best || sc > best.sc || (sc === best.sc && power > best.power)) best = { sc, power, rank, pb, ib, points, items, st };
-        }
-        const snapObjs = pickToSnaps(best.st.pick).map((j) => (j === null ? null : snaps[j]));
-        const deck = {
-          members: order,
-          snaps: snapObjs,
-          power: best.power,
-          displayPower: Math.floor(best.power * pcal),
-          rank: best.rank,
-          rankName: RANK_NAMES[best.rank] || String(best.rank),
-          chart: need.get(best.rank).chart,
-          needPower: need.get(best.rank).power,
-          needDisplayPower: Math.ceil(need.get(best.rank).power * pcal),
-          pointBonus: best.pb,
-          itemBonus: best.ib,
-          points: best.points,
-          items: best.items,
-          cp: cpOf(best.rank),
-          cpPoints: cpOf(best.rank) * cpValue,
-          score: best.sc,
-          music,
-        };
-        const nextRank = rankList.slice().reverse().find((r) => r > best.rank);
-        if (nextRank) {
-          deck.nextRank = nextRank;
-          deck.nextRankName = RANK_NAMES[nextRank];
-          deck.nextNeedDisplayPower = Math.ceil(need.get(nextRank).power * pcal);
-        }
-        deck.estScore = Math.floor(best.power * pcal * deck.chart.perPower * calib);
-        groupFound.push(deck);
+        groupFound.push(evaluate(s, bf, rt, music));
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
         if (groupFound.length > topK) groupFound.length = topK;
         if (groupFound.length >= topK) kth = groupFound[topK - 1].score;
       }
       found.push(...groupFound);
+
+      // Song comparison: the best deck of every song of the group, from the same leader terms. The set with the
+      // highest bound gives a floor; only sets whose bound reaches it can beat it.
+      if (input.compareSongs) {
+        const bySong = new Map();
+        for (const c of group.charts) {
+          if (!bySong.has(c.musicId)) bySong.set(c.musicId, []);
+          bySong.get(c.musicId).push(c);
+        }
+        for (const list of bySong.values()) {
+          const srt = rankTable(list);
+          const ubs = new Float64Array(sets.length);
+          let top = 0;
+          for (let i = 0; i < sets.length; i++) {
+            ubs[i] = upperBound(sets[i], bfs[i], srt);
+            if (ubs[i] > ubs[top]) top = i;
+          }
+          let best = evaluate(sets[top], bfs[top], srt, music);
+          const rest = [];
+          for (let i = 0; i < sets.length; i++) if (i !== top && ubs[i] >= best.score) rest.push(i);
+          rest.sort((a, b) => ubs[b] - ubs[a]);
+          for (const i of rest) {
+            if (ubs[i] < best.score) break;
+            const d = evaluate(sets[i], bfs[i], srt, music);
+            if (d.score > best.score || (d.score === best.score && d.power > best.power)) best = d;
+          }
+          songs.push(best);
+        }
+      }
     }
     found.sort((a, b) => b.score - a.score || b.power - a.power);
     const seen = new Set();
@@ -826,7 +868,8 @@
       results.push(d);
       if (results.length >= topK) break;
     }
-    return { results, rate, payoff: pay, ctx, stats: { sets: sets.length, evaluated, groups: groups.size, ms: Date.now() - t0 } };
+    songs.sort((a, b) => b.score - a.score || b.power - a.power);
+    return { results, songs, rate, payoff: pay, ctx, stats: { sets: sets.length, evaluated, groups: groups.size, ms: Date.now() - t0 } };
   }
 
   /**
@@ -871,10 +914,18 @@
     return out;
   }
 
+  /** Song length in seconds of every chart (scoreId -> seconds), from music-data.json. */
+  function chartLengthsFromMusicData(md) {
+    const out = new Map();
+    for (const s of (md && md.songs) || []) for (const c of s.charts || []) if (c.musicLengthMs) out.set(c.scoreId, c.musicLengthMs / 1000);
+    return out;
+  }
+
   const api = {
     TABLES, RANK_NAMES, buildMaster, memberView, snapView, memberLimits, snapLimit, makeContext, deckPower,
     leaderBonuses, cardEventBonus, eventEffects, describeEventBonus, payoff, boostRate, eventPoints, eventItems,
-    charts, rankThresholds, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, musicView, parseTime,
+    charts, rankThresholds, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
+    parseTime,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Engine = api;

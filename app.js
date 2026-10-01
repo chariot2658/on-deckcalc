@@ -28,6 +28,8 @@
     powerCal: 1.023,
     scoreCal: 1.0,
     importMaxLevel: false,
+    songSort: "live",
+    songOverhead: 40,
   };
 
   const state = {
@@ -36,6 +38,7 @@
     master: null,
     version: null,
     perPower: null,
+    lengths: null,
     worker: null,
     workerReady: null,
     lastResults: null,
@@ -134,6 +137,7 @@
       state.master = Engine.buildMaster(mst.raw, lang);
       state.version = mst;
       state.perPower = md ? Engine.perPowerFromMusicData(md) : new Map();
+      state.lengths = md ? Engine.chartLengthsFromMusicData(md) : new Map();
       $("#data-status").textContent =
         `資料版本 ${String(mst.version).slice(0, 8)} · 更新於 ${new Date(mst.verifiedAt).toLocaleString()}` +
         (md ? "" : " · 譜面資料載入失敗");
@@ -160,7 +164,7 @@
         state.worker.onmessage = (e) => (e.data.type === "ready" ? resolve() : null);
         state.worker.onerror = (e) => reject(e);
       });
-      state.worker.postMessage({ type: "init", raw: slim, lang, perPower: [...state.perPower] });
+      state.worker.postMessage({ type: "init", raw: slim, lang, perPower: [...state.perPower], lengths: [...state.lengths] });
     } catch (e) {
       console.warn("worker unavailable, searching on the main thread", e);
       state.worker = null;
@@ -172,13 +176,9 @@
   async function runSearch(input, eventId) {
     const now = Date.now();
     if (!state.worker) {
-      const out = Engine.search({ ...input, master: state.master, event: state.master.events.get(eventId), perPowerByScore: state.perPower, now: new Date(now) });
-      return {
-        error: out.error,
-        stats: out.stats,
-        rate: out.rate,
-        results: out.results.map((d) => ({ ...d, members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank })), snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)) })),
-      };
+      const out = Engine.search({ ...input, master: state.master, event: state.master.events.get(eventId), perPowerByScore: state.perPower, lengthByScore: state.lengths, now: new Date(now) });
+      const slim = (d) => ({ ...d, members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank })), snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)) });
+      return { error: out.error, stats: out.stats, rate: out.rate, results: out.results.map(slim), songs: (out.songs || []).map(slim) };
     }
     await state.workerReady;
     const id = ++searchSeq;
@@ -365,13 +365,14 @@
       boosts: s.mode === "challenge" ? s.cp : s.boosts,
       objective: s.objective,
       topK: s.topK,
+      compareSongs: true,
     };
     try {
       // Normal lives also earn CP (by rank only). Value it at what the best challenge deck turns it into, so the
       // ranking weighs rank (CP) and point bonus together.
       let cpPlan = null;
       if (s.mode === "normal" && s.objective === "points") {
-        const ch = await runSearch({ ...input, mode: "challenge", boosts: 200, topK: 1 }, ev._id);
+        const ch = await runSearch({ ...input, mode: "challenge", boosts: 200, topK: 1, compareSongs: false }, ev._id);
         const best = ch.results && ch.results[0];
         if (best) {
           cpPlan = { value: best.points / 200, rankName: best.rankName, chart: best.chart, pointBonus: best.pointBonus };
@@ -379,6 +380,7 @@
         }
       }
       const out = await runSearch(input, ev._id);
+      songView.selected = null;
       state.lastResults = { ...out, eventId: ev._id, mode: s.mode, input, cpPlan };
       renderResults(state.lastResults);
     } catch (e) {
@@ -390,83 +392,64 @@
     }
   }
 
-  function renderResults(out) {
-    const el = $("#results");
-    if (!el) return;
-    if (out.error === "no-charts") {
-      el.innerHTML = `<div class="panel warn">沒有符合條件的譜面（或譜面缺少計分資料）。請放寬等級或難度。</div>`;
-      return;
-    }
-    if (out.error === "not-enough-characters") {
-      el.innerHTML = `<div class="panel warn">持有的成員卡不足 5 位不同角色。</div>`;
-      return;
-    }
+  // One deck: rank, payoff, song and the five slots. `label` heads the summary line; `key` finds the deck again for
+  // the calibration button.
+  function deckCard(d, label, key, unit, out) {
     const s = state.settings;
-    const unit = out.mode === "challenge" ? `每次（${s.cp} CP）` : `每場（${out.input.boosts} 個加成道具，倍率 ×${out.rate}）`;
-    const cards = out.results
-      .map((d, i) => {
-        const m = state.master;
-        const mu = d.chart.musicId;
-        const margin = d.displayPower / d.needDisplayPower - 1;
-        const slots = d.members
-          .map((v, k) => {
-            const c = m.memberCards.get(v.id);
-            const sn = d.snaps[k];
-            const sc = sn ? m.snaps.get(sn.id) : null;
-            const b = cardBonus("member", v.id);
-            const sb = sn ? cardBonus("snap", sn.id) : null;
-            return `<div class="slot">
-              ${k === 2 ? '<span class="leader">隊長</span>' : ""}
-              <img class="m-img" loading="lazy" src="${Data.memberThumb(s.region, c._assetID)}" alt="">
-              <div class="nm">${typeDot(c._cardType)} ${esc(cardName(c))}<br><span class="muted">${esc(memberTitle(c))} · Lv${v.level}</span>
-              ${b.point ? `<br><span class="tag-point">點數 +${pct(b.point)}</span>` : ""}</div>
-              ${sc ? `<img class="s-img" loading="lazy" src="${Data.snapThumb(s.region, sc._assetID)}" alt="">
-                <div class="nm">${typeDot(sc._cardType)} ${esc(cardName(sc))}<br><span class="muted">${esc(snapTitle(sc))} · Lv${sn.level}</span>
-                ${sb && sb.item ? `<br><span class="tag-item">道具 +${pct(sb.item)}</span>` : ""}</div>` : `<div class="nm muted">（無快照）</div>`}
-            </div>`;
-          })
-          .join("");
-        return `<div class="result">
-          <div class="result-head">
-            <div class="rank-badge" title="預估評級">${esc(d.rankName)}</div>
-            <div><div class="big"><span class="points">${fmt(d.points)} pt</span>${
-              d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""
-            } · <span class="items">${fmt(d.items)} 道具</span></div>
-              ${
-                out.cpPlan && d.cp
-                  ? `<div class="small">CP 換算約 ${fmt(Math.round(d.cpPoints))} pt，合計約 <b class="points">${fmt(Math.round(d.points + d.cpPoints))} pt</b></div>`
-                  : ""
-              }
-              <div class="muted small">#${i + 1} · ${unit} · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}</div></div>
-            <div style="margin-left:auto;text-align:right">
-              <div><b>${esc(musicTitle(mu))}</b> ${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</div>
-              <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>（${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕
-                <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>）</div>
-              ${d.nextRankName ? `<div class="small muted">${esc(d.nextRankName)} 需要 ${fmt(d.nextNeedDisplayPower)}</div>` : ""}
-              <div class="small muted">預估分數約 ${fmt(d.estScore)}</div>
-            </div>
-          </div>
-          <div class="slots">${slots}</div>
-          <div class="calib">
-            用這隊實際打一場後，可以回報數據校正模型：
-            遊戲顯示綜合力 <input type="number" class="cal-power" style="width:100px">
-            實際分數 <input type="number" class="cal-score" style="width:110px">
-            <button class="small cal-apply" data-i="${i}">校正</button>
-          </div>
+    const m = state.master;
+    const mu = d.chart.musicId;
+    const margin = d.displayPower / d.needDisplayPower - 1;
+    const slots = d.members
+      .map((v, k) => {
+        const c = m.memberCards.get(v.id);
+        const sn = d.snaps[k];
+        const sc = sn ? m.snaps.get(sn.id) : null;
+        const b = cardBonus("member", v.id);
+        const sb = sn ? cardBonus("snap", sn.id) : null;
+        return `<div class="slot">
+          ${k === 2 ? '<span class="leader">隊長</span>' : ""}
+          <img class="m-img" loading="lazy" src="${Data.memberThumb(s.region, c._assetID)}" alt="">
+          <div class="nm">${typeDot(c._cardType)} ${esc(cardName(c))}<br><span class="muted">${esc(memberTitle(c))} · Lv${v.level}</span>
+          ${b.point ? `<br><span class="tag-point">點數 +${pct(b.point)}</span>` : ""}</div>
+          ${sc ? `<img class="s-img" loading="lazy" src="${Data.snapThumb(s.region, sc._assetID)}" alt="">
+            <div class="nm">${typeDot(sc._cardType)} ${esc(cardName(sc))}<br><span class="muted">${esc(snapTitle(sc))} · Lv${sn.level}</span>
+            ${sb && sb.item ? `<br><span class="tag-item">道具 +${pct(sb.item)}</span>` : ""}</div>` : `<div class="nm muted">（無快照）</div>`}
         </div>`;
       })
       .join("");
-    el.innerHTML = `<div class="panel">
-        <h2>結果</h2>
-        <p class="note">分數以「全 Perfect、不含演出技能」的計分資料 × 分數校正 ${s.scoreCal.toFixed(3)} 估算，綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
-        餘裕小於 3% 的隊伍，實際可能差一級。${
-          out.cpPlan
-            ? `<br>一般 Live 拿到的 CP 只看評級（不吃加成），排名時已換算成 pt 一起比較：用目前最佳的挑戰隊（${esc(out.cpPlan.rankName)}、點數加成 +${pct(out.cpPlan.pointBonus)}、${esc(musicTitle(out.cpPlan.chart.musicId))} ${DIFF_NAMES[out.cpPlan.chart.difficulty]}）清 CP，1 CP ≈ ${out.cpPlan.value.toFixed(1)} pt。挑戰隊請切到「挑戰 Live」模式查看。`
-            : ""
-        }搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>
-      </div>${cards || '<div class="panel">沒有結果。</div>'}`;
+    return `<div class="result">
+      <div class="result-head">
+        <div class="rank-badge" title="預估評級">${esc(d.rankName)}</div>
+        <div><div class="big"><span class="points">${fmt(d.points)} pt</span>${
+          d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""
+        } · <span class="items">${fmt(d.items)} 道具</span></div>
+          ${
+            out.cpPlan && d.cp
+              ? `<div class="small">CP 換算約 ${fmt(Math.round(d.cpPoints))} pt，合計約 <b class="points">${fmt(Math.round(d.points + d.cpPoints))} pt</b></div>`
+              : ""
+          }
+          <div class="muted small">${esc(label)} · ${unit} · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}</div></div>
+        <div style="margin-left:auto;text-align:right">
+          <div><b>${esc(musicTitle(mu))}</b> ${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</div>
+          <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>（${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕
+            <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>）</div>
+          ${d.nextRankName ? `<div class="small muted">${esc(d.nextRankName)} 需要 ${fmt(d.nextNeedDisplayPower)}</div>` : ""}
+          <div class="small muted">預估分數約 ${fmt(d.estScore)}</div>
+        </div>
+      </div>
+      <div class="slots">${slots}</div>
+      <div class="calib">
+        用這隊實際打一場後，可以回報數據校正模型：
+        遊戲顯示綜合力 <input type="number" class="cal-power" style="width:100px">
+        實際分數 <input type="number" class="cal-score" style="width:110px">
+        <button class="small cal-apply" data-key="${key}">校正</button>
+      </div>
+    </div>`;
+  }
+
+  function bindCalibration(el, decks) {
     el.querySelectorAll(".cal-apply").forEach((b) => (b.onclick = () => {
-      const d = out.results[Number(b.dataset.i)];
+      const d = decks.get(b.dataset.key);
       const box = b.closest(".calib");
       const shown = Number($(".cal-power", box).value);
       const score = Number($(".cal-score", box).value);
@@ -484,6 +467,137 @@
       saveSettings();
       box.insertAdjacentHTML("beforeend", `<div class="good">已更新：${msgs.join("，")}。請重新計算。</div>`);
     }));
+  }
+
+  const resultUnit = (out) =>
+    out.mode === "challenge" ? `每次（${state.settings.cp} CP）` : `每場（${out.input.boosts} 個加成道具，倍率 ×${out.rate}）`;
+
+  function renderResults(out) {
+    const el = $("#results");
+    if (!el) return;
+    if (out.error === "no-charts") {
+      el.innerHTML = `<div class="panel warn">沒有符合條件的譜面（或譜面缺少計分資料）。請放寬等級或難度。</div>`;
+      return;
+    }
+    if (out.error === "not-enough-characters") {
+      el.innerHTML = `<div class="panel warn">持有的成員卡不足 5 位不同角色。</div>`;
+      return;
+    }
+    const s = state.settings;
+    const unit = resultUnit(out);
+    const decks = new Map();
+    const cards = out.results
+      .map((d, i) => {
+        decks.set("r" + i, d);
+        return deckCard(d, `#${i + 1}`, "r" + i, unit, out);
+      })
+      .join("");
+    const hasSongs = out.songs && out.songs.length > 0;
+    el.innerHTML = `<div class="panel">
+        <h2>結果</h2>
+        <p class="note">分數以「全 Perfect、不含演出技能」的計分資料 × 分數校正 ${s.scoreCal.toFixed(3)} 估算，綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
+        餘裕小於 3% 的隊伍，實際可能差一級。${
+          out.cpPlan
+            ? `<br>一般 Live 拿到的 CP 只看評級（不吃加成），排名時已換算成 pt 一起比較：用目前最佳的挑戰隊（${esc(out.cpPlan.rankName)}、點數加成 +${pct(out.cpPlan.pointBonus)}、${esc(musicTitle(out.cpPlan.chart.musicId))} ${DIFF_NAMES[out.cpPlan.chart.difficulty]}）清 CP，1 CP ≈ ${out.cpPlan.value.toFixed(1)} pt。挑戰隊請切到「挑戰 Live」模式查看。`
+            : ""
+        }${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>
+      </div>${cards || '<div class="panel">沒有結果。</div>'}${hasSongs ? `<div class="panel" id="songs"></div><div id="song-deck"></div>` : ""}`;
+    bindCalibration(el, decks);
+    if (hasSongs) renderSongs(out);
+  }
+
+  // --- song comparison ---
+
+  const songView = { showAll: false, selected: null };
+  const mmss = (sec) => {
+    const t = Math.round(sec);
+    return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
+  };
+  const SONG_LIMIT = 15;
+
+  function renderSongs(out) {
+    const el = $("#songs");
+    const s = state.settings;
+    const items = out.input.objective === "items";
+    const value = (d) => (items ? d.items : d.points + (d.cpPoints || 0));
+    const perMin = (d) => (d.chart.lengthSec ? (value(d) * 60) / (d.chart.lengthSec + s.songOverhead) : null);
+    const rows = out.songs.map((d, k) => ({ d, k, v: value(d), pm: perMin(d) }));
+    const byLive = rows.slice().sort((a, b) => b.v - a.v || (b.pm || 0) - (a.pm || 0));
+    const byMin = rows.slice().sort((a, b) => (b.pm || 0) - (a.pm || 0) || b.v - a.v);
+    const list = s.songSort === "minute" ? byMin : byLive;
+    const bestLive = byLive[0].v;
+    const bestMin = byMin[0].pm;
+    const shown = songView.showAll ? list : list.slice(0, SONG_LIMIT);
+    if (songView.selected !== null && !shown.some((r) => r.k === songView.selected)) {
+      const sel = list.find((r) => r.k === songView.selected);
+      if (sel) shown.push(sel);
+    }
+    const u = items ? "道具" : "pt";
+    const body = shown
+      .map((r) => {
+        const d = r.d;
+        const margin = d.displayPower / d.needDisplayPower - 1;
+        const len = d.chart.lengthSec;
+        const parts = !items && d.cp ? `<br><span class="muted small">${fmt(d.points)} pt + ${fmt(d.cp)} CP</span>` : "";
+        const tags =
+          (r.v === bestLive ? '<span class="song-best">每場最佳</span>' : "") +
+          (r.pm !== null && r.pm === bestMin ? '<span class="song-best">每分鐘最佳</span>' : "");
+        return `<tr class="song-row ${r.k === songView.selected ? "sel" : ""}" data-k="${r.k}">
+          <td class="num">${list.indexOf(r) + 1}</td>
+          <td><b>${esc(musicTitle(d.chart.musicId))}</b> <span class="muted small">${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</span>${tags}</td>
+          <td>${esc(d.rankName)}</td>
+          <td class="num"><b>${fmt(Math.round(r.v))}</b>${parts}</td>
+          <td class="num">${len ? mmss(len) : "—"}</td>
+          <td class="num">${r.pm !== null ? fmt(Math.round(r.pm)) : "—"}</td>
+          <td class="num"><span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span></td>
+          <td class="num muted">${d.nextRankName ? `${esc(d.nextRankName)}：${fmt(d.nextNeedDisplayPower)}` : "—"}</td>
+        </tr>`;
+      })
+      .join("");
+    el.innerHTML = `<h2>歌曲比較</h2>
+      <p class="note">每首歌各自配出最佳隊伍後的收益（${esc(resultUnit(out))}）。活動點數只看評級和加成、不看分數多寡，所以「每場」最高的通常是評級門檻相對低、最容易衝上高一級的歌。
+      LB 會用完的話看「每場」；時間有限、LB 用不完的話看「每分鐘」＝每場 ÷（歌曲長度＋每場額外時間）。點一列可看那首歌的隊伍。</p>
+      <div class="row" style="margin-bottom:8px">
+        <div class="field"><span>排序</span><div class="chips">
+          <label><input type="radio" name="songSort" value="live" ${s.songSort !== "minute" ? "checked" : ""}>每場</label>
+          <label><input type="radio" name="songSort" value="minute" ${s.songSort === "minute" ? "checked" : ""}>每分鐘</label>
+        </div></div>
+        <label class="field"><span>每場額外時間（載入＋結算，秒）</span>
+          <input type="number" id="songOverhead" min="0" max="300" value="${s.songOverhead}" style="width:80px"></label>
+      </div>
+      <div class="table-scroll"><table class="rules songs">
+        <thead><tr><th>#</th><th>歌曲</th><th>評級</th><th class="num">每場（${u}）</th><th class="num">長度</th><th class="num">每分鐘（${u}）</th><th class="num">餘裕</th><th class="num">下一級需要</th></tr></thead>
+        <tbody>${body}</tbody></table></div>
+      ${list.length > SONG_LIMIT ? `<p><button class="ghost small" id="songMore">${songView.showAll ? `只顯示前 ${SONG_LIMIT} 首` : `顯示全部 ${list.length} 首`}</button></p>` : ""}`;
+    el.querySelectorAll("input[name=songSort]").forEach((r) => (r.onchange = () => {
+      s.songSort = r.value;
+      saveSettings();
+      renderSongs(out);
+    }));
+    $("#songOverhead").onchange = (e) => {
+      s.songOverhead = clamp(Number(e.target.value), 0, 300);
+      saveSettings();
+      renderSongs(out);
+    };
+    const more = $("#songMore");
+    if (more) more.onclick = () => ((songView.showAll = !songView.showAll), renderSongs(out));
+    el.querySelectorAll(".song-row").forEach((tr) => (tr.onclick = () => {
+      const k = Number(tr.dataset.k);
+      songView.selected = songView.selected === k ? null : k;
+      renderSongs(out);
+    }));
+    renderSongDeck(out);
+  }
+
+  function renderSongDeck(out) {
+    const el = $("#song-deck");
+    const d = songView.selected !== null ? out.songs[songView.selected] : null;
+    if (!d) {
+      el.innerHTML = "";
+      return;
+    }
+    el.innerHTML = deckCard(d, `${musicTitle(d.chart.musicId)} 的最佳隊伍`, "s", resultUnit(out), out);
+    bindCalibration(el, new Map([["s", d]]));
   }
 
   // --- card pickers ---

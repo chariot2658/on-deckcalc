@@ -70,3 +70,29 @@ for (const mode of ["normal", "challenge"]) {
     console.log("   ", d.members.map((v, i) => name(v) + (i === 2 ? "(L)" : "") + " <- " + name(d.snaps[i])).join(" | "));
   }
 }
+
+// Song comparison: the best deck of every song must equal a search restricted to that song, and the overall best must
+// be among them.
+{
+  const t0 = Date.now();
+  const input = {
+    master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
+    perPowerByScore: perPower, lengthByScore: E.chartLengthsFromMusicData(md), maxLevel: 27, powerCalibration: 1.023,
+    calibration: 1.0, boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
+  };
+  const out = E.search({ ...input, compareSongs: true });
+  const ms = Date.now() - t0;
+  assert.strictEqual(new Set(out.songs.map((d) => d.chart.musicId)).size, out.songs.length);
+  assert.strictEqual(out.songs[0].score, out.results[0].score);
+  for (const d of out.songs.filter((_, i) => i % 10 === 0)) {
+    const one = E.search({ ...input, musicIds: [d.chart.musicId], topK: 1 }).results[0];
+    assert.strictEqual(d.score, one.score, "song " + d.chart.musicId);
+  }
+  console.log(`== songs (${ms} ms): ${out.songs.length} songs`);
+  for (const d of out.songs.slice(0, 5)) {
+    console.log(
+      `${d.rankName} ${d.points}pt + ${d.cp}CP ${m.text(m.musics.get(d.chart.musicId)._titleTextID)} ${d.chart.difficulty} ${d.chart.level} ` +
+        `${Math.round(d.chart.lengthSec)} s power ${d.displayPower}/${d.needDisplayPower}`,
+    );
+  }
+}
