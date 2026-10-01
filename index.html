@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>活動配隊計算機</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <strong>活動配隊計算機</strong>
+        <span class="sub">BanG Dream! Our Notes</span>
+      </div>
+      <div class="top-right">
+        <select id="region" title="區服"></select>
+        <span id="data-status" class="muted"></span>
+        <button id="reload" class="ghost" title="重新下載最新資料">更新資料</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button data-tab="calc" class="active">計算</button>
+      <button data-tab="members">成員卡</button>
+      <button data-tab="snaps">快照</button>
+      <button data-tab="import">截圖匯入</button>
+      <button data-tab="settings">設定</button>
+    </nav>
+
+    <main>
+      <section id="tab-calc" class="tab active"></section>
+      <section id="tab-members" class="tab"></section>
+      <section id="tab-snaps" class="tab"></section>
+      <section id="tab-import" class="tab"></section>
+      <section id="tab-settings" class="tab"></section>
+    </main>
+
+    <div id="loading" class="loading">
+      <div class="loading-box">
+        <div class="spinner"></div>
+        <div id="loading-text">載入資料中…</div>
+      </div>
+    </div>
+
+    <script src="engine.js"></script>
+    <script src="data.js"></script>
+    <script src="recognize.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
