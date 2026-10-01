@@ -71,7 +71,7 @@ for (const mode of ["normal", "challenge"]) {
   console.log(`== ${mode} (${Date.now() - t0} ms)`, out.error || "");
   for (const d of out.results) {
     console.log(
-      `${d.rankName} ${d.points}pt ${d.items}items power ${d.displayPower} (need ${Math.ceil(d.needPower * 1.023)}) ` +
+      `${d.rankName} ${d.points}pt ${d.items}items power ${d.displayPower} (need ${d.needDisplayPower}) ` +
         `bonus +${d.pointBonus / 100}%/+${d.itemBonus / 100}% ${m.text(m.musics.get(d.chart.musicId)._titleTextID)} ${d.chart.difficulty} ${d.chart.level}`,
     );
     console.log("   ", d.members.map((v, i) => name(v) + (i === 2 ? "(L)" : "") + " <- " + name(d.snaps[i])).join(" | "));
@@ -90,7 +90,7 @@ for (const mode of ["normal", "challenge"]) {
     const perBoost = (d.points + d.cpPoints) / 3;
     console.log(
       `${d.rankName} ${d.points}pt + ${d.cp}CP (= ${Math.round(d.cpPoints)}pt) -> ${Math.round(perBoost)} pt per boost; ` +
-        `bonus +${d.pointBonus / 100}% ${m.text(m.musics.get(d.chart.musicId)._titleTextID)} ${d.chart.difficulty} ${d.chart.level} power ${d.displayPower}/${Math.ceil(d.needPower * 1.023)}`,
+        `bonus +${d.pointBonus / 100}% ${m.text(m.musics.get(d.chart.musicId)._titleTextID)} ${d.chart.difficulty} ${d.chart.level} power ${d.displayPower}/${d.needDisplayPower}`,
     );
     console.log("   ", d.members.map((v, i) => name(v) + (i === 2 ? "(L)" : "") + " <- " + name(d.snaps[i])).join(" | "));
   }
