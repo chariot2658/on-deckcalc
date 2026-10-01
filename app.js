@@ -1255,12 +1255,15 @@
         <h2>卡片清單</h2>
         <div class="row">
           <button id="loadPreset">載入從截圖辨識的清單</button>
+          <button class="ghost" id="syncRoster">同步到檔案</button>
           <button class="ghost" id="exportRoster">匯出 JSON</button>
           <label class="ghost" style="cursor:pointer"><input type="file" id="importFile" accept=".json,application/json" hidden><span class="muted">匯入 JSON 檔…</span></label>
           <button class="ghost" id="clearRoster">清除全部持有</button>
           <button class="ghost" id="clearCache">清除下載快取</button>
         </div>
-        <p class="note">清單存在這個瀏覽器裡（每個區服各一份）。換電腦或瀏覽器時用匯出／匯入搬過去。</p>
+        <p class="note">清單存在這個瀏覽器裡（每個區服各一份）。換電腦或瀏覽器時用匯出／匯入搬過去。
+        「同步到檔案」把目前的清單和設定存到 deckcalc/presets/browser-roster.json（需用 start.cmd 開啟本工具）。</p>
+        <p class="note" id="syncMsg"></p>
         <textarea id="rosterJson" readonly hidden></textarea>
       </div>`;
     $("#powerCal").onchange = (e) => ((s.powerCal = Number(e.target.value) || 1), saveSettings());
@@ -1289,6 +1292,19 @@
         importRoster(await res.json());
       } catch (e) {
         alertBox("無法讀取 presets/my-roster.json：" + e.message);
+      }
+    };
+    $("#syncRoster").onclick = async () => {
+      const msg = $("#syncMsg");
+      msg.textContent = "同步中…";
+      try {
+        const body = { ...exportRoster(), settings: state.settings, syncedAt: new Date().toISOString() };
+        const res = await fetch("api/roster", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(res.status === 501 ? "伺服器不支援，請關掉後重新執行 start.cmd" : out.error || "HTTP " + res.status);
+        msg.innerHTML = `<span class="good">已存到 ${esc(out.saved)}（${new Date().toLocaleTimeString()}）</span>`;
+      } catch (e) {
+        msg.innerHTML = `<span class="warn">同步失敗：${esc(e.message)}</span>`;
       }
     };
     $("#exportRoster").onclick = () => {
