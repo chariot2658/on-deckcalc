@@ -438,8 +438,25 @@
     return out.sort((a, b) => a[1] - b[1]);
   }
 
+  /** Multiplayer (激奏) rank thresholds of a song: rank -> _battleLiveRequiredScore, the base for 5 players. */
+  function battleThresholds(m, musicId) {
+    const mu = m.musics.get(musicId);
+    const out = [];
+    for (const r of m.t.MasterLiveScoreRank) if (r._group === mu._liveScoreRankGroup) out.push([r._liveScoreRank, r._battleLiveRequiredScore]);
+    return out.sort((a, b) => a[1] - b[1]);
+  }
+
   /**
-   * Playable charts: {scoreId, musicId, difficulty, level, perPower, thresholds, lengthSec}. perPower is the no-skill score per
+   * Room total score a multiplayer rank needs with `players` connected players: trunc(sqrt(5 / n) * base * n)
+   * (ournotes-deck event.rs battle_required_score). The room's rank, not the player's own, sets the event payoff.
+   */
+  function battleRequiredScore(base, players) {
+    if (players < 1) return Infinity;
+    return Math.trunc(Math.sqrt(5 / players) * base * players);
+  }
+
+  /**
+   * Playable charts: {scoreId, musicId, difficulty, level, perPower, thresholds, battle, lengthSec}. perPower is the no-skill score per
    * unit of power (music-data.json offSeeds, Gekisou off, every note Perfect); charts without it are skipped.
    */
   function charts(m, perPowerByScore, opts) {
@@ -451,6 +468,7 @@
       if (!allowed && mu._startAt && parseTime(mu._startAt) > now) continue;
       const th = rankThresholds(m, mu._id);
       if (th.length === 0) continue;
+      const battle = battleThresholds(m, mu._id);
       for (const [key, diff] of DIFFS) {
         const sid = mu[key];
         const sc = m.musicScores.get(sid);
@@ -460,7 +478,7 @@
         const per = perPowerByScore.get(sid);
         if (!per) continue;
         const lengthSec = (opts.lengthByScore && opts.lengthByScore.get(sid)) || null;
-        out.push({ scoreId: sid, musicId: mu._id, difficulty: diff, level: sc._musicScoreLevel, perPower: per, thresholds: th, lengthSec });
+        out.push({ scoreId: sid, musicId: mu._id, difficulty: diff, level: sc._musicScoreLevel, perPower: per, thresholds: th, battle, lengthSec });
       }
     }
     return out;
@@ -589,7 +607,9 @@
    *         maxLevel, difficulties, calibration (score multiplier), powerCalibration (in-game / model power),
    *         boosts, objective: "points"|"items", topK, musicIds, fixed: {memberIds, excludeMemberIds},
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
-   *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds}
+   *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds,
+   *         multi: {players, othersScore} for a multiplayer (激奏) normal live: the rank is the room's, reached when the
+   *         player's score plus othersScore (the other players' total) meets the battle threshold}
    */
   function search(input) {
     const t0 = Date.now();
@@ -609,6 +629,12 @@
     const W = input.objective === "items" ? { point: 1, item: 1e6 } : { point: 1e6, item: 1 };
     const cpValue = mode === "challenge" ? 0 : input.cpValue || 0;
     const cpOf = (rank) => (pay.cp.get(rank) || 0) * rate;
+    const multi = mode !== "challenge" && input.multi && input.multi.players >= 1 ? input.multi : null;
+    // Own score each rank needs on a chart: solo thresholds, or in a room what the others' scores leave (E counts as D).
+    const ownThresholds = (c) =>
+      multi
+        ? c.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
+        : c.thresholds;
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
 
     const musicIds = mode === "challenge"
@@ -714,7 +740,7 @@
     function rankTable(list) {
       const need = new Map();
       for (const c of list) {
-        for (const [r, req] of c.thresholds) {
+        for (const [r, req] of ownThresholds(c)) {
           const p = Math.ceil(req / (c.perPower * calib) / pcal);
           const cur = need.get(r);
           if (!cur || p < cur.power || (p === cur.power && c.level < cur.chart.level)) need.set(r, { power: p, chart: c });
@@ -924,7 +950,7 @@
   const api = {
     TABLES, RANK_NAMES, buildMaster, memberView, snapView, memberLimits, snapLimit, makeContext, deckPower,
     leaderBonuses, cardEventBonus, eventEffects, describeEventBonus, payoff, boostRate, eventPoints, eventItems,
-    charts, rankThresholds, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
+    charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
     parseTime,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

@@ -23,6 +23,28 @@ assert.strictEqual(E.eventItems(pay.items.get(3), 4000, rate), 630);
 assert.strictEqual(E.eventItems(pay.items.get(3), 10000, rate), 900);
 // Challenge points of the same live: rank C row (4) × boost rate, no card bonus (IMG_0022 shows 60).
 assert.strictEqual(pay.cp.get(3) * rate, 60);
+// A multiplayer (激奏) live pays by the room's rank, not the player's own score rank: IMG_0031 scored 1152964 (C) on
+// TearJerker but the room reached B, giving 1050 pt / 1738 items / 75 CP at +100% / +176%.
+assert.strictEqual(E.eventPoints(10000, rate, pay.points.get(4)), 1050);
+assert.strictEqual(E.eventItems(pay.items.get(4), 17600, rate), 1738);
+assert.strictEqual(pay.cp.get(4) * rate, 75);
+// Room thresholds for 5 players are 5 × base; TearJerker B needs a room total of 20638445.
+assert.strictEqual(E.battleRequiredScore(4127689, 5), 20638445);
+{
+  const input = {
+    master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
+    perPowerByScore: perPower, maxLevel: 27, powerCalibration: 1.023, boosts: 3, topK: 1, musicIds: [100094],
+    now: new Date("2026-10-01T12:00:00+08:00"),
+  };
+  const solo = E.search(input).results[0];
+  const room = E.search({ ...input, multi: { players: 5, othersScore: 4 * 4.9e6 } }).results[0];
+  assert.strictEqual(solo.rankName, "C");
+  assert.strictEqual(room.rankName, "B");
+  assert.deepStrictEqual([room.points, room.items, room.cp], [1050, 1738, 75]);
+  // Challenge lives are solo: the multi input is ignored there.
+  const ch = { ...input, mode: "challenge", boosts: 200, musicIds: undefined };
+  assert.strictEqual(E.search({ ...ch, multi: { players: 5, othersScore: 1e9 } }).results[0].score, E.search(ch).results[0].score);
+}
 
 const name = (v) => (v ? m.text(v.kind === "member" ? m.memberCards.get(v.id)._nameTextID : m.snaps.get(v.id)._nameTextID) + "#" + v.id : "-");
 

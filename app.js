@@ -30,6 +30,9 @@
     importMaxLevel: false,
     songSort: "live",
     songOverhead: 40,
+    multi: false,
+    multiPlayers: 5,
+    multiOthersAvg: 5000000,
   };
 
   const state = {
@@ -294,6 +297,16 @@
           </div>
           <label class="field" ${s.mode === "challenge" ? "hidden" : ""}><span>加成道具（LB）用量</span>
             <input type="number" id="boosts" min="0" max="10" value="${s.boosts}"></label>
+          <div class="field" ${s.mode === "challenge" ? "hidden" : ""}><span>遊玩方式</span>
+            <div class="chips">
+              <label><input type="radio" name="multi" value="solo" ${s.multi ? "" : "checked"}>單人</label>
+              <label><input type="radio" name="multi" value="multi" ${s.multi ? "checked" : ""}>多人（激奏）</label>
+            </div>
+          </div>
+          <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"}><span>房間人數</span>
+            <input type="number" id="multiPlayers" min="2" max="5" value="${s.multiPlayers}" style="width:70px"></label>
+          <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"}><span>其他玩家平均分數</span>
+            <input type="number" id="multiOthersAvg" min="0" step="100000" value="${s.multiOthersAvg}" style="width:120px"></label>
           <label class="field" ${s.mode === "challenge" ? "" : "hidden"}><span>消耗挑戰點數</span>
             <select id="cp">${[200, 400, 800, 1600].map((v) => `<option ${v === s.cp ? "selected" : ""}>${v}</option>`).join("")}</select></label>
           <label class="field"><span>可穩定打的最高等級</span><input type="number" id="maxLevel" min="1" max="40" value="${s.maxLevel}"></label>
@@ -329,6 +342,19 @@
       s.difficulties = [...el.querySelectorAll("input[name=diff]:checked")].map((x) => x.value);
       saveSettings();
     }));
+    el.querySelectorAll("input[name=multi]").forEach((r) => (r.onchange = () => {
+      s.multi = r.value === "multi";
+      saveSettings();
+      renderCalc();
+    }));
+    $("#multiPlayers").onchange = (e) => {
+      s.multiPlayers = clamp(Math.round(Number(e.target.value)), 2, 5);
+      saveSettings();
+    };
+    $("#multiOthersAvg").onchange = (e) => {
+      s.multiOthersAvg = clamp(Number(e.target.value), 0, 1e9);
+      saveSettings();
+    };
     $("#boosts").onchange = (e) => {
       s.boosts = clamp(Number(e.target.value), 0, 10);
       saveSettings();
@@ -366,6 +392,7 @@
       objective: s.objective,
       topK: s.topK,
       compareSongs: true,
+      multi: s.mode === "normal" && s.multi ? { players: s.multiPlayers, othersScore: s.multiOthersAvg * (s.multiPlayers - 1) } : null,
     };
     try {
       // Normal lives also earn CP (by rank only). Value it at what the best challenge deck turns it into, so the
@@ -398,7 +425,8 @@
     const s = state.settings;
     const m = state.master;
     const mu = d.chart.musicId;
-    const margin = d.displayPower / d.needDisplayPower - 1;
+    const margin = d.needDisplayPower > 0 ? d.displayPower / d.needDisplayPower - 1 : null;
+    const multi = out.input.multi;
     const slots = d.members
       .map((v, k) => {
         const c = m.memberCards.get(v.id);
@@ -419,7 +447,7 @@
       .join("");
     return `<div class="result">
       <div class="result-head">
-        <div class="rank-badge" title="預估評級">${esc(d.rankName)}</div>
+        <div class="rank-badge" title="${multi ? "預估房間評級" : "預估評級"}">${esc(d.rankName)}</div>
         <div><div class="big"><span class="points">${fmt(d.points)} pt</span>${
           d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""
         } · <span class="items">${fmt(d.items)} 道具</span></div>
@@ -431,10 +459,15 @@
           <div class="muted small">${esc(label)} · ${unit} · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}</div></div>
         <div style="margin-left:auto;text-align:right">
           <div><b>${esc(musicTitle(mu))}</b> ${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</div>
-          <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>（${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕
-            <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>）</div>
+          <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>（${
+            margin === null
+              ? `${esc(d.rankName)} 靠其他玩家的分數就夠`
+              : `${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕 <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>`
+          }）</div>
           ${d.nextRankName ? `<div class="small muted">${esc(d.nextRankName)} 需要 ${fmt(d.nextNeedDisplayPower)}</div>` : ""}
-          <div class="small muted">預估分數約 ${fmt(d.estScore)}</div>
+          <div class="small muted">預估分數約 ${fmt(d.estScore)}${
+            multi ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""
+          }</div>
         </div>
       </div>
       <div class="slots">${slots}</div>
@@ -497,6 +530,10 @@
         <h2>結果</h2>
         <p class="note">分數以「全 Perfect、不含演出技能」的計分資料 × 分數校正 ${s.scoreCal.toFixed(3)} 估算，綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
         餘裕小於 3% 的隊伍，實際可能差一級。${
+          out.input.multi
+            ? `<br>多人（激奏）：活動點數、道具和 CP 看的是<b>房間評級</b>（結算畫面右上角的大徽章），不是自己分數的評級。房間評級＝全房總分對照該曲的多人門檻（依人數調整）；這裡用「自己的預估分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(state.settings.multiOthersAvg)}」估算。其他玩家的分數通常佔大部分，所以加成高的隊伍比綜合力高的隊伍划算。直接開始時歌曲是隨機的，可以在下方「歌曲比較」查各首歌會拿到的評級。`
+            : ""
+        }${
           out.cpPlan
             ? `<br>一般 Live 拿到的 CP 只看評級（不吃加成），排名時已換算成 pt 一起比較：用目前最佳的挑戰隊（${esc(out.cpPlan.rankName)}、點數加成 +${pct(out.cpPlan.pointBonus)}、${esc(musicTitle(out.cpPlan.chart.musicId))} ${DIFF_NAMES[out.cpPlan.chart.difficulty]}）清 CP，1 CP ≈ ${out.cpPlan.value.toFixed(1)} pt。挑戰隊請切到「挑戰 Live」模式查看。`
             : ""
@@ -536,7 +573,7 @@
     const body = shown
       .map((r) => {
         const d = r.d;
-        const margin = d.displayPower / d.needDisplayPower - 1;
+        const margin = d.needDisplayPower > 0 ? d.displayPower / d.needDisplayPower - 1 : null;
         const len = d.chart.lengthSec;
         const parts = !items && d.cp ? `<br><span class="muted small">${fmt(d.points)} pt + ${fmt(d.cp)} CP</span>` : "";
         const tags =
@@ -549,7 +586,7 @@
           <td class="num"><b>${fmt(Math.round(r.v))}</b>${parts}</td>
           <td class="num">${len ? mmss(len) : "—"}</td>
           <td class="num">${r.pm !== null ? fmt(Math.round(r.pm)) : "—"}</td>
-          <td class="num"><span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span></td>
+          <td class="num">${margin === null ? "—" : `<span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>`}</td>
           <td class="num muted">${d.nextRankName ? `${esc(d.nextRankName)}：${fmt(d.nextNeedDisplayPower)}` : "—"}</td>
         </tr>`;
       })
