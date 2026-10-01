@@ -237,9 +237,11 @@ textarea { width: 100%; min-height: 120px; font-family: ui-monospace, Consolas, 
 .char-ranks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px; }
 .char-ranks label { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 13px; }
 .char-ranks input { width: 60px; }
+.char-ranks.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 
 @media (max-width: 640px) {
   main { padding: 10px; }
+  .char-ranks.five { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
   .slots { gap: 4px; }
   .slot { font-size: 10px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }

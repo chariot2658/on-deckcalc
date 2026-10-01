@@ -1210,24 +1210,46 @@
     const s = state.settings;
     const p = state.roster.player;
     const m = state.master;
-    const chars = m.t.MasterCharacter.slice().sort((a, b) => a._bandID - b._bandID || a._id - b._id);
+    // Same order as the in-game 角色TOP screen: bands in id order, members by _displayOrder.
+    const chars = m.t.MasterCharacter.filter((c) => !c._isNonPlayable).sort((a, b) => a._bandID - b._bandID || a._displayOrder - b._displayOrder);
+    const bandList = m.t.MasterBand.slice().sort((a, b) => a._id - b._id);
     el.innerHTML = `
       <div class="panel">
         <h2>校正</h2>
         <div class="row">
           <label class="field"><span>綜合力校正（遊戲顯示 ÷ 模型）</span><input type="number" step="0.001" id="powerCal" value="${s.powerCal}"></label>
           <label class="field"><span>分數校正（技能與準度）</span><input type="number" step="0.001" id="scoreCal" value="${s.scoreCal}"></label>
-          <label class="field"><span>VIP 等級</span><input type="number" id="vip" min="1" max="30" value="${p.vipRank || 1}"></label>
+          <label class="field"><span>T.G.W CARD 等級</span><input type="number" id="vip" min="1" max="30" value="${p.vipRank || 1}"></label>
           <label><input type="checkbox" id="eventParam" ${p.eventParameters ? "checked" : ""}> 計入活動「數值」加成</label>
         </div>
-        <p class="note">模型沒有角色等級以外的帳號加成（樂團道具、回憶等），差距由綜合力校正補上。預設 1.023 是用你兩次截圖（107,679、135,778）算出來的。
+        <p class="note">模型有角色等級、強化樂團與 T.G.W CARD 加成，其餘差距由綜合力校正補上。預設 1.023 是在沒填角色等級時，用你兩次截圖（107,679、135,778）算出來的；填好下面的等級後，建議在計算頁用一張編成截圖重新校正。
         分數校正 1.0 表示不計演出技能；實測一場後可在結果卡片上回報，讓工具自動算。</p>
       </div>
       <div class="panel">
         <h2>角色等級（選填）</h2>
-        <div class="char-ranks">${chars
-          .map((c) => `<label>${esc(T(c._nameTextID))}<input type="number" min="1" max="50" data-char="${c._id}" value="${(p.characterRanks || {})[c._id] || ""}" placeholder="1"></label>`)
-          .join("")}</div>
+        <p class="note">順序與遊戲「角色TOP」畫面相同。</p>
+        ${bandList
+          .map((b) => {
+            const list = chars.filter((c) => c._bandID === b._id);
+            if (!list.length) return "";
+            return `<h3>${esc(T(b._nameTextID))}</h3><div class="char-ranks five">${list
+              .map((c) => `<label>${esc(T(c._nameTextID))}<input type="number" min="1" max="50" data-char="${c._id}" value="${(p.characterRanks || {})[c._id] || ""}" placeholder="1"></label>`)
+              .join("")}</div>`;
+          })
+          .join("")}
+      </div>
+      <div class="panel">
+        <h2>強化樂團（道具等級）</h2>
+        ${bandList
+          .map((b) => {
+            const items = m.t.MasterBandItem.filter((it) => it._bandId === b._id).sort((x, y) => x._displayOrder - y._displayOrder);
+            if (!items.length) return "";
+            return `<h3>${esc(T(b._nameTextID))}</h3><div class="char-ranks">${items
+              .map((it) => `<label>${esc(T(it._nameTextId))}<input type="number" min="0" max="50" data-band-item="${it._id}" value="${(p.bandItems || {})[it._id] || ""}" placeholder="0"></label>`)
+              .join("")}</div>`;
+          })
+          .join("")}
+        <p class="note">每級使該樂團成員的三項能力 +0.1%（Lv.50 為 +5%）。未開放的道具填 0 或留空。</p>
       </div>
       <div class="panel">
         <h2>卡片清單</h2>
@@ -1250,6 +1272,14 @@
       p.characterRanks = p.characterRanks || {};
       if (v > 0) p.characterRanks[inp.dataset.char] = v;
       else delete p.characterRanks[inp.dataset.char];
+      saveRoster();
+    }));
+    el.querySelectorAll("[data-band-item]").forEach((inp) => (inp.onchange = () => {
+      const v = clamp(Math.floor(Number(inp.value) || 0), 0, 50);
+      p.bandItems = p.bandItems || {};
+      if (v > 0) p.bandItems[inp.dataset.bandItem] = v;
+      else delete p.bandItems[inp.dataset.bandItem];
+      inp.value = v || "";
       saveRoster();
     }));
     $("#loadPreset").onclick = async () => {

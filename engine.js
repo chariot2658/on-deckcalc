@@ -40,7 +40,8 @@
     "MasterSkillConditionSet", "MasterSkillCumulativeCondition", "MasterVipRankBonus", "MasterParameter",
     "MasterLiveMusic", "MasterLiveMusicScore", "MasterLiveScoreRank", "MasterLiveEventPoint", "MasterLiveEventReward",
     "MasterChallengeLiveEventPoint", "MasterChallengeLiveEventReward", "MasterChallengeMusic", "MasterLiveChallengePoint",
-    "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterText",
+    "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterText", "MasterBandItem",
+    "MasterBandItemSkillEffect",
   ];
 
   function rows(table) {
@@ -84,6 +85,7 @@
       levelLimit: new Map(),
       conditionSets: new Map(),
       leaderEffects: new Map(),
+      bandItemEffects: new Map(),
     };
     for (const r of t.MasterMemberCardLevel) m.memberLevel.set(r._group + ":" + r._level, r);
     for (const r of t.MasterSupportCardLevel) m.supportLevel.set(r._group + ":" + r._level, r);
@@ -99,6 +101,11 @@
       const k = r._leaderSkillID + ":" + r._level;
       if (!m.leaderEffects.has(k)) m.leaderEffects.set(k, []);
       m.leaderEffects.get(k).push(r);
+    }
+    for (const r of t.MasterBandItemSkillEffect) {
+      const k = r._bandItemId + ":" + r._level;
+      if (!m.bandItemEffects.has(k)) m.bandItemEffects.set(k, []);
+      m.bandItemEffects.get(k).push(r);
     }
     m.characterRankBonus = t.MasterCharacterRank.map((r) => [r._rank, r._bonus]).sort((a, b) => a[0] - b[0]);
     m.characterTotalRankBonus = t.MasterCharacterTotalRank.map((r) => [r._totalRank, r._bonus]).sort((a, b) => a[0] - b[0]);
@@ -128,6 +135,29 @@
 
   // ---------------------------------------------------------------------------------------------------------------
   // Cards
+
+  /**
+   * Band item (強化樂團) percentages (BP) of a member, per stat, from `player.bandItems` ({itemId: level}, 0 = not
+   * opened). As ournotes-deck bonus.rs BandItemMaps: each target of an effect row counts separately under its band,
+   * character and card type, so a target naming both a band and a character of the member counts twice.
+   */
+  function bandItemBonus(m, items, characterId, bandId, cardType) {
+    const acc = [0, 0, 0];
+    for (const [item, level] of Object.entries(items || {})) {
+      for (const r of m.bandItemEffects.get(item + ":" + Number(level)) || []) {
+        for (const tid of r._skillTargetIDs || []) {
+          const t = m.skillTargets.get(tid);
+          if (!t) continue;
+          let n = 0;
+          if (t._bandID > 0 && t._bandID === bandId) n++;
+          if (t._characterID > 0 && t._characterID === characterId) n++;
+          if (t._cardType !== 0 && t._cardType === cardType) n++;
+          for (let k = 0; k < n; k++) accumulate(r._skillEffectType, r._effectValue, acc);
+        }
+      }
+    }
+    return acc;
+  }
 
   /** A member card the player owns, resolved: stats in whole points plus what the bonuses read. */
   function memberView(m, owned, player) {
@@ -170,6 +200,7 @@
       musicTagRate: rk._musicTagBonusRate,
       power, // whole points [performance, technique, visual]
       characterRank: Number(characterRanks[c._characterID]) || 1,
+      bandItemPct: bandItemBonus(m, player && player.bandItems, c._characterID, ch ? ch._bandID : 0, c._cardType),
     };
   }
 
@@ -350,7 +381,7 @@
     let total = 0;
     for (let i = 0; i < 3; i++) {
       let x = b[i];
-      x += pctOf(b[i], ctx.bandItemPct[i]);
+      x += pctOf(b[i], v.bandItemPct[i]);
       if (music) {
         if (v.cardType === MUSIC_TYPE_ALL || music.musicType === MUSIC_TYPE_ALL || v.cardType === music.musicType)
           x += pctOf(b[i], m.musicTypeBase + v.musicTypeRate + (music.typeBonusRate || 0));
@@ -396,12 +427,10 @@
     for (const k of Object.keys(ranks)) totalRank += Number(ranks[k]) || 0;
     let vip = 0;
     for (const r of m.t.MasterVipRankBonus) if (r._vipBonusType === 7 && r._vipRank === (player.vipRank || 1)) vip = r._value;
-    const bp = Number(player.bandItemPct) || 0; // simplified band item bonus: one percentage (BP) for every member
     const ctx = {
       effects,
       totalRank,
       vipPct: vip,
-      bandItemPct: [bp, bp, bp],
       flatBonus: Number(player.flatBonus) || 0,
       memberBonus: new Map(),
       snapBonus: new Map(),
@@ -667,7 +696,9 @@
     }
 
     // Candidate member cards: per character, those not dominated in (point bonus, item bonus, raw power).
-    const baseSum = new Map(members.map((v) => [v, memberBase(m, v, ctx).reduce((a, b) => a + b, 0)]));
+    const baseSum = new Map(
+      members.map((v) => [v, memberBase(m, v, ctx).reduce((a, b, i) => a + b + pctOf(b, v.bandItemPct[i]), 0)]),
+    );
     const byChar = new Map();
     for (const v of members) {
       if (!byChar.has(v.characterId)) byChar.set(v.characterId, []);
