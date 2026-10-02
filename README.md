@@ -6,7 +6,7 @@
 
 ## 使用方式
 
-1. 開啟 <https://chariot2658.github.io/deckcalc/>。
+1. 開啟 <https://chariot2658.github.io/on-deckcalc/>。
    也可以在本機執行：雙擊 `start.cmd`（需要 Python），瀏覽器會開啟 <http://localhost:8765/>。
    兩個網址的卡片清單各自分開存，要搬的話用「設定」的「匯出 JSON」／「匯入 JSON 檔」。
 2. 登錄持有的卡片，有三種方式：
