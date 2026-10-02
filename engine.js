@@ -606,11 +606,26 @@
   /**
    * DP over snaps assigning each to at most one of the five slots. Keeps, per filled-slot mask and per
    * (point bonus, item bonus) pair, the largest snap power. Returns every final state.
+   * A snap that five others match or beat in bonuses and in power on every slot is skipped: one of those five is
+   * always free to take its place.
    */
   function snapStates(G, snapPoint, snapItem, nSnaps) {
-    let states = [new Map([["0:0", { pt: 0, it: 0, power: 0, pick: null }]])];
-    for (let mask = 1; mask < 32; mask++) states.push(new Map());
+    const atLeast = (k, j) => {
+      if (snapPoint[k] < snapPoint[j] || snapItem[k] < snapItem[j]) return false;
+      for (let i = 0; i < 5; i++) if (G[i][k] < G[i][j]) return false;
+      return true;
+    };
+    const useful = [];
     for (let j = 0; j < nSnaps; j++) {
+      let n = 0;
+      for (let k = 0; k < nSnaps && n < 5; k++) {
+        if (k !== j && atLeast(k, j) && (k < j || !atLeast(j, k))) n++;
+      }
+      if (n < 5) useful.push(j);
+    }
+    let states = [new Map([[0, { pt: 0, it: 0, power: 0, pick: null }]])];
+    for (let mask = 1; mask < 32; mask++) states.push(new Map());
+    for (const j of useful) {
       const next = states.map((b) => new Map(b));
       for (let mask = 0; mask < 32; mask++) {
         for (const st of states[mask].values()) {
@@ -620,7 +635,7 @@
             const pt = st.pt + snapPoint[j];
             const it = st.it + snapItem[j];
             const power = st.power + G[i][j];
-            const key = pt + ":" + it;
+            const key = pt * 1e7 + it;
             const cur = next[nm].get(key);
             if (!cur || cur.power < power) next[nm].set(key, { pt, it, power, pick: { i, j, prev: st.pick } });
           }
@@ -794,6 +809,50 @@
     const snaps = [null, null, null, null, null];
     for (let p = pick; p; p = p.prev) snaps[p.i] = p.j;
     return snaps;
+  }
+
+  /** Binary heap; `before(x, y)` puts x nearer the top. */
+  class Heap {
+    constructor(before) {
+      this.a = [];
+      this.before = before;
+    }
+    get size() {
+      return this.a.length;
+    }
+    top() {
+      return this.a[0];
+    }
+    push(x) {
+      const a = this.a;
+      let i = a.length;
+      a.push(x);
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (!this.before(x, a[p])) break;
+        a[i] = a[p];
+        i = p;
+      }
+      a[i] = x;
+    }
+    pop() {
+      const a = this.a;
+      const out = a[0];
+      const last = a.pop();
+      if (a.length) {
+        let i = 0;
+        for (;;) {
+          let c = 2 * i + 1;
+          if (c >= a.length) break;
+          if (c + 1 < a.length && this.before(a[c + 1], a[c])) c++;
+          if (!this.before(a[c], last)) break;
+          a[i] = a[c];
+          i = c;
+        }
+        a[i] = last;
+      }
+      return out;
+    }
   }
 
   function* combinations(n, k, start = 0, prefix = []) {
@@ -977,24 +1036,167 @@
       leaderTerm.set(L, row);
     }
 
-    // Member sets (song independent): characters choose 5, one candidate card each.
-    const sets = [];
-    for (const cs of combinations(candidates.length, 5)) {
-      const lists = cs.map((c) => candidates[c]);
-      const idx = [0, 0, 0, 0, 0];
-      for (;;) {
-        const vs = lists.map((l, i) => l[idx[i]]);
-        let pt = 0, it = 0, g = 0;
-        for (const v of vs) {
-          const eb = ctx.memberBonus.get(v);
-          pt += eb.point;
-          it += eb.item;
-          g += bestG.get(v);
+    // Leader terms by candidate index: LT[L * N + v] = whole points L adds to v's slot; for a leader that is not simple,
+    // an upper bound (every condition met, cumulative counts at their cap, negative effects dropped).
+    const N = allCand.length;
+    const LT = new Int32Array(N * N);
+    const simpleAt = allCand.map((L) => leaderTerm.has(L));
+    allCand.forEach((L, li) => {
+      const row = leaderTerm.get(L);
+      const effects = row ? null : m.leaderEffects.get(L.leaderSkillId + ":" + L.leaderSkillLevel) || [];
+      allCand.forEach((v, vi) => {
+        if (row) {
+          LT[li * N + vi] = row.get(v);
+          return;
         }
-        sets.push({ vs, pt, it, g });
-        let k = 4;
-        while (k >= 0 && ++idx[k] >= lists[k].length) idx[k--] = 0;
-        if (k < 0) break;
+        const acc = [0, 0, 0];
+        for (const e of effects) {
+          let n = 1;
+          const cum = (e._skillEffectType & ~3) === 1500 && m.cumulative.get(e._skillCumulativeConditionID);
+          if (cum) n = Math.max(1, cum._maxCumulativeCount < 1 ? 5 : Math.min(5, cum._maxCumulativeCount));
+          const ts = targetsOf(m, e._skillTargetIDs);
+          if (!ts || matchesAny(v, ts)) accumulate(e._skillEffectType, Math.max(0, e._effectValue) * n, acc);
+        }
+        const b = memberBase(m, v, ctx);
+        LT[li * N + vi] = pctOf(b[0], acc[0]) + pctOf(b[1], acc[1]) + pctOf(b[2], acc[2]);
+      });
+    });
+    const ptOf = allCand.map((v) => ctx.memberBonus.get(v).point);
+    const itOf = allCand.map((v) => ctx.memberBonus.get(v).item);
+    const gOf = allCand.map((v) => bestG.get(v));
+
+    // Member sets (song independent): characters choose 5, one candidate card each. They are stored flat (`setV`: five
+    // candidate indices each) and grouped by their (point bonus, item bonus) pair into buckets [bStart, bEnd). `setSU`
+    // is the song-independent part of a power bound: the best snap per slot plus the best leader term bound.
+    const charLists = candidates.map((l) => l.map((v) => allCand.indexOf(v)));
+    function forEachSet(fn) {
+      const vs = [0, 0, 0, 0, 0];
+      for (const cs of combinations(charLists.length, 5)) {
+        const lists = cs.map((c) => charLists[c]);
+        const idx = [0, 0, 0, 0, 0];
+        for (;;) {
+          for (let i = 0; i < 5; i++) vs[i] = lists[i][idx[i]];
+          fn(vs);
+          let k = 4;
+          while (k >= 0 && ++idx[k] >= lists[k].length) idx[k--] = 0;
+          if (k < 0) break;
+        }
+      }
+    }
+    const bucketOf = new Map(); // pt * 1e7 + it -> bucket
+    const bPt = [];
+    const bIt = [];
+    const bCount = [];
+    let nSets = 0;
+    forEachSet((vs) => {
+      const pt = ptOf[vs[0]] + ptOf[vs[1]] + ptOf[vs[2]] + ptOf[vs[3]] + ptOf[vs[4]];
+      const it = itOf[vs[0]] + itOf[vs[1]] + itOf[vs[2]] + itOf[vs[3]] + itOf[vs[4]];
+      const key = pt * 1e7 + it;
+      let b = bucketOf.get(key);
+      if (b === undefined) {
+        b = bPt.length;
+        bucketOf.set(key, b);
+        bPt.push(pt);
+        bIt.push(it);
+        bCount.push(0);
+      }
+      bCount[b]++;
+      nSets++;
+    });
+    const B = bPt.length;
+    const bStart = new Int32Array(B);
+    const bEnd = new Int32Array(B);
+    for (let b = 1; b < B; b++) bStart[b] = bStart[b - 1] + bCount[b - 1];
+    bEnd.set(bStart);
+    const setV = new Uint8Array(nSets * 5);
+    const setSU = new Int32Array(nSets);
+    const setEnum = new Int32Array(nSets); // enumeration order: ties break as in the stable sort this replaced
+    let nEnum = 0;
+    forEachSet((vs) => {
+      const pt = ptOf[vs[0]] + ptOf[vs[1]] + ptOf[vs[2]] + ptOf[vs[3]] + ptOf[vs[4]];
+      const it = itOf[vs[0]] + itOf[vs[1]] + itOf[vs[2]] + itOf[vs[3]] + itOf[vs[4]];
+      const s = bEnd[bucketOf.get(pt * 1e7 + it)]++;
+      let lt = 0;
+      for (let L = 0; L < 5; L++) {
+        const r = vs[L] * N;
+        const x = LT[r + vs[0]] + LT[r + vs[1]] + LT[r + vs[2]] + LT[r + vs[3]] + LT[r + vs[4]];
+        if (x > lt) lt = x;
+      }
+      setSU[s] = lt + gOf[vs[0]] + gOf[vs[1]] + gOf[vs[2]] + gOf[vs[3]] + gOf[vs[4]];
+      for (let i = 0; i < 5; i++) setV[s * 5 + i] = vs[i];
+      setEnum[s] = nEnum++;
+    });
+    // Sets are numbered in bucket order; within a bucket, in enumeration order.
+    const setOf = (s) => {
+      const vs = [];
+      let g = 0;
+      for (let i = 0; i < 5; i++) {
+        const v = setV[s * 5 + i];
+        vs.push(allCand[v]);
+        g += gOf[v];
+      }
+      return { vs, pt: bPt[bucketIdx(s)], it: bIt[bucketIdx(s)], g };
+    };
+    const bucketIdx = (s) => {
+      let a = 0;
+      let b = B - 1;
+      while (a < b) {
+        const mid = (a + b + 1) >> 1;
+        if (bStart[mid] <= s) a = mid;
+        else b = mid - 1;
+      }
+      return a;
+    };
+    const bfF = new Int32Array(nSets); // exact best F per group, -1 = not yet computed
+    const bfL = new Int8Array(nSets);
+
+    /**
+     * Visits sets in descending upper bound `ubOf(s, T)` (ties in enumeration order) while that bound reaches
+     * `threshold()` (which only rises). Exact bounds are computed only for sets a bucket bound can't rule out: `T`'s
+     * payoff is a step function of power (it changes only at the table's power breakpoints), so a bucket splits into
+     * levels between breakpoints, each bounded by its lowest power and the bucket's pt/it; `powBound` places sets.
+     */
+    function bestFirst(T, bMax, powBound, ubOf, threshold, visit) {
+      const ps = new Set();
+      for (const n of T.need.values()) ps.add(n.power);
+      if (T.frontier) for (const kept of T.frontier.values()) for (const o of kept) ps.add(o.power);
+      const P = Float64Array.from(ps).sort();
+      const levelOf = (p) => {
+        let a = 0;
+        let b = P.length;
+        while (a < b) {
+          const mid = (a + b) >> 1;
+          if (P[mid] <= p) a = mid + 1;
+          else b = mid;
+        }
+        return a; // p in [P[a - 1], P[a])
+      };
+      const levelUb = (b, k) => choose(T, k > 0 ? P[k - 1] : -Infinity, bPt[b] + maxSnapPoint, bIt[b] + maxSnapItem).sc;
+      const buckets = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.b < y.b));
+      for (let b = 0; b < B; b++) {
+        if (bEnd[b] === bStart[b]) continue;
+        const k = levelOf(bMax[b]);
+        buckets.push({ key: levelUb(b, k), b, k });
+      }
+      const sets = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.e < y.e));
+      for (;;) {
+        while (buckets.size && buckets.top().key >= threshold() && (!sets.size || buckets.top().key >= sets.top().key)) {
+          const { b, k } = buckets.pop();
+          const lo = k > 0 ? P[k - 1] : -Infinity;
+          const hi = k < P.length ? P[k] : Infinity;
+          const th = threshold();
+          for (let s = bStart[b]; s < bEnd[b]; s++) {
+            const p = powBound(s);
+            if (p < lo || p >= hi) continue;
+            const key = ubOf(s, T);
+            if (key >= th) sets.push({ key, s, e: setEnum[s] });
+          }
+          if (k > 0) buckets.push({ key: levelUb(b, k - 1), b, k: k - 1 });
+        }
+        if (!sets.size) break;
+        const x = sets.pop();
+        if (x.key < threshold()) break;
+        visit(x.s);
       }
     }
 
@@ -1234,47 +1436,68 @@
       const rt = rankTable(gc, anySkill ? maxSkill : null, stochastic);
       const tables = (skill) =>
         stochastic ? { bound: rankTable(gc, skill, true), mean: rankTable(gc, skill, false) } : { bound: rankTable(gc, skill), mean: null };
-      const fNo = new Map(allCand.map((v) => [v, slotF(m, v, [0, 0, 0], music, ctx)]));
+      const fNo = Int32Array.from(allCand, (v) => slotF(m, v, [0, 0, 0], music, ctx));
 
-      // Best leader F of each set: simple leaders from precomputed terms, others exactly.
-      const bestF = (vs) => {
-        let base = 0;
-        for (const v of vs) base += fNo.get(v);
-        let best = { f: base, leader: 0 };
-        for (let L = 0; L < 5; L++) {
-          const lv = vs[L];
-          let f;
-          const row = leaderTerm.get(lv);
-          if (row) {
-            f = base;
-            for (const v of vs) f += row.get(v);
-          } else {
-            const order = vs.slice();
-            [order[L], order[LEADER_SLOT]] = [order[LEADER_SLOT], order[L]];
-            const lead = leaderBonuses(m, order, LEADER_SLOT, music);
-            f = 0;
-            order.forEach((v, i) => (f += slotF(m, v, lead[i], music, ctx)));
+      // Exact best leader F of set s (cached in bfF/bfL): simple leaders from LT, others exactly.
+      bfF.fill(-1);
+      const bestF = (s) => {
+        if (bfF[s] < 0) {
+          const o = s * 5;
+          let base = 0;
+          for (let i = 0; i < 5; i++) base += fNo[setV[o + i]];
+          let bf = base;
+          let leader = 0;
+          for (let L = 0; L < 5; L++) {
+            const li = setV[o + L];
+            let f;
+            if (simpleAt[li]) {
+              f = base;
+              for (let i = 0; i < 5; i++) f += LT[li * N + setV[o + i]];
+            } else {
+              const order = [0, 1, 2, 3, 4].map((i) => allCand[setV[o + i]]);
+              [order[L], order[LEADER_SLOT]] = [order[LEADER_SLOT], order[L]];
+              const lead = leaderBonuses(m, order, LEADER_SLOT, music);
+              f = 0;
+              order.forEach((v, i) => (f += slotF(m, v, lead[i], music, ctx)));
+            }
+            if (f > bf || (L === 0 && leader === 0 && f >= bf)) {
+              bf = f;
+              leader = L;
+            }
           }
-          if (f > best.f || (L === 0 && best.leader === 0 && f >= best.f)) best = { f, leader: L };
+          bfF[s] = bf;
+          bfL[s] = leader;
         }
-        return best;
+        return { f: bfF[s], leader: bfL[s] };
       };
-
-      const bfs = sets.map((s) => bestF(s.vs));
-      const scored = sets.map((s, i) => ({ s, bf: bfs[i], ub: upperBound(s, bfs[i], rt) }));
-      scored.sort((a, b) => b.ub - a.ub);
+      // Song-independent bound on each set's power for this group (F without leader + setSU), its maximum per bucket.
+      const powBound = (s) => {
+        const o = s * 5;
+        return setSU[s] + fNo[setV[o]] + fNo[setV[o + 1]] + fNo[setV[o + 2]] + fNo[setV[o + 3]] + fNo[setV[o + 4]];
+      };
+      const bMax = new Float64Array(B);
+      for (let b = 0; b < B; b++) {
+        let mx = -Infinity;
+        for (let s = bStart[b]; s < bEnd[b]; s++) {
+          const p = powBound(s);
+          if (p > mx) mx = p;
+        }
+        bMax[b] = mx;
+      }
+      const ubOf = (s, T) => upperBound(setOf(s), bestF(s), T);
 
       const groupFound = [];
       let kth = -Infinity;
-      for (const { s, bf, ub } of scored) {
-        if (groupFound.length >= topK && ub < kth) break;
-        const t = anySkill || stochastic ? tables(anySkill ? setSkill(s.vs) : null) : { bound: rt, mean: null };
-        if (anySkill && groupFound.length >= topK && upperBound(s, bf, t.bound) < kth) continue;
-        groupFound.push(evaluate(s, bf, t.mean || t.bound, music));
+      bestFirst(rt, bMax, powBound, ubOf, () => (groupFound.length >= topK ? kth : -Infinity), (s) => {
+        const so = setOf(s);
+        const bf = bestF(s);
+        const t = anySkill || stochastic ? tables(anySkill ? setSkill(so.vs) : null) : { bound: rt, mean: null };
+        if (anySkill && groupFound.length >= topK && upperBound(so, bf, t.bound) < kth) return;
+        groupFound.push(evaluate(so, bf, t.mean || t.bound, music));
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
         if (groupFound.length > topK) groupFound.length = topK;
         if (groupFound.length >= topK) kth = groupFound[topK - 1].score;
-      }
+      });
       found.push(...groupFound);
 
       // Song comparison: the best deck of every song of the group, from the same leader terms. The set with the
@@ -1289,29 +1512,21 @@
           const list = idx.map((i) => gc[i]);
           const pick = (a) => Float64Array.from(idx, (i) => a[i]);
           const srt = rankTable(list, anySkill ? pick(maxSkill) : null, stochastic);
-          const songTables = (s) => {
-            const sk = anySkill ? pick(setSkill(s.vs)) : null;
+          const songTables = (vs) => {
+            const sk = anySkill ? pick(setSkill(vs)) : null;
             if (stochastic) return { bound: rankTable(list, sk, true), mean: rankTable(list, sk, false) };
             const b = anySkill ? rankTable(list, sk) : srt;
             return { bound: b, mean: b };
           };
-          const ubs = new Float64Array(sets.length);
-          let top = 0;
-          for (let i = 0; i < sets.length; i++) {
-            ubs[i] = upperBound(sets[i], bfs[i], srt);
-            if (ubs[i] > ubs[top]) top = i;
-          }
-          let best = evaluate(sets[top], bfs[top], songTables(sets[top]).mean, music);
-          const rest = [];
-          for (let i = 0; i < sets.length; i++) if (i !== top && ubs[i] >= best.score) rest.push(i);
-          rest.sort((a, b) => ubs[b] - ubs[a]);
-          for (const i of rest) {
-            if (ubs[i] < best.score) break;
-            const ti = songTables(sets[i]);
-            if ((anySkill || stochastic) && upperBound(sets[i], bfs[i], ti.bound) < best.score) continue;
-            const d = evaluate(sets[i], bfs[i], ti.mean, music);
-            if (d.score > best.score || (d.score === best.score && d.power > best.power)) best = d;
-          }
+          let best = null;
+          bestFirst(srt, bMax, powBound, ubOf, () => (best ? best.score : -Infinity), (s) => {
+            const so = setOf(s);
+            const bf = bestF(s);
+            const ti = songTables(so.vs);
+            if (best && (anySkill || stochastic) && upperBound(so, bf, ti.bound) < best.score) return;
+            const d = evaluate(so, bf, ti.mean, music);
+            if (!best || d.score > best.score || (d.score === best.score && d.power > best.power)) best = d;
+          });
           songs.push(best);
         }
       }
@@ -1328,7 +1543,7 @@
     }
     songs.sort((a, b) => b.score - a.score || b.power - a.power);
     const gekisou = bt ? { rank: bt.rank, justRate: bt.justRate } : null;
-    return { results, songs, rate, gekisou, payoff: pay, ctx, stats: { sets: sets.length, evaluated, groups: groups.size, ms: Date.now() - t0 } };
+    return { results, songs, rate, gekisou, payoff: pay, ctx, stats: { sets: nSets, evaluated, groups: groups.size, ms: Date.now() - t0 } };
   }
 
   /**
