@@ -35,16 +35,19 @@
     multi: false,
     multiPlayers: 5,
     multiOthersAvg: 5000000,
+    multiGekisouRank: 3, // assumed rank in every Gekisou range
+    multiJustRate: 50, // %, of the Just-count ranges' notes
   };
 
   const state = {
     settings: loadJson("deckcalc:settings", {}),
-    roster: null, // {members: {id: {level, awake, rank, skillLevel, guess}}, snaps: {id: {level, rank, guess}}, player}
+    roster: null, // {members: {id: {level, awake, rank, skillLevel, gekisouSkillLevel, guess}}, snaps: {id: {level, rank, guess}}, player}
     master: null,
     version: null,
     perPower: null,
     lengths: null,
     skillWeights: null,
+    battle: null, // Engine.battleFromMusicData: multiplayer lives with Gekisou
     replay: null, // {musicDataUrl, pointer}: the replay simulation named by music-data.json
     simCache: new Map(), // deck request JSON -> order scores
     worker: null,
@@ -85,6 +88,14 @@
   const musicTitle = (id) => (state.master.musics.get(id) ? T(state.master.musics.get(id)._titleTextID) : "#" + id);
   const RARITY_NAMES = { 2: "R", 3: "SR", 4: "SSR", 10: "特殊" };
   const rarityName = (r) => RARITY_NAMES[r] || "★" + r;
+  const liveSkillName = (c) => {
+    const g = state.master.liveSkills.get(c._liveSkillID);
+    return g ? "演出技能：" + T(g._nameTextID) : "";
+  };
+  const gekisouSkillName = (c) => {
+    const g = state.master.gekisouSkills.get(c._gekisouSkillID);
+    return g ? "激奏技能：" + T(g._nameTextID) : "";
+  };
   const typeDot = (t) => `<span class="type-dot t${t}" title="${esc(typeName(t))}"></span>`;
 
   function events() {
@@ -148,6 +159,7 @@
       state.perPower = md ? Engine.perPowerFromMusicData(md) : new Map();
       state.lengths = md ? Engine.chartLengthsFromMusicData(md) : new Map();
       state.skillWeights = md ? Engine.skillWeightsFromMusicData(md) : null;
+      state.battle = md ? Engine.battleFromMusicData(md) : null;
       state.replay = md && md.replay ? { musicDataUrl: Data.MUSIC_DATA_URL, pointer: md.replay } : null;
       state.simCache.clear();
       $("#data-status").textContent =
@@ -199,7 +211,7 @@
         state.worker.onerror = (e) => reject(e);
       });
       state.worker.postMessage({
-        type: "init", raw: slim, lang, perPower: [...state.perPower], lengths: [...state.lengths], replay: state.replay,
+        type: "init", raw: slim, lang, perPower: [...state.perPower], lengths: [...state.lengths], replay: state.replay, battle: state.battle,
         skillWeights: sw ? { kinds: sw.kinds, byScore: [...sw.byScore].map(([k, w]) => [k, Array.from(w)]) } : null,
       });
     } catch (e) {
@@ -212,23 +224,25 @@
   async function runSearch(input, eventId) {
     const now = Date.now();
     if (!state.worker) {
-      const out = Engine.search({ ...input, master: state.master, event: state.master.events.get(eventId), perPowerByScore: state.perPower, skillWeights: state.skillWeights, lengthByScore: state.lengths, now: new Date(now) });
-      const slim = (d) => ({ ...d, members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank, skillLevel: v.liveSkillLevel })), snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)) });
-      return { error: out.error, stats: out.stats, rate: out.rate, results: out.results.map(slim), songs: (out.songs || []).map(slim) };
+      const out = Engine.search({ ...input, master: state.master, event: state.master.events.get(eventId), perPowerByScore: state.perPower, skillWeights: state.skillWeights, battle: state.battle, lengthByScore: state.lengths, now: new Date(now) });
+      const slim = (d) => ({ ...d, members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel })), snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)) });
+      return { error: out.error, stats: out.stats, rate: out.rate, gekisou: out.gekisou, results: out.results.map(slim), songs: (out.songs || []).map(slim) };
     }
     await state.workerReady;
     return workerCall({ type: "search", eventId, input, now });
   }
 
-  // The simulated order scores of decks (worker only), cached per deck and chart.
-  async function simulateDecks(decks) {
+  // The simulated order scores of decks (worker only), cached per deck and chart. `gekisou` ({rank, justRate}, from a
+  // multiplayer search) plays with Gekisou on.
+  async function simulateDecks(decks, gekisou) {
     if (!state.worker || !state.replay) return decks.map(() => null);
     await state.workerReady;
     const reqs = decks.map((d) => ({
       scoreId: d.chart.scoreId,
       power: d.displayPower,
-      members: d.members.map((v) => ({ id: v.id, skillLevel: v.skillLevel || 1 })),
+      members: d.members.map((v) => ({ id: v.id, skillLevel: v.skillLevel || 1, gekisouSkillLevel: v.gekisouSkillLevel || 1 })),
       snaps: d.snaps.map((x) => (x ? { id: x.id, rank: x.rank || 1 } : null)),
+      gekisou: gekisou || null,
     }));
     const keys = reqs.map((r) => JSON.stringify(r));
     const todo = reqs.filter((_, i) => !state.simCache.has(keys[i]));
@@ -296,7 +310,7 @@
         <td class="num tag-param">${range(vals[2])}</td></tr>`)
       .join("");
     return `<table class="rules"><thead><tr><th>對象</th><th>條件</th><th>活動點數</th><th>活動道具</th><th>數值</th></tr></thead><tbody>${body}</tbody></table>
-      <p class="note">數值是 rank 1 → rank 5 的加成，同一張卡符合多個條件時會疊加。成員卡的加成決定活動點數，快照的加成決定活動道具（已用遊戲結算畫面驗證）。「數值」加成只在挑戰 Live 反映在遊戲顯示的綜合力與分數上（已驗證），一般 Live 預設不計入。</p>`;
+      <p class="note">數值是覺醒／開放上限 1 → 5 的加成，同一張卡符合多個條件時會疊加。成員卡的加成決定活動點數，快照的加成決定活動道具（已用遊戲結算畫面驗證）。「數值」加成只在挑戰 Live 反映在遊戲顯示的綜合力與分數上（已驗證），一般 Live 預設不計入。</p>`;
   }
 
   // --- calc tab ---
@@ -351,6 +365,10 @@
             <input type="number" id="multiPlayers" min="2" max="5" value="${s.multiPlayers}" style="width:70px"></label>
           <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"}><span>其他玩家平均分數</span>
             <input type="number" id="multiOthersAvg" min="0" step="100000" value="${s.multiOthersAvg}" style="width:120px"></label>
+          <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="激奏的三段任務（連擊／幸運／JUST）各自在房間裡排名，名次越前，該段分數的加成越高（依歌曲，第 1 名 +250%～+370%，第 4、5 名 +100%～+170%）"><span>激奏每段的名次</span>
+            <select id="multiGekisouRank">${range(1, 5).map((r) => `<option value="${r}" ${r === s.multiGekisouRank ? "selected" : ""}>第 ${r} 名</option>`).join("")}</select></label>
+          <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="JUST 激奏區間裡打出 JUST 的比例（其餘當 PERFECT）。JUST 一個音符算 230%，PERFECT 算 100%"><span>JUST 區間的 JUST 率（%）</span>
+            <input type="number" id="multiJustRate" min="0" max="100" step="5" value="${s.multiJustRate}" style="width:80px"></label>
           <label class="field" ${s.mode === "challenge" ? "" : "hidden"}><span>消耗挑戰點數</span>
             <select id="cp">${[200, 400, 800, 1600].map((v) => `<option ${v === s.cp ? "selected" : ""}>${v}</option>`).join("")}</select></label>
           <label class="field"><span>可穩定打的最高等級</span><input type="number" id="maxLevel" min="1" max="40" value="${s.maxLevel}"></label>
@@ -421,6 +439,14 @@
       s.multiOthersAvg = clamp(Number(e.target.value), 0, 1e9);
       saveSettings();
     };
+    $("#multiGekisouRank").onchange = (e) => {
+      s.multiGekisouRank = clamp(Math.round(Number(e.target.value)), 1, 5);
+      saveSettings();
+    };
+    $("#multiJustRate").onchange = (e) => {
+      s.multiJustRate = clamp(Number(e.target.value), 0, 100);
+      saveSettings();
+    };
     $("#boosts").onchange = (e) => {
       s.boosts = clamp(Number(e.target.value), 0, 10);
       saveSettings();
@@ -455,7 +481,9 @@
     btn.textContent = "計算中…";
     const input = {
       mode: s.mode,
-      members: Object.entries(state.roster.members).map(([id, o]) => ({ id: Number(id), level: o.level, awake: o.awake || 1, rank: o.rank || 1, skillLevel: o.skillLevel || 1 })),
+      members: Object.entries(state.roster.members).map(([id, o]) => ({
+        id: Number(id), level: o.level, awake: o.awake || 1, rank: o.rank || 1, skillLevel: o.skillLevel || 1, gekisouSkillLevel: o.gekisouSkillLevel || 1,
+      })),
       snaps: Object.entries(state.roster.snaps).map(([id, o]) => ({ id: Number(id), level: o.level, rank: o.rank || 1 })),
       player: state.roster.player,
       maxLevel: s.maxLevel,
@@ -466,7 +494,9 @@
       objective: s.objective,
       topK: s.topK,
       compareSongs: true,
-      multi: s.mode === "normal" && s.multi ? { players: s.multiPlayers, othersScore: s.multiOthersAvg * (s.multiPlayers - 1) } : null,
+      multi: s.mode === "normal" && s.multi
+        ? { players: s.multiPlayers, othersScore: s.multiOthersAvg * (s.multiPlayers - 1), gekisouRank: s.multiGekisouRank, justRate: s.multiJustRate / 100 }
+        : null,
       perMinute: s.songPick === "minute" ? { overhead: s.songOverhead } : null,
     };
     try {
@@ -548,9 +578,9 @@
               : `${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕 <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>`
           }）</div>
           ${d.nextRankName ? `<div class="small muted">${esc(d.nextRankName)} 需要 ${fmt(d.nextNeedDisplayPower)}</div>` : ""}
-          <div class="small muted">預估分數約 ${fmt(d.estScore)}${
-            d.baseScore && d.estScore > d.baseScore ? `（演出技能 +${fmt(d.estScore - d.baseScore)}）` : ""
-          }${multi ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""}</div>
+          <div class="small muted">預估${out.gekisou ? "激奏" : ""}分數約 ${fmt(d.estScore)}${skillParts(d)}${
+            multi ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""
+          }</div>
           ${state.worker && state.replay ? `<div class="small sim" data-sim="${key}">模擬中…</div>` : ""}
         </div>
       </div>
@@ -561,6 +591,16 @@
         <button class="small cal-apply" data-key="${key}">校正</button>
       </div>
     </div>`;
+  }
+
+  // What the skills add to the estimated score: live skills, and with Gekisou the members' Gekisou skills.
+  function skillParts(d) {
+    const gk = d.gekisouScore || 0;
+    const live = d.baseScore ? d.estScore - d.baseScore - gk : 0;
+    const parts = [];
+    if (live > 0) parts.push(`演出技能 +${fmt(live)}`);
+    if (gk > 0) parts.push(`激奏技能 +${fmt(gk)}`);
+    return parts.length ? `（${parts.join("，")}）` : "";
   }
 
   // With combo breaks the search ranks by the expected payoff: the chance of each rank it may reach.
@@ -614,7 +654,11 @@
         「模擬分數」再加上快照技能：用 ournotes-deck 的整場模擬算出 120 種發動順序的分數，評級機率同時考慮發動順序和斷 combo 的位置。
         餘裕小於 3% 的隊伍，實際可能差一級。${
           out.input.multi
-            ? `<br>多人（激奏）：活動點數、道具和 CP 看的是<b>房間評級</b>（結算畫面右上角的大徽章），不是自己分數的評級。房間評級＝全房總分對照該曲的多人門檻（依人數調整）；這裡用「自己的預估分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(state.settings.multiOthersAvg)}」估算。其他玩家的分數通常佔大部分，所以加成高的隊伍比綜合力高的隊伍划算。直接開始時歌曲是隨機的，可以在下方「歌曲比較」查各首歌會拿到的評級。`
+            ? `<br>多人（激奏）：活動點數、道具和 CP 看的是<b>房間評級</b>（結算畫面右上角的大徽章），不是自己分數的評級。房間評級＝全房總分對照該曲的多人門檻（依人數調整）；這裡用「自己的預估分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(state.settings.multiOthersAvg)}」估算。其他玩家的分數通常佔大部分，所以加成高的隊伍比綜合力高的隊伍划算。直接開始時歌曲是隨機的，可以在下方「歌曲比較」查各首歌會拿到的評級。${
+                out.gekisou
+                  ? `<br>自己的分數用<b>開激奏</b>的分數：JUST 區間打出 JUST（JUST 率 ${Math.round(out.gekisou.justRate * 100)}%）、每段激奏結束時依名次加成（三段都假設第 ${out.gekisou.rank} 名），再加上成員卡的激奏技能。結算畫面大字的 SCORE 是不含激奏的分數（存成最高分），比這裡低很多。激奏技能在搜尋裡是估計值（各技能分開量再相加，未滿級的依模擬換算）；「模擬分數」逐格模擬，包含成員的激奏技能和快照的激奏技能。`
+                  : ""
+              }`
             : ""
         }${
           out.cpPlan
@@ -675,7 +719,10 @@
     if (top && sure && top[0] === sure[0]) text = `一定是 <b>${name(sure[0])}</b>`;
     else if (top) text = `<b>${name(top[0])}</b> 機率 ${Math.round(top[1] * 100)}%` + (sure ? `，否則 ${name(sure[0])}` : "");
     const differs = likely && likely[0] !== d.rank;
-    return `模擬分數（含快照技能）全 Perfect 平均 ${fmt(Math.round(sim.mean))}；依你的準度平均 <b>${fmt(Math.round(sim.mean * meanShare))}</b>，` +
+    const what = sim.gekisou && out.gekisou
+      ? `開激奏模擬分數（每段第 ${out.gekisou.rank} 名、JUST 率 ${Math.round(out.gekisou.justRate * 100)}%，含快照與激奏技能）`
+      : "模擬分數（含快照技能）";
+    return `${what}全 Perfect 平均 ${fmt(Math.round(sim.mean))}；依你的準度平均 <b>${fmt(Math.round(sim.mean * meanShare))}</b>，` +
       `範圍 ${fmt(Math.round(sc[0] * lo))}–${fmt(Math.round(sc[sc.length - 1] * hi))}：${text}` +
       (differs ? `<span class="${likely[0] > d.rank ? "good" : "warn"}">（與上方預估的 ${esc(d.rankName)} 不同）</span>` : "");
   }
@@ -685,7 +732,7 @@
     if (!state.worker || !state.replay) return;
     const entries = [...decks].map(([key, d]) => ({ d, box: el.querySelector(`.sim[data-sim="${key}"]`) }));
     try {
-      const sims = await simulateDecks(entries.map((e) => e.d));
+      const sims = await simulateDecks(entries.map((e) => e.d), out.gekisou);
       entries.forEach((e, i) => {
         e.d.sim = sims[i];
         if (e.box && e.box.isConnected) e.box.innerHTML = simLine(e.d, out, sims[i]);
@@ -847,11 +894,12 @@
           <div class="badges">${b.point ? `<span class="badge point">♪ +${pct(b.point)}</span>` : ""}${b.item ? `<span class="badge item">道具 +${pct(b.item)}</span>` : ""}</div></div>
         <div class="info"><div class="nm">${typeDot(c._cardType)} ${esc(cardName(c))}</div><div class="st">${rarityName(c._rarity)} ${esc(memberTitle(c))}</div></div>
         ${own ? `<div class="ctl">
-          Lv <input type="number" class="c-level" min="1" max="${lim.limit(awake)}" value="${own.level}">
-          特訓 <select class="c-awake">${range(1, lim.maxAwake).map((a) => `<option ${a === awake ? "selected" : ""}>${a}</option>`).join("")}</select>
-          Rank <select class="c-rank">${range(1, 5).map((r) => `<option ${r === (own.rank || 1) ? "selected" : ""}>${r}</option>`).join("")}</select>
-          技能 <select class="c-skill">${range(1, m.liveSkillMaxLevel.get(c._liveSkillID) || 1).map((l) => `<option ${l === (own.skillLevel || 1) ? "selected" : ""}>${l}</option>`).join("")}</select>
-          <button class="small ghost c-max" title="等級拉到目前特訓上限">Max</button>
+          <span>等級</span><div class="lv"><input type="number" class="c-level" min="1" max="${lim.limit(awake)}" value="${own.level}">
+            <button class="small ghost c-max" title="等級拉到目前特訓上限">Max</button></div>
+          <span>特訓</span><select class="c-awake">${range(1, lim.maxAwake).map((a) => `<option ${a === awake ? "selected" : ""}>${a}</option>`).join("")}</select>
+          <span>覺醒</span><select class="c-rank">${range(1, 5).map((r) => `<option value="${r}" ${r === (own.rank || 1) ? "selected" : ""}>${r}</option>`).join("")}</select>
+          <span title="${esc(liveSkillName(c))}">演出技能</span><select class="c-skill" title="${esc(liveSkillName(c))}">${range(1, m.liveSkillMaxLevel.get(c._liveSkillID) || 1).map((l) => `<option ${l === (own.skillLevel || 1) ? "selected" : ""}>${l}</option>`).join("")}</select>
+          <span title="${esc(gekisouSkillName(c))}">激奏技能</span><select class="c-gskill" title="${esc(gekisouSkillName(c))}">${range(1, m.gekisouSkillMaxLevel.get(c._gekisouSkillID) || 1).map((l) => `<option ${l === (own.gekisouSkillLevel || 1) ? "selected" : ""}>${l}</option>`).join("")}</select>
         </div>` : ""}
       </div>`);
     }
@@ -884,10 +932,14 @@
         const sl = Number($(".c-skill", tile).value) || 1;
         if (sl > 1) own.skillLevel = sl;
         else delete own.skillLevel;
+        const gl = Number($(".c-gskill", tile).value) || 1;
+        if (gl > 1) own.gekisouSkillLevel = gl;
+        else delete own.gekisouSkillLevel;
         delete own.guess;
         saveRoster();
       };
       $(".c-skill", tile).onchange = upd;
+      $(".c-gskill", tile).onchange = upd;
       $(".c-level", tile).onchange = upd;
       $(".c-awake", tile).onchange = () => (upd(), renderMembers());
       $(".c-rank", tile).onchange = () => (upd(), renderMembers());
@@ -922,9 +974,9 @@
           <div class="badges">${b.item ? `<span class="badge item">道具 +${pct(b.item)}</span>` : ""}${b.point ? `<span class="badge point">♪ +${pct(b.point)}</span>` : ""}</div></div>
         <div class="info"><div class="nm">${typeDot(sc._cardType)} ${esc(cardName(sc))}</div><div class="st">${rarityName(sc._rarity)} ${esc(snapTitle(sc))}</div></div>
         ${own ? `<div class="ctl">
-          Lv <input type="number" class="c-level" min="1" max="${Engine.snapLimit(m, sc, rank)}" value="${own.level}">
-          Rank <select class="c-rank">${range(1, 5).map((r) => `<option ${r === rank ? "selected" : ""}>${r}</option>`).join("")}</select>
-          <button class="small ghost c-max">Max</button>
+          <span>等級</span><div class="lv"><input type="number" class="c-level" min="1" max="${Engine.snapLimit(m, sc, rank)}" value="${own.level}">
+            <button class="small ghost c-max" title="等級拉到目前開放上限">Max</button></div>
+          <span>開放上限</span><select class="c-rank">${range(1, 5).map((r) => `<option value="${r}" ${r === rank ? "selected" : ""}>${r}</option>`).join("")}</select>
         </div>` : ""}
       </div>`);
     }
@@ -1232,7 +1284,7 @@
         </label>
         ${imp.msg ? `<p class="good">${esc(imp.msg)}</p>` : ""}
         ${shots ? `<ul class="shots note">${shots}</ul>` : ""}
-        <p class="note">看不到等級的卡片（被畫面邊緣切到）會略過，請捲動後再截一張。特訓次數和 Rank 在清單畫面上看不到，請之後在「成員卡」「快照」分頁調整。</p>
+        <p class="note">看不到等級的卡片（被畫面邊緣切到）會略過，請捲動後再截一張。特訓次數、覺醒和開放上限在清單畫面上看不到，請之後在「成員卡」「快照」分頁調整。</p>
       </div>
       ${
         entries.length
@@ -1241,7 +1293,7 @@
         ${groups}
         <div class="row imp-actions">
           <button id="imp-apply" ${chosen ? "" : "disabled"}>套用 ${chosen} 張到清單</button>
-          <label><input type="checkbox" id="imp-max" ${state.settings.importMaxLevel ? "checked" : ""}> 等級直接設成上限（目前特訓／Rank 能升到的最高等，方便先排隊伍再升級）</label>
+          <label><input type="checkbox" id="imp-max" ${state.settings.importMaxLevel ? "checked" : ""}> 等級直接設成上限（目前特訓／開放上限能升到的最高等，方便先排隊伍再升級）</label>
           <label><input type="checkbox" id="imp-remove" ${imp.removeMissing ? "checked" : ""}> 同時移除清單裡、截圖中沒出現的${[...new Set(imp.shots.filter((s) => s.kind).map((s) => KIND_LABEL[s.kind]))].join("和")}（截圖涵蓋全部持有卡時才勾）</label>
           <button class="ghost" id="imp-clear">清除結果</button>
         </div>
@@ -1494,7 +1546,12 @@
   function importRoster(json) {
     const r = { members: {}, snaps: {}, player: { vipRank: 1, characterRanks: {}, eventParameters: false, ...(json.player || {}) } };
     for (const o of json.members || []) {
-      r.members[o.id] = { level: o.level || 1, awake: o.awake || 1, rank: o.rank || 1, ...(o.skillLevel > 1 ? { skillLevel: o.skillLevel } : {}), ...(o.guess ? { guess: true } : {}) };
+      r.members[o.id] = {
+        level: o.level || 1, awake: o.awake || 1, rank: o.rank || 1,
+        ...(o.skillLevel > 1 ? { skillLevel: o.skillLevel } : {}),
+        ...(o.gekisouSkillLevel > 1 ? { gekisouSkillLevel: o.gekisouSkillLevel } : {}),
+        ...(o.guess ? { guess: true } : {}),
+      };
     }
     for (const o of json.snaps || []) r.snaps[o.id] = { level: o.level || 1, rank: o.rank || 1, ...(o.guess ? { guess: true } : {}) };
     state.roster = r;

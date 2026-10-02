@@ -41,7 +41,8 @@
     "MasterLiveMusic", "MasterLiveMusicScore", "MasterLiveScoreRank", "MasterLiveEventPoint", "MasterLiveEventReward",
     "MasterChallengeLiveEventPoint", "MasterChallengeLiveEventReward", "MasterChallengeMusic", "MasterLiveChallengePoint",
     "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterLiveSkillEffect", "MasterText",
-    "MasterBandItem", "MasterBandItemSkillEffect", "MasterLiveComboScoreBonus",
+    "MasterBandItem", "MasterBandItemSkillEffect", "MasterLiveComboScoreBonus", "MasterGekisouSkill",
+    "MasterGekisouSkillEffect", "MasterGekisouSupportSkill", "MasterLiveJudgementTiming",
   ];
 
   function rows(table) {
@@ -73,6 +74,8 @@
       skillConditions: byId(t.MasterSkillCondition),
       cumulative: byId(t.MasterSkillCumulativeCondition),
       liveSkills: byId(t.MasterLiveSkill),
+      gekisouSkills: byId(t.MasterGekisouSkill),
+      gekisouSupportSkills: byId(t.MasterGekisouSupportSkill),
       musics: byId(t.MasterLiveMusic),
       musicScores: byId(t.MasterLiveMusicScore),
       events: byId(t.MasterEvent),
@@ -87,6 +90,8 @@
       leaderEffects: new Map(),
       liveSkillEffects: new Map(),
       liveSkillMaxLevel: new Map(),
+      gekisouSkillEffects: new Map(),
+      gekisouSkillMaxLevel: new Map(),
       bandItemEffects: new Map(),
     };
     for (const r of t.MasterMemberCardLevel) m.memberLevel.set(r._group + ":" + r._level, r);
@@ -110,6 +115,14 @@
       m.liveSkillEffects.get(k).push(r);
       m.liveSkillMaxLevel.set(r._liveSkillID, Math.max(m.liveSkillMaxLevel.get(r._liveSkillID) || 1, r._level));
     }
+    for (const r of t.MasterGekisouSkillEffect) {
+      const k = r._gekisouSkillID + ":" + r._level;
+      if (!m.gekisouSkillEffects.has(k)) m.gekisouSkillEffects.set(k, []);
+      m.gekisouSkillEffects.get(k).push(r);
+      m.gekisouSkillMaxLevel.set(r._gekisouSkillID, Math.max(m.gekisouSkillMaxLevel.get(r._gekisouSkillID) || 1, r._level));
+    }
+    // Judgement types that can be judged Just (inside a Just-count range of a live with Gekisou).
+    m.justTypes = new Set(t.MasterLiveJudgementTiming.filter((r) => r._noteSimulateJudgement === 6).map((r) => r._noteJudgementType));
     for (const r of t.MasterBandItemSkillEffect) {
       const k = r._bandItemId + ":" + r._level;
       if (!m.bandItemEffects.has(k)) m.bandItemEffects.set(k, []);
@@ -195,11 +208,14 @@
     const characterRanks = (player && player.characterRanks) || {};
     const live = m.liveSkills.get(c._liveSkillID);
     const skillMax = m.liveSkillMaxLevel.get(c._liveSkillID) || 1;
+    const gekisouMax = m.gekisouSkillMaxLevel.get(c._gekisouSkillID) || 1;
     return {
       kind: "member",
       liveSkillCategories: live ? live._skillCategories || [] : [],
       liveSkillId: c._liveSkillID,
       liveSkillLevel: Math.min(skillMax, Math.max(1, Math.floor(Number(owned.skillLevel) || 1))),
+      gekisouSkillId: c._gekisouSkillID || 0,
+      gekisouSkillLevel: Math.min(gekisouMax, Math.max(1, Math.floor(Number(owned.gekisouSkillLevel) || 1))),
       id: c._id,
       assetId: c._assetID,
       characterId: c._characterID,
@@ -815,8 +831,11 @@
    *         boosts, objective: "points"|"items", topK, musicIds, fixed: {memberIds, excludeMemberIds},
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
    *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds,
-   *         multi: {players, othersScore} for a multiplayer (激奏) normal live: the rank is the room's, reached when the
-   *         player's score plus othersScore (the other players' total) meets the battle threshold,
+   *         multi: {players, othersScore, gekisouRank, justRate} for a multiplayer (激奏) normal live: the rank is the
+   *         room's, reached when the player's score plus othersScore (the other players' total) meets the battle
+   *         threshold; with `battle` (battleFromMusicData) the player's score is the Gekisou score at gekisouRank in
+   *         every range (default 1, at most players) and justRate (default 1), members' Gekisou skills included
+   *         (gekisouLevels: level factors, see gekisouSkillRate),
    *         perMinute: {overhead} to choose the chart and rank paying the most per minute (song length + overhead
    *         seconds) instead of per live; a deck's `score` is then per minute and `minutes` is one live's duration}
    */
@@ -863,12 +882,18 @@
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
     const perMinute = input.perMinute ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
     const minutesOf = (c) => ((c.lengthSec || 0) + (perMinute ? perMinute.overhead : 0)) / 60;
-    const sw = input.skillWeights && input.skillWeights.kinds.length ? input.skillWeights : null;
+    // A multiplayer live scores with Gekisou (battleRates): the chart rates, live skill weights and Gekisou skills at
+    // the rank assumed in every range (at most the room size) and the Just rate.
+    const battle = multi && input.battle && input.battle.power ? input.battle : null;
+    const bt = battle ? battleRates(battle, Math.min(multi.gekisouRank || 1, Math.max(1, multi.players)), multi.justRate) : null;
+    const sw = bt
+      ? { kinds: battle.kinds, byScore: bt.weights }
+      : input.skillWeights && input.skillWeights.kinds.length ? input.skillWeights : null;
 
     const musicIds = mode === "challenge"
       ? m.t.MasterChallengeMusic.filter((r) => r._eventId === event._id).map((r) => r._liveMusicId)
       : input.musicIds || null;
-    const chartList = charts(m, input.perPowerByScore, {
+    const chartList = charts(m, bt ? bt.perPower : input.perPowerByScore, {
       maxLevel: input.maxLevel,
       difficulties: input.difficulties,
       musicIds,
@@ -1158,6 +1183,10 @@
       deck.accuracy = accuracyFactor(m, best.chart.scoreId, accuracy);
       deck.estScore = Math.floor(best.power * pcal * deck.scoreRate * calib);
       deck.baseScore = Math.floor(best.power * pcal * deck.chart.perPower * deck.accuracy * calib);
+      if (bt) {
+        const g = order.reduce((a, v) => a + gekisouSkillRate(m, battle, bt, v, best.chart.scoreId, input.gekisouLevels), 0);
+        deck.gekisouScore = Math.floor(best.power * pcal * g * deck.accuracy * calib);
+      }
       return deck;
     }
 
@@ -1169,15 +1198,18 @@
       const gc = group.charts;
       // Live skill score per unit of power of each candidate on each chart of the group; a set adds its five. The
       // bound takes, per chart, the five largest gains of any candidates.
+      // With Gekisou, a member's Gekisou skill adds its own gain (whatever the performance order).
       const skillOf = new Map();
       if (sw) {
         for (const v of allCand) {
           const terms = liveSkillTerms(m, v, sw.kinds);
-          if (!terms.length) continue;
+          const gk = bt ? gc.map((c) => gekisouSkillRate(m, battle, bt, v, c.scoreId, input.gekisouLevels)) : null;
+          if (!terms.length && !(gk && gk.some((x) => x > 0))) continue;
           const a = new Float64Array(gc.length);
           gc.forEach((c, i) => {
             const w = sw.byScore.get(c.scoreId);
             if (w) for (const [q, f] of terms) a[i] += f * w[q];
+            if (gk) a[i] += gk[i];
           });
           skillOf.set(v, a);
         }
@@ -1295,7 +1327,8 @@
       if (results.length >= topK) break;
     }
     songs.sort((a, b) => b.score - a.score || b.power - a.power);
-    return { results, songs, rate, payoff: pay, ctx, stats: { sets: sets.length, evaluated, groups: groups.size, ms: Date.now() - t0 } };
+    const gekisou = bt ? { rank: bt.rank, justRate: bt.justRate } : null;
+    return { results, songs, rate, gekisou, payoff: pay, ctx, stats: { sets: sets.length, evaluated, groups: groups.size, ms: Date.now() - t0 } };
   }
 
   /**
@@ -1347,11 +1380,134 @@
     return out;
   }
 
+  // ---------------------------------------------------------------------------------------------------------------
+  // Multiplayer lives with Gekisou
+  //
+  // A multiplayer (激奏) live plays the chart's three fevers as Gekisou ranges: Just judgements inside Just-count
+  // ranges (230% of a note's score), the Gekisou combo and luck rushes, and at each range's end a rank bonus of a share
+  // of the range's score, by the player's rank in the room for the range's mission. The room's rank compares the summed
+  // Gekisou scores with the battle thresholds; the score saved as the high score (and shown big on the result screen)
+  // has no Gekisou at all. Gekisou skills (member cards) and Gekisou support skills (snaps) only act here.
+
+  /**
+   * Gekisou-on chart data from music-data.json, as nnnotes measured it (theoretical best play: Just inside Just-count
+   * ranges, Perfect elsewhere; rank 1 in every range; luck ranges on the first published seeds):
+   * {power, kinds, shapes: "gekisouSkillId:level" -> aptitude shape of member Gekisou skills (measured at level 5),
+   *  byScore: scoreId -> {seeds: [{seed, score, scorePerfect, ranges: [[rangeScore, rangeScorePerfect, rankBonus]],
+   *  weights, rangeWeights}], percents: rank bonus % per range at ranks 1..5,
+   *  apt: shape -> {tail, tailPerfect, ranges: [[rangeScore, rangeScorePerfect]]} (seed means of the increments)}}.
+   * Plain data (structured-cloneable).
+   */
+  function battleFromMusicData(md) {
+    const dk = md && md.deck;
+    const out = { power: (dk && dk.model && dk.model.power) || 0, kinds: (dk && dk.kinds) || [], shapes: new Map(), byScore: new Map() };
+    if (!out.power) return out;
+    for (const sh of (dk.gekisouAptitude && dk.gekisouAptitude.shapes) || []) {
+      if (sh.source === "member") for (const s of sh.skills) out.shapes.set(s.id + ":" + s.level, sh.id);
+    }
+    for (const s of md.songs || []) {
+      for (const c of s.charts || []) {
+        const d = c.deck;
+        if (!d || d.unplayable || !d.seeds || !d.seeds.length || !d.ranges || d.ranges.length !== 3) continue;
+        const apt = new Map();
+        for (const v of (d.gekisouAptitude && d.gekisouAptitude.variants) || []) {
+          if (v.bandMatch !== null && v.bandMatch !== undefined) continue; // support shapes: the simulation plays them
+          apt.set(v.shape, {
+            tail: v.tail[0],
+            tailPerfect: v.tailPerfect[0],
+            ranges: v.ranges.map((r) => [r.rangeScore[0], r.rangeScorePerfect[0]]),
+          });
+        }
+        out.byScore.set(c.scoreId, {
+          seeds: d.seeds.map((x) => ({
+            seed: x.seed || 0,
+            score: x.score,
+            scorePerfect: x.scorePerfect,
+            ranges: x.ranges.map((r) => [r.rangeScore, r.rangeScorePerfect, r.rankBonus]),
+            weights: x.weights,
+            rangeWeights: x.rangeWeights,
+          })),
+          percents: d.ranges.map((r) => r.rankBonusPercents),
+          apt,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Per chart, the no-skill score per unit of power with Gekisou at `rank` (1..5, every range) and `justRate` (share of
+   * the Just-count ranges' Just notes judged Just, the rest Perfect), and the live skill weights at that rank
+   * (music-data `ranks`: the rank bonus changes by (p(r) - p(1)) / 100 of each range's score). The Just rate
+   * interpolates linearly between the Perfect and the Just play, which is approximate; skill weights were measured on
+   * the Just play only. `gain(scoreId, shape)` is a member Gekisou skill's measured increment per unit of power.
+   */
+  function battleRates(battle, rank, justRate) {
+    const r = Math.min(5, Math.max(1, Math.round(rank || 1)));
+    const j = Math.min(1, Math.max(0, justRate ?? 1));
+    const P = battle.power;
+    const nk = battle.kinds.length;
+    const perPower = new Map();
+    const weights = new Map();
+    const apt = new Map();
+    for (const [sid, b] of battle.byScore) {
+      const p = b.percents.map((row) => [row[0], row[r - 1]]);
+      let base = 0;
+      const w = new Float64Array(nk);
+      for (const s of b.seeds) {
+        let sc = s.score;
+        let sp = s.scorePerfect;
+        s.ranges.forEach(([rs, rsP, rb], i) => {
+          sc += Math.trunc((rs * p[i][1]) / 100) - rb;
+          sp += Math.trunc((rsP * p[i][1]) / 100) - Math.trunc((rsP * p[i][0]) / 100);
+        });
+        base += sp + j * (sc - sp);
+        (s.weights || []).forEach((row, q) => {
+          if (!row || q >= nk) return;
+          const rw = s.rangeWeights && s.rangeWeights[q];
+          for (let k = 0; k < 5; k++) {
+            w[q] += row[k] || 0;
+            if (rw && rw[k]) for (let i = 0; i < 3; i++) w[q] += ((p[i][1] - p[i][0]) / 100) * (rw[k][i] || 0);
+          }
+        });
+      }
+      perPower.set(sid, base / b.seeds.length / P);
+      for (let q = 0; q < nk; q++) w[q] /= 5 * b.seeds.length;
+      weights.set(sid, w);
+      const g = new Map();
+      for (const [shape, a] of b.apt) {
+        g.set(shape, {
+          tail: (a.tailPerfect + j * (a.tail - a.tailPerfect)) / P,
+          ranges: a.ranges.map(([rs, rsP], i) => ((rsP + j * (rs - rsP)) * (1 + p[i][1] / 100)) / P),
+        });
+      }
+      apt.set(sid, g);
+    }
+    return { rank: r, justRate: j, perPower, weights, apt };
+  }
+
+  /**
+   * Expected score per unit of power a member's Gekisou skill adds on chart `scoreId`: nnnotes' measured increment of
+   * its shape (alone, at the top level) times `levels` ("skillId:level" -> factor, Simulate.gekisouLevelFactors) for a
+   * lower level, whose trigger conditions or activation time differ. 0 when the shape was not measured on the chart or a
+   * lower level has no factor. Skills of one deck are added up, which is approximate (the simulation plays them all).
+   */
+  function gekisouSkillRate(m, battle, bt, v, scoreId, levels) {
+    if (!v.gekisouSkillId) return 0;
+    const top = m.gekisouSkillMaxLevel.get(v.gekisouSkillId) || 1;
+    const factor = v.gekisouSkillLevel >= top ? 1 : (levels && levels.get(v.gekisouSkillId + ":" + v.gekisouSkillLevel)) || 0;
+    const shape = battle.shapes.get(v.gekisouSkillId + ":" + top);
+    const g = factor && shape !== undefined && bt.apt.get(scoreId) && bt.apt.get(scoreId).get(shape);
+    if (!g) return 0;
+    return factor * (g.tail + g.ranges.reduce((a, x) => a + x, 0));
+  }
+
   const api = {
     TABLES, RANK_NAMES, buildMaster, memberView, snapView, memberLimits, snapLimit, makeContext, deckPower,
     leaderBonuses, cardEventBonus, eventEffects, describeEventBonus, payoff, boostRate, eventPoints, eventItems,
     charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
+    battleFromMusicData, battleRates, gekisouSkillRate,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Engine = api;
