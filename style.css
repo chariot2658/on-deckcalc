@@ -271,3 +271,4 @@ table.songs .song-row.sel { background: var(--accent-soft); box-shadow: inset 3p
   color: #fff;
   white-space: nowrap;
 }
+.tabs button.attention::after { content: " ●"; color: var(--warn); }

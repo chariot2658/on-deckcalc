@@ -110,5 +110,13 @@
     }
   }
 
-  root.Data = { REGIONS, MUSIC_DATA_URL, loadMaster, loadMusicData, clearAll, memberThumb, snapThumb, safeGet, safeSet };
+  function safeRemove(k) {
+    try {
+      localStorage.removeItem(k);
+    } catch (e) {
+      /* storage unavailable */
+    }
+  }
+
+  root.Data = { REGIONS, MUSIC_DATA_URL, loadMaster, loadMusicData, clearAll, memberThumb, snapThumb, safeGet, safeSet, safeRemove };
 })(self);

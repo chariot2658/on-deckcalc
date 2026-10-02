@@ -72,7 +72,30 @@
     state.roster = r && r.members ? r : { members: {}, snaps: {}, player: { vipRank: 1, characterRanks: {}, eventParameters: false } };
     state.roster.player = { vipRank: 1, characterRanks: {}, eventParameters: false, ...(state.roster.player || {}) };
   }
-  const saveRoster = () => Data.safeSet(rosterKey(), JSON.stringify(state.roster));
+  // The roster lives only in this browser, so changes not yet exported are tracked (ISO time of the first one, per
+  // region) to remind the user to back up.
+  const unsavedKey = () => "deckcalc:unsaved:" + state.settings.region;
+  const BACKUP_REMIND_MS = 24 * 3600 * 1000;
+  function saveRoster() {
+    Data.safeSet(rosterKey(), JSON.stringify(state.roster));
+    if (!Data.safeGet(unsavedKey())) Data.safeSet(unsavedKey(), new Date().toISOString());
+    askPersist();
+    renderBackupHint();
+  }
+  function markBackedUp() {
+    Data.safeRemove(unsavedKey());
+    renderBackupHint();
+  }
+  const rosterEmpty = () => !Object.keys(state.roster.members).length && !Object.keys(state.roster.snaps).length;
+
+  // Asks the browser not to evict the site's storage. Chrome and Edge decide silently, Firefox asks the user, Safari
+  // may still drop it after 7 days without a visit. Only asked once there is a roster to keep.
+  let persistAsked = false;
+  function askPersist() {
+    if (persistAsked || rosterEmpty() || !(navigator.storage && navigator.storage.persist)) return;
+    persistAsked = true;
+    navigator.storage.persist().then(renderBackupHint, () => {});
+  }
 
   // ---------------------------------------------------------------------------------------------------------------
   // Master helpers
@@ -167,6 +190,7 @@
         (md ? "" : " · 譜面資料載入失敗");
       startWorker(mst.raw, lang);
       loadRoster();
+      askPersist();
       imp.found.clear(); // card ids are per region
       imp.shots = [];
       renderAll();
@@ -1443,12 +1467,15 @@
           <button class="ghost" id="clearRoster">清除全部持有</button>
           <button class="ghost" id="clearCache">清除下載快取</button>
         </div>
-        <p class="note">清單存在這個瀏覽器裡（每個區服各一份）。換電腦或瀏覽器時用匯出／匯入搬過去。${local ? `
+        <p class="note">清單只存在這個瀏覽器裡（每個區服各一份），不會上傳。清除瀏覽資料、用無痕視窗，或 iPhone／iPad 的 Safari
+        7 天沒開這個網站時，清單可能消失，請用「匯出 JSON」備份。換電腦或瀏覽器時用「匯入 JSON 檔」搬過去。${local ? `
         「同步到檔案」把目前的清單和設定存到 deckcalc/presets/browser-roster.json。` : ""}</p>
+        <p class="note" id="backupHint"></p>
         <p class="note" id="syncMsg"></p>
         <textarea id="rosterJson" readonly hidden></textarea>
       </div>`;
-    $("#powerCal").onchange = (e) => ((s.powerCal = Number(e.target.value) || 1), saveSettings());
+    renderBackupHint();
+    $("#powerCal").onchange =(e) => ((s.powerCal = Number(e.target.value) || 1), saveSettings());
     $("#vip").onchange = (e) => ((p.vipRank = clamp(Number(e.target.value), 1, 30)), saveRoster());
     $("#eventParam").onchange = (e) => ((p.eventParameters = e.target.checked), saveRoster());
     el.querySelectorAll("[data-char]").forEach((inp) => (inp.onchange = () => {
@@ -1484,6 +1511,7 @@
         const out = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(res.status === 501 ? "伺服器不支援，請關掉後重新執行 start.cmd" : out.error || "HTTP " + res.status);
         msg.innerHTML = `<span class="good">已存到 ${esc(out.saved)}（${new Date().toLocaleTimeString()}）</span>`;
+        markBackedUp();
       } catch (e) {
         msg.innerHTML = `<span class="warn">同步失敗：${esc(e.message)}</span>`;
       }
@@ -1495,12 +1523,14 @@
       a.download = `deckcalc-roster-${state.settings.region}.json`;
       a.click();
       URL.revokeObjectURL(a.href);
+      markBackedUp();
     };
     $("#importFile").onchange = async (e) => {
       const file = e.target.files[0];
       if (!file) return;
       try {
         importRoster(JSON.parse(await file.text()));
+        markBackedUp(); // the file is the backup
       } catch (err) {
         alertBox("匯入失敗：" + err.message);
       }
@@ -1528,6 +1558,29 @@
     pendingConfirm = Date.now();
     alertBox("這會取代目前的卡片清單，4 秒內再按一次確認。");
     return false;
+  }
+
+  // Marks the settings tab when roster changes have gone unexported for a day, and says whether the browser agreed
+  // to keep the site's storage.
+  function renderBackupHint() {
+    if (!state.roster) return;
+    const since = Data.safeGet(unsavedKey());
+    const age = since ? Date.now() - Date.parse(since) : 0;
+    const due = !rosterEmpty() && age >= BACKUP_REMIND_MS;
+    const tab = $('.tabs button[data-tab="settings"]');
+    if (tab) {
+      tab.classList.toggle("attention", due);
+      tab.title = due ? "卡片清單的修改還沒匯出備份" : "";
+    }
+    const el = $("#backupHint");
+    if (!el) return;
+    const reminder = due ? `<span class="warn">卡片清單有 ${Math.floor(age / BACKUP_REMIND_MS)} 天前的修改還沒匯出備份，建議按「匯出 JSON」。</span> ` : "";
+    el.innerHTML = reminder;
+    if (rosterEmpty() || !(navigator.storage && navigator.storage.persisted)) return;
+    navigator.storage.persisted().then((kept) => {
+      if (!el.isConnected) return;
+      el.innerHTML = reminder + (kept ? "瀏覽器已同意長期保留這個網站的資料。" : "瀏覽器沒有保證保留這個網站的資料，請定期匯出備份。");
+    }, () => {});
   }
 
   function alertBox(msg) {
