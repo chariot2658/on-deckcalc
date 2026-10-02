@@ -79,7 +79,8 @@
   const typeName = (t) => T("CardType_" + TYPE_KEYS[t] + "_Name") || TYPE_KEYS[t];
   const tagName = (id) => (state.master.tags.get(id) ? T(state.master.tags.get(id)._nameTextID) : "#" + id);
   const musicTitle = (id) => (state.master.musics.get(id) ? T(state.master.musics.get(id)._titleTextID) : "#" + id);
-  const stars = (r) => (r >= 10 ? "★" + r : "★".repeat(r));
+  const RARITY_NAMES = { 2: "R", 3: "SR", 4: "SSR", 10: "特殊" };
+  const rarityName = (r) => RARITY_NAMES[r] || "★" + r;
   const typeDot = (t) => `<span class="type-dot t${t}" title="${esc(typeName(t))}"></span>`;
 
   function events() {
@@ -222,11 +223,11 @@
     const parts = [];
     if (e._memberCardId > 0) {
       const c = m.memberCards.get(e._memberCardId);
-      if (c) parts.push(`${stars(c._rarity)} ${cardName(c)}「${memberTitle(c)}」`);
+      if (c) parts.push(`${rarityName(c._rarity)} ${cardName(c)}「${memberTitle(c)}」`);
     }
     if (e._supportCardId > 0) {
       const s = m.snaps.get(e._supportCardId);
-      if (s) parts.push(`${stars(s._rarity)} ${cardName(s)}「${snapTitle(s)}」`);
+      if (s) parts.push(`${rarityName(s._rarity)} ${cardName(s)}「${snapTitle(s)}」`);
     }
     if (e._characterId > 0) parts.push(charName(e._characterId));
     if (e._bandId > 0) parts.push(bandName(e._bandId));
@@ -676,7 +677,7 @@
     const rar = kind === "m" ? [2, 3, 4] : [2, 3, 4, 10];
     return `<div class="toolbar">
       <select class="f-band"><option value="">全部樂團</option>${bands}</select>
-      <select class="f-rarity"><option value="">全部稀有度</option>${rar.map((r) => `<option value="${r}" ${String(r) === f.rarity ? "selected" : ""}>${stars(r)}</option>`).join("")}</select>
+      <select class="f-rarity"><option value="">全部稀有度</option>${rar.map((r) => `<option value="${r}" ${String(r) === f.rarity ? "selected" : ""}>${rarityName(r)}</option>`).join("")}</select>
       <label><input type="checkbox" class="f-owned" ${f.owned ? "checked" : ""}> 只顯示已持有</label>
       <label><input type="checkbox" class="f-bonus" ${f.bonus ? "checked" : ""}> 只顯示有活動加成</label>
       <input type="text" class="f-q" placeholder="搜尋名稱" value="${esc(f.q)}">
@@ -722,7 +723,7 @@
         <div class="pic"><img loading="lazy" src="${Data.memberThumb(state.settings.region, c._assetID)}" alt="">
           <span class="check">${own ? "✓" : ""}</span>
           <div class="badges">${b.point ? `<span class="badge point">♪ +${pct(b.point)}</span>` : ""}${b.item ? `<span class="badge item">道具 +${pct(b.item)}</span>` : ""}</div></div>
-        <div class="info"><div class="nm">${typeDot(c._cardType)} ${esc(cardName(c))}</div><div class="st">${stars(c._rarity)} ${esc(memberTitle(c))}</div></div>
+        <div class="info"><div class="nm">${typeDot(c._cardType)} ${esc(cardName(c))}</div><div class="st">${rarityName(c._rarity)} ${esc(memberTitle(c))}</div></div>
         ${own ? `<div class="ctl">
           Lv <input type="number" class="c-level" min="1" max="${lim.limit(awake)}" value="${own.level}">
           特訓 <select class="c-awake">${range(1, lim.maxAwake).map((a) => `<option ${a === awake ? "selected" : ""}>${a}</option>`).join("")}</select>
@@ -792,7 +793,7 @@
         <div class="pic"><img loading="lazy" src="${Data.snapThumb(state.settings.region, sc._assetID)}" alt="">
           <span class="check">${own ? "✓" : ""}</span>
           <div class="badges">${b.item ? `<span class="badge item">道具 +${pct(b.item)}</span>` : ""}${b.point ? `<span class="badge point">♪ +${pct(b.point)}</span>` : ""}</div></div>
-        <div class="info"><div class="nm">${typeDot(sc._cardType)} ${esc(cardName(sc))}</div><div class="st">${stars(sc._rarity)} ${esc(snapTitle(sc))}</div></div>
+        <div class="info"><div class="nm">${typeDot(sc._cardType)} ${esc(cardName(sc))}</div><div class="st">${rarityName(sc._rarity)} ${esc(snapTitle(sc))}</div></div>
         ${own ? `<div class="ctl">
           Lv <input type="number" class="c-level" min="1" max="${Engine.snapLimit(m, sc, rank)}" value="${own.level}">
           Rank <select class="c-rank">${range(1, 5).map((r) => `<option ${r === rank ? "selected" : ""}>${r}</option>`).join("")}</select>
@@ -1056,7 +1057,7 @@
       : `<select class="i-id" title="最接近的幾張">${e.candidates
           .map((id) => {
             const c = e.kind === "member" ? m.memberCards.get(id) : m.snaps.get(id);
-            return c ? `<option value="${id}" ${id === e.id ? "selected" : ""}>${esc(cardName(c))} ${stars(c._rarity)} ${esc(e.kind === "member" ? memberTitle(c) : snapTitle(c))}</option>` : "";
+            return c ? `<option value="${id}" ${id === e.id ? "selected" : ""}>${esc(cardName(c))} ${rarityName(c._rarity)} ${esc(e.kind === "member" ? memberTitle(c) : snapTitle(c))}</option>` : "";
           })
           .join("")}</select>`;
     return `<div class="imp-row ${e.kind} ${e.include ? "" : "off"}" data-key="${esc(key)}">
@@ -1064,7 +1065,7 @@
       <img class="i-shot" src="${e.preview}" alt="截圖">
       <img class="i-thumb" src="${thumb}" alt="">
       <div class="i-info">
-        <div class="nm">${typeDot(card._cardType)} ${esc(cardName(card))} <span class="muted">${stars(card._rarity)}</span>
+        <div class="nm">${typeDot(card._cardType)} ${esc(cardName(card))} <span class="muted">${rarityName(card._rarity)}</span>
           ${e.sure ? "" : '<span class="warn">請確認是哪一張</span>'}</div>
         <div class="st muted">${esc(title)}</div>
         ${pick}
