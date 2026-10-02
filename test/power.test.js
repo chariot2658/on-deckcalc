@@ -31,6 +31,14 @@ const ranks20261002 = {
   require("assert").strictEqual(p, 378423);
 }
 
+// Exact: the same team after characters 9, 11 and 12 ranked up (results/IMG_0044, 378468; total rank 174 -> 177).
+{
+  const team = [[32, 40, 56, 50], [59, 50, 63, 50], [60, 50, 60, 70, 3], [11, 30, 37, 40], [39, 40, 61, 70, 3]];
+  const p = power(team, { vipRank: 4, characterRanks: { ...ranks20261002, 9: 8, 11: 9, 12: 7 } }, 100054);
+  console.log("IMG_0044 (378468) model", p, "(exact)");
+  require("assert").strictEqual(p, 378468);
+}
+
 // Exact: a challenge live adds the event parameter bonus (type 2) to the power, which normal lives do not
 // (results/IMG_0041, 夢我夢中 challenge deck, 244053; character ranks as synced from the browser on 2026-10-02).
 {

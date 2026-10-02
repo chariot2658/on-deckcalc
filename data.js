@@ -110,5 +110,5 @@
     }
   }
 
-  root.Data = { REGIONS, loadMaster, loadMusicData, clearAll, memberThumb, snapThumb, safeGet, safeSet };
+  root.Data = { REGIONS, MUSIC_DATA_URL, loadMaster, loadMusicData, clearAll, memberThumb, snapThumb, safeGet, safeSet };
 })(self);

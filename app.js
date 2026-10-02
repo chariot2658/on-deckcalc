@@ -26,7 +26,8 @@
     objective: "points",
     topK: 5,
     powerCal: 1.0,
-    scoreCal: 1.0,
+    perfectRate: 100, // %, of judged notes
+    comboBreaks: 0, // Miss + Bad per live
     importMaxLevel: false,
     songSort: "live",
     songPick: "live",
@@ -38,11 +39,14 @@
 
   const state = {
     settings: loadJson("deckcalc:settings", {}),
-    roster: null, // {members: {id: {level, awake, rank, guess}}, snaps: {id: {level, rank, guess}}, player}
+    roster: null, // {members: {id: {level, awake, rank, skillLevel, guess}}, snaps: {id: {level, rank, guess}}, player}
     master: null,
     version: null,
     perPower: null,
     lengths: null,
+    skillWeights: null,
+    replay: null, // {musicDataUrl, pointer}: the replay simulation named by music-data.json
+    simCache: new Map(), // deck request JSON -> order scores
     worker: null,
     workerReady: null,
     lastResults: null,
@@ -143,6 +147,9 @@
       state.version = mst;
       state.perPower = md ? Engine.perPowerFromMusicData(md) : new Map();
       state.lengths = md ? Engine.chartLengthsFromMusicData(md) : new Map();
+      state.skillWeights = md ? Engine.skillWeightsFromMusicData(md) : null;
+      state.replay = md && md.replay ? { musicDataUrl: Data.MUSIC_DATA_URL, pointer: md.replay } : null;
+      state.simCache.clear();
       $("#data-status").textContent =
         `資料版本 ${String(mst.version).slice(0, 8)} · 更新於 ${new Date(mst.verifiedAt).toLocaleString()}` +
         (md ? "" : " · 譜面資料載入失敗");
@@ -159,17 +166,42 @@
     }
   }
 
+  // Requests to the worker by id: search and simulate replies may interleave.
+  const pending = new Map();
+  let workerSeq = 0;
+  function workerCall(msg) {
+    return new Promise((resolve, reject) => {
+      const id = ++workerSeq;
+      pending.set(id, { resolve, reject });
+      state.worker.postMessage({ ...msg, id });
+    });
+  }
+
   function startWorker(raw, lang) {
     if (state.worker) state.worker.terminate();
+    for (const p of pending.values()) p.reject(new Error("worker restarted"));
+    pending.clear();
     const slim = {};
     for (const k of Object.keys(raw)) if (k !== "MasterText") slim[k] = raw[k];
+    const sw = state.skillWeights;
     try {
       state.worker = new Worker("worker.js");
       state.workerReady = new Promise((resolve, reject) => {
-        state.worker.onmessage = (e) => (e.data.type === "ready" ? resolve() : null);
+        state.worker.onmessage = (e) => {
+          const d = e.data;
+          if (d.type === "ready") return resolve();
+          const p = pending.get(d.id);
+          if (!p) return;
+          pending.delete(d.id);
+          if (d.type === "error") p.reject(new Error(d.message));
+          else p.resolve(d);
+        };
         state.worker.onerror = (e) => reject(e);
       });
-      state.worker.postMessage({ type: "init", raw: slim, lang, perPower: [...state.perPower], lengths: [...state.lengths] });
+      state.worker.postMessage({
+        type: "init", raw: slim, lang, perPower: [...state.perPower], lengths: [...state.lengths], replay: state.replay,
+        skillWeights: sw ? { kinds: sw.kinds, byScore: [...sw.byScore].map(([k, w]) => [k, Array.from(w)]) } : null,
+      });
     } catch (e) {
       console.warn("worker unavailable, searching on the main thread", e);
       state.worker = null;
@@ -177,24 +209,34 @@
     }
   }
 
-  let searchSeq = 0;
   async function runSearch(input, eventId) {
     const now = Date.now();
     if (!state.worker) {
-      const out = Engine.search({ ...input, master: state.master, event: state.master.events.get(eventId), perPowerByScore: state.perPower, lengthByScore: state.lengths, now: new Date(now) });
-      const slim = (d) => ({ ...d, members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank })), snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)) });
+      const out = Engine.search({ ...input, master: state.master, event: state.master.events.get(eventId), perPowerByScore: state.perPower, skillWeights: state.skillWeights, lengthByScore: state.lengths, now: new Date(now) });
+      const slim = (d) => ({ ...d, members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank, skillLevel: v.liveSkillLevel })), snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)) });
       return { error: out.error, stats: out.stats, rate: out.rate, results: out.results.map(slim), songs: (out.songs || []).map(slim) };
     }
     await state.workerReady;
-    const id = ++searchSeq;
-    return new Promise((resolve, reject) => {
-      state.worker.onmessage = (e) => {
-        if (e.data.id !== id) return;
-        if (e.data.type === "error") reject(new Error(e.data.message));
-        else resolve(e.data);
-      };
-      state.worker.postMessage({ type: "search", id, eventId, input, now });
-    });
+    return workerCall({ type: "search", eventId, input, now });
+  }
+
+  // The simulated order scores of decks (worker only), cached per deck and chart.
+  async function simulateDecks(decks) {
+    if (!state.worker || !state.replay) return decks.map(() => null);
+    await state.workerReady;
+    const reqs = decks.map((d) => ({
+      scoreId: d.chart.scoreId,
+      power: d.displayPower,
+      members: d.members.map((v) => ({ id: v.id, skillLevel: v.skillLevel || 1 })),
+      snaps: d.snaps.map((x) => (x ? { id: x.id, rank: x.rank || 1 } : null)),
+    }));
+    const keys = reqs.map((r) => JSON.stringify(r));
+    const todo = reqs.filter((_, i) => !state.simCache.has(keys[i]));
+    if (todo.length) {
+      const res = await workerCall({ type: "simulate", decks: todo });
+      todo.forEach((r, i) => state.simCache.set(JSON.stringify(r), res.out[i]));
+    }
+    return keys.map((k) => state.simCache.get(k));
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -312,6 +354,10 @@
           <label class="field" ${s.mode === "challenge" ? "" : "hidden"}><span>消耗挑戰點數</span>
             <select id="cp">${[200, 400, 800, 1600].map((v) => `<option ${v === s.cp ? "selected" : ""}>${v}</option>`).join("")}</select></label>
           <label class="field"><span>可穩定打的最高等級</span><input type="number" id="maxLevel" min="1" max="40" value="${s.maxLevel}"></label>
+          <label class="field" title="結算畫面的 PERFECT ÷ 全部判定"><span>平常的 Perfect 率（%）</span>
+            <input type="number" id="perfectRate" min="50" max="100" step="0.1" value="${s.perfectRate}" style="width:80px"></label>
+          <label class="field" title="斷 combo 的只有 MISS 和 BAD（GOOD 不會斷）。斷在曲子中段最傷，可能少 6~7% 分數"><span>每場斷 combo 次數（MISS＋BAD）</span>
+            <input type="number" id="comboBreaks" min="0" max="20" step="0.5" value="${s.comboBreaks}" style="width:80px"></label>
           <div class="field"><span>難度</span><div class="chips">${diffChips}</div></div>
           <div class="field"><span>選歌</span>
             <div class="chips">
@@ -387,6 +433,14 @@
       s.maxLevel = clamp(Number(e.target.value), 1, 40);
       saveSettings();
     };
+    $("#perfectRate").onchange = (e) => {
+      s.perfectRate = clamp(Number(e.target.value), 50, 100);
+      saveSettings();
+    };
+    $("#comboBreaks").onchange = (e) => {
+      s.comboBreaks = clamp(Number(e.target.value), 0, 20);
+      saveSettings();
+    };
     $("#run").onclick = calculate;
     if (state.lastResults && state.lastResults.eventId === ev._id) renderResults(state.lastResults);
   }
@@ -401,12 +455,12 @@
     btn.textContent = "計算中…";
     const input = {
       mode: s.mode,
-      members: Object.entries(state.roster.members).map(([id, o]) => ({ id: Number(id), level: o.level, awake: o.awake || 1, rank: o.rank || 1 })),
+      members: Object.entries(state.roster.members).map(([id, o]) => ({ id: Number(id), level: o.level, awake: o.awake || 1, rank: o.rank || 1, skillLevel: o.skillLevel || 1 })),
       snaps: Object.entries(state.roster.snaps).map(([id, o]) => ({ id: Number(id), level: o.level, rank: o.rank || 1 })),
       player: state.roster.player,
       maxLevel: s.maxLevel,
       difficulties: s.difficulties,
-      calibration: s.scoreCal,
+      accuracy: { perfectRate: s.perfectRate / 100, breaks: s.comboBreaks },
       powerCalibration: s.powerCal,
       boosts: s.mode === "challenge" ? s.cp : s.boosts,
       objective: s.objective,
@@ -472,6 +526,7 @@
         <div><div class="big"><span class="points">${fmt(d.points)} pt</span>${
           d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""
         } · <span class="items">${fmt(d.items)} 道具</span></div>
+          ${rankDistLine(d)}
           ${
             out.cpPlan && d.cp
               ? `<div class="small">CP 換算約 ${fmt(Math.round(d.cpPoints))} pt，合計約 <b class="points">${fmt(Math.round(d.points + d.cpPoints))} pt</b></div>`
@@ -494,18 +549,25 @@
           }）</div>
           ${d.nextRankName ? `<div class="small muted">${esc(d.nextRankName)} 需要 ${fmt(d.nextNeedDisplayPower)}</div>` : ""}
           <div class="small muted">預估分數約 ${fmt(d.estScore)}${
-            multi ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""
-          }</div>
+            d.baseScore && d.estScore > d.baseScore ? `（演出技能 +${fmt(d.estScore - d.baseScore)}）` : ""
+          }${multi ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""}</div>
+          ${state.worker && state.replay ? `<div class="small sim" data-sim="${key}">模擬中…</div>` : ""}
         </div>
       </div>
       <div class="slots">${slots}</div>
       <div class="calib">
-        用這隊實際打一場後，可以回報數據校正模型：
+        用這隊實際打一場後，可以回報綜合力校正模型：
         遊戲顯示綜合力 <input type="number" class="cal-power" style="width:100px">
-        實際分數 <input type="number" class="cal-score" style="width:110px">
         <button class="small cal-apply" data-key="${key}">校正</button>
       </div>
     </div>`;
+  }
+
+  // With combo breaks the search ranks by the expected payoff: the chance of each rank it may reach.
+  function rankDistLine(d) {
+    if (!d.rankDist || d.rankDist.length < 2) return "";
+    const parts = d.rankDist.map((x) => `${esc(x.rankName)} ${Math.round(x.p * 100)}%`).join("、");
+    return `<div class="small">依你的準度（斷 combo 的位置不同）：${parts}，數字是期望值</div>`;
   }
 
   function bindCalibration(el, decks) {
@@ -513,18 +575,9 @@
       const d = decks.get(b.dataset.key);
       const box = b.closest(".calib");
       const shown = Number($(".cal-power", box).value);
-      const score = Number($(".cal-score", box).value);
-      const msgs = [];
-      if (shown > 0) {
-        state.settings.powerCal = shown / d.power;
-        msgs.push(`綜合力校正 = ${state.settings.powerCal.toFixed(4)}`);
-      }
-      if (score > 0) {
-        const base = (shown > 0 ? shown : d.displayPower) * d.chart.perPower;
-        state.settings.scoreCal = score / base;
-        msgs.push(`分數校正 = ${state.settings.scoreCal.toFixed(4)}`);
-      }
-      if (!msgs.length) return;
+      if (!(shown > 0)) return;
+      state.settings.powerCal = shown / d.power;
+      const msgs = [`綜合力校正 = ${state.settings.powerCal.toFixed(4)}`];
       saveSettings();
       box.insertAdjacentHTML("beforeend", `<div class="good">已更新：${msgs.join("，")}。請重新計算。</div>`);
     }));
@@ -556,7 +609,9 @@
     const hasSongs = out.songs && out.songs.length > 0;
     el.innerHTML = `<div class="panel">
         <h2>結果</h2>
-        <p class="note">分數以「全 Perfect、不含演出技能」的計分資料 × 分數校正 ${s.scoreCal.toFixed(3)} 估算，綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
+        <p class="note">預估分數＝全 Perfect 的計分資料加上演出技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折；綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
+        有斷 combo 時分數會隨斷的位置變動（斷在中段最傷），排名改用各評級機率加權的期望收益，餘裕太小、可能掉級的隊伍會排在後面。
+        「模擬分數」再加上快照技能：用 ournotes-deck 的整場模擬算出 120 種發動順序的分數，評級機率同時考慮發動順序和斷 combo 的位置。
         餘裕小於 3% 的隊伍，實際可能差一級。${
           out.input.multi
             ? `<br>多人（激奏）：活動點數、道具和 CP 看的是<b>房間評級</b>（結算畫面右上角的大徽章），不是自己分數的評級。房間評級＝全房總分對照該曲的多人門檻（依人數調整）；這裡用「自己的預估分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(state.settings.multiOthersAvg)}」估算。其他玩家的分數通常佔大部分，所以加成高的隊伍比綜合力高的隊伍划算。直接開始時歌曲是隨機的，可以在下方「歌曲比較」查各首歌會拿到的評級。`
@@ -572,7 +627,73 @@
         }${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>
       </div>${cards || '<div class="panel">沒有結果。</div>'}${hasSongs ? `<div class="panel" id="songs"></div><div id="song-deck"></div>` : ""}`;
     bindCalibration(el, decks);
+    fillSims(el, decks, out);
     if (hasSongs) renderSongs(out);
+  }
+
+  // Own score each rank needs: solo thresholds, or what the room's other players leave (as the search).
+  function ownThresholds(d, out) {
+    const multi = out.input.multi;
+    if (!multi) return d.chart.thresholds;
+    return d.chart.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, Engine.battleRequiredScore(base, multi.players) - (multi.othersScore || 0))]);
+  }
+
+  // The simulated scores with the play accuracy, and the chance of each rank over performance orders and breaks.
+  function simLine(d, out, sim) {
+    if (!sim) return '<span class="muted">這首歌沒有模擬資料。</span>';
+    const acc = out.input.accuracy || { perfectRate: 1, breaks: 0 };
+    const shares = Engine.playShares(state.master, d.chart.scoreId, acc);
+    const meanShare = shares.reduce((a, [x, w]) => a + x * w, 0);
+    const lo = Math.min(...shares.map(([x]) => x));
+    const hi = Math.max(...shares.map(([x]) => x));
+    const sc = sim.scores;
+    const need = new Map();
+    for (const [r, req] of ownThresholds(d, out)) if (!need.has(r) || req < need.get(r)) need.set(r, req);
+    // P(order score x share >= req): per order, the weight of the shares of at least req / score.
+    const sorted = shares.slice().sort((a, b) => a[0] - b[0]);
+    const tail = new Float64Array(sorted.length + 1);
+    for (let i = sorted.length - 1; i >= 0; i--) tail[i] = tail[i + 1] + sorted[i][1];
+    const atLeast = (x) => {
+      let a = 0;
+      let b = sorted.length;
+      while (a < b) {
+        const mid = (a + b) >> 1;
+        if (sorted[mid][0] < x) a = mid + 1;
+        else b = mid;
+      }
+      return tail[a];
+    };
+    const chance = [...need]
+      .map(([r, req]) => [r, Math.min(1, sc.reduce((a, x) => a + atLeast(req / x), 0) / sc.length)])
+      .map(([r, p]) => [r, p > 0.9995 ? 1 : p < 0.0005 ? 0 : p])
+      .sort((a, b) => b[0] - a[0]);
+    const name = (r) => Engine.RANK_NAMES[r] || String(r);
+    const top = chance.find(([, p]) => p > 0);
+    const sure = chance.find(([, p]) => p === 1);
+    const likely = chance.find(([, p]) => p >= 0.5);
+    let text = "";
+    if (top && sure && top[0] === sure[0]) text = `一定是 <b>${name(sure[0])}</b>`;
+    else if (top) text = `<b>${name(top[0])}</b> 機率 ${Math.round(top[1] * 100)}%` + (sure ? `，否則 ${name(sure[0])}` : "");
+    const differs = likely && likely[0] !== d.rank;
+    return `模擬分數（含快照技能）全 Perfect 平均 ${fmt(Math.round(sim.mean))}；依你的準度平均 <b>${fmt(Math.round(sim.mean * meanShare))}</b>，` +
+      `範圍 ${fmt(Math.round(sc[0] * lo))}–${fmt(Math.round(sc[sc.length - 1] * hi))}：${text}` +
+      (differs ? `<span class="${likely[0] > d.rank ? "good" : "warn"}">（與上方預估的 ${esc(d.rankName)} 不同）</span>` : "");
+  }
+
+  // Fills the simulation line of each rendered deck card once the worker answers.
+  async function fillSims(el, decks, out) {
+    if (!state.worker || !state.replay) return;
+    const entries = [...decks].map(([key, d]) => ({ d, box: el.querySelector(`.sim[data-sim="${key}"]`) }));
+    try {
+      const sims = await simulateDecks(entries.map((e) => e.d));
+      entries.forEach((e, i) => {
+        e.d.sim = sims[i];
+        if (e.box && e.box.isConnected) e.box.innerHTML = simLine(e.d, out, sims[i]);
+      });
+    } catch (err) {
+      console.warn(err);
+      for (const e of entries) if (e.box && e.box.isConnected) e.box.innerHTML = `<span class="muted">無法模擬：${esc(err.message)}</span>`;
+    }
   }
 
   // --- song comparison ---
@@ -614,7 +735,7 @@
         return `<tr class="song-row ${r.k === songView.selected ? "sel" : ""}" data-k="${r.k}">
           <td class="num">${list.indexOf(r) + 1}</td>
           <td><b>${esc(musicTitle(d.chart.musicId))}</b> <span class="muted small">${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</span>${tags}</td>
-          <td>${esc(d.rankName)}</td>
+          <td>${esc(d.rankName)}${d.rankChance !== null && d.rankChance !== undefined && d.rankChance < 0.995 ? ` <span class="muted small">${Math.round(d.rankChance * 100)}%</span>` : ""}</td>
           <td class="num"><b>${fmt(Math.round(r.v))}</b>${parts}</td>
           <td class="num">${len ? mmss(len) : "—"}</td>
           <td class="num">${r.pm !== null ? fmt(Math.round(r.pm)) : "—"}</td>
@@ -667,6 +788,7 @@
     }
     el.innerHTML = deckCard(d, `${musicTitle(d.chart.musicId)} 的最佳隊伍`, "s", resultUnit(out), out);
     bindCalibration(el, new Map([["s", d]]));
+    fillSims(el, new Map([["s", d]]), out);
   }
 
   // --- card pickers ---
@@ -728,6 +850,7 @@
           Lv <input type="number" class="c-level" min="1" max="${lim.limit(awake)}" value="${own.level}">
           特訓 <select class="c-awake">${range(1, lim.maxAwake).map((a) => `<option ${a === awake ? "selected" : ""}>${a}</option>`).join("")}</select>
           Rank <select class="c-rank">${range(1, 5).map((r) => `<option ${r === (own.rank || 1) ? "selected" : ""}>${r}</option>`).join("")}</select>
+          技能 <select class="c-skill">${range(1, m.liveSkillMaxLevel.get(c._liveSkillID) || 1).map((l) => `<option ${l === (own.skillLevel || 1) ? "selected" : ""}>${l}</option>`).join("")}</select>
           <button class="small ghost c-max" title="等級拉到目前特訓上限">Max</button>
         </div>` : ""}
       </div>`);
@@ -758,9 +881,13 @@
         own.awake = Number($(".c-awake", tile).value);
         own.rank = Number($(".c-rank", tile).value);
         own.level = clamp(Number($(".c-level", tile).value), 1, lim.limit(own.awake));
+        const sl = Number($(".c-skill", tile).value) || 1;
+        if (sl > 1) own.skillLevel = sl;
+        else delete own.skillLevel;
         delete own.guess;
         saveRoster();
       };
+      $(".c-skill", tile).onchange = upd;
       $(".c-level", tile).onchange = upd;
       $(".c-awake", tile).onchange = () => (upd(), renderMembers());
       $(".c-rank", tile).onchange = () => (upd(), renderMembers());
@@ -1219,7 +1346,6 @@
         <h2>校正</h2>
         <div class="row">
           <label class="field"><span>綜合力校正（遊戲顯示 ÷ 模型）</span><input type="number" step="0.001" id="powerCal" value="${s.powerCal}"></label>
-          <label class="field"><span>分數校正（技能與準度）</span><input type="number" step="0.001" id="scoreCal" value="${s.scoreCal}"></label>
           <label class="field"><span>T.G.W CARD 等級</span><input type="number" id="vip" min="1" max="30" value="${p.vipRank || 1}"></label>
           <label><input type="checkbox" id="eventParam" ${p.eventParameters ? "checked" : ""}> 一般 Live 也計入活動「數值」加成</label>
         </div>
@@ -1269,7 +1395,6 @@
         <textarea id="rosterJson" readonly hidden></textarea>
       </div>`;
     $("#powerCal").onchange = (e) => ((s.powerCal = Number(e.target.value) || 1), saveSettings());
-    $("#scoreCal").onchange = (e) => ((s.scoreCal = Number(e.target.value) || 1), saveSettings());
     $("#vip").onchange = (e) => ((p.vipRank = clamp(Number(e.target.value), 1, 30)), saveRoster());
     $("#eventParam").onchange = (e) => ((p.eventParameters = e.target.checked), saveRoster());
     el.querySelectorAll("[data-char]").forEach((inp) => (inp.onchange = () => {
@@ -1368,7 +1493,9 @@
 
   function importRoster(json) {
     const r = { members: {}, snaps: {}, player: { vipRank: 1, characterRanks: {}, eventParameters: false, ...(json.player || {}) } };
-    for (const o of json.members || []) r.members[o.id] = { level: o.level || 1, awake: o.awake || 1, rank: o.rank || 1, ...(o.guess ? { guess: true } : {}) };
+    for (const o of json.members || []) {
+      r.members[o.id] = { level: o.level || 1, awake: o.awake || 1, rank: o.rank || 1, ...(o.skillLevel > 1 ? { skillLevel: o.skillLevel } : {}), ...(o.guess ? { guess: true } : {}) };
+    }
     for (const o of json.snaps || []) r.snaps[o.id] = { level: o.level || 1, rank: o.rank || 1, ...(o.guess ? { guess: true } : {}) };
     state.roster = r;
     saveRoster();

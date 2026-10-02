@@ -40,8 +40,8 @@
     "MasterSkillConditionSet", "MasterSkillCumulativeCondition", "MasterVipRankBonus", "MasterParameter",
     "MasterLiveMusic", "MasterLiveMusicScore", "MasterLiveScoreRank", "MasterLiveEventPoint", "MasterLiveEventReward",
     "MasterChallengeLiveEventPoint", "MasterChallengeLiveEventReward", "MasterChallengeMusic", "MasterLiveChallengePoint",
-    "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterText", "MasterBandItem",
-    "MasterBandItemSkillEffect",
+    "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterLiveSkillEffect", "MasterText",
+    "MasterBandItem", "MasterBandItemSkillEffect", "MasterLiveComboScoreBonus",
   ];
 
   function rows(table) {
@@ -85,6 +85,8 @@
       levelLimit: new Map(),
       conditionSets: new Map(),
       leaderEffects: new Map(),
+      liveSkillEffects: new Map(),
+      liveSkillMaxLevel: new Map(),
       bandItemEffects: new Map(),
     };
     for (const r of t.MasterMemberCardLevel) m.memberLevel.set(r._group + ":" + r._level, r);
@@ -102,11 +104,23 @@
       if (!m.leaderEffects.has(k)) m.leaderEffects.set(k, []);
       m.leaderEffects.get(k).push(r);
     }
+    for (const r of t.MasterLiveSkillEffect) {
+      const k = r._liveSkillID + ":" + r._level;
+      if (!m.liveSkillEffects.has(k)) m.liveSkillEffects.set(k, []);
+      m.liveSkillEffects.get(k).push(r);
+      m.liveSkillMaxLevel.set(r._liveSkillID, Math.max(m.liveSkillMaxLevel.get(r._liveSkillID) || 1, r._level));
+    }
     for (const r of t.MasterBandItemSkillEffect) {
       const k = r._bandItemId + ":" + r._level;
       if (!m.bandItemEffects.has(k)) m.bandItemEffects.set(k, []);
       m.bandItemEffects.get(k).push(r);
     }
+    // Combo bonus (type 0): [required combo, running binary32 sum of the factors], as ournotes-deck ComboTable.
+    let comboAcc = 0;
+    m.comboBonus = t.MasterLiveComboScoreBonus.filter((r) => r._comboBonusType === 0)
+      .sort((a, b) => a._requiredComboCount - b._requiredComboCount)
+      .map((r) => [r._requiredComboCount, (comboAcc = f32(comboAcc + r._bonusFactor))]);
+    m.breakFactors = new Map();
     m.characterRankBonus = t.MasterCharacterRank.map((r) => [r._rank, r._bonus]).sort((a, b) => a[0] - b[0]);
     m.characterTotalRankBonus = t.MasterCharacterTotalRank.map((r) => [r._totalRank, r._bonus]).sort((a, b) => a[0] - b[0]);
     m.musicTypeBase = m.param("music_type_base_bonus_rate");
@@ -180,9 +194,12 @@
     );
     const characterRanks = (player && player.characterRanks) || {};
     const live = m.liveSkills.get(c._liveSkillID);
+    const skillMax = m.liveSkillMaxLevel.get(c._liveSkillID) || 1;
     return {
       kind: "member",
       liveSkillCategories: live ? live._skillCategories || [] : [],
+      liveSkillId: c._liveSkillID,
+      liveSkillLevel: Math.min(skillMax, Math.max(1, Math.floor(Number(owned.skillLevel) || 1))),
       id: c._id,
       assetId: c._assetID,
       characterId: c._characterID,
@@ -600,6 +617,163 @@
     return out;
   }
 
+  // ---------------------------------------------------------------------------------------------------------------
+  // Live skills
+
+  /**
+   * Live skill weights from nnnotes music-data.json `deck`: {kinds, byScore: scoreId -> Float64Array per kind}. One
+   * effect of kind q at factor f at performance position k adds P * f * weights[q][k] (offSeeds: Gekisou off, every
+   * note Perfect). The client shuffles the performance order uniformly at the start of every live, so a member's
+   * expected gain uses the mean over the five positions; positions the chart never fires weigh 0.
+   */
+  function skillWeightsFromMusicData(md) {
+    const kinds = (md && md.deck && md.deck.kinds) || [];
+    const byScore = new Map();
+    for (const s of (md && md.songs) || []) {
+      for (const c of s.charts || []) {
+        const off = c.deck && c.deck.offSeeds && c.deck.offSeeds[0];
+        if (!off || !off.weights) continue;
+        const w = new Float64Array(kinds.length);
+        off.weights.forEach((row, q) => {
+          if (row) w[q] = row.reduce((a, b) => a + (b || 0), 0) / 5;
+        });
+        byScore.set(c.scoreId, w);
+      }
+    }
+    return { kinds, byScore };
+  }
+
+  /** The factor the game's applier makes of an effect value (music-data.json `deck` documentation). */
+  function skillFactor(type, value) {
+    if (type === 2000) return Math.floor(f32(f32(value / 10000) * 1e5)) / 1e5;
+    if (type === 2005) return Math.floor(f32(f32(value / -10000) * 1e5)) / 1e5;
+    return f32(value / 10000);
+  }
+
+  /** The music-data kind of a MasterLiveSkillEffect row, or null (cumulative conditions and unknown shapes). */
+  function skillKindOf(kinds, e) {
+    if (e._skillCumulativeConditionID) return null;
+    const ids = e._skillTargetIDs || [];
+    return (
+      kinds.find(
+        (k) =>
+          k.effectType === e._skillEffectType &&
+          k.activationTimeSecond === e._activationTimeSecond &&
+          (k.skillTargetIds || []).length === ids.length &&
+          (k.skillTargetIds || []).every((x, i) => x === ids[i]) &&
+          k.skillConditionGroup === e._skillConditionGroup &&
+          k.skillReleaseConditionGroup === e._skillReleaseConditionGroup &&
+          k.effectLimitCount === e._effectLimitCount &&
+          k.effectExecuteLimitCount === e._effectExecuteLimitCount &&
+          k.effectExecuteLimitResetConditionGroup === e._effectExecuteLimitResetConditionGroup,
+      ) || null
+    );
+  }
+
+  /** Score-up terms [kind id, factor] of a member's live skill at its level; rows of no kind add nothing. */
+  function liveSkillTerms(m, v, kinds) {
+    const out = [];
+    for (const e of m.liveSkillEffects.get(v.liveSkillId + ":" + v.liveSkillLevel) || []) {
+      const k = skillKindOf(kinds, e);
+      if (k) out.push([k.id, skillFactor(e._skillEffectType, e._effectValue)]);
+    }
+    return out;
+  }
+
+  /** Expected live skill score per unit of power of `members` on chart `scoreId` (0 without weights). */
+  function liveSkillRate(m, members, scoreId, skillWeights) {
+    const w = skillWeights && skillWeights.byScore.get(scoreId);
+    if (!w) return 0;
+    let r = 0;
+    for (const v of members) for (const [q, f] of liveSkillTerms(m, v, skillWeights.kinds)) r += f * w[q];
+    return r;
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Play accuracy
+
+  /**
+   * Score share kept when the combo breaks (Miss or Bad) at judged note i of n, for every i. A note scores in
+   * proportion to 1 + min(combo bonus, 1) at the combo before it (ournotes-deck score.rs), so with equal note weights
+   * a break at i keeps F(i) + F(n - i - 1) of F(n), F(k) the summed factors of an unbroken run of k notes. Skills and
+   * note types weigh notes unequally; on 夢現妄想世界 EXPERT this is within 1.3% of the simulation.
+   */
+  function comboBreakFactors(m, n) {
+    if (m.breakFactors.has(n)) return m.breakFactors.get(n);
+    const F = new Float64Array(n + 1);
+    let k = 0;
+    for (let c = 0; c < n; c++) {
+      while (k < m.comboBonus.length && m.comboBonus[k][0] <= c) k++;
+      F[c + 1] = F[c] + 1 + Math.min(k ? m.comboBonus[k - 1][1] : 0, 1);
+    }
+    const g = new Float64Array(n);
+    for (let i = 0; i < n; i++) g[i] = (F[i] + F[n - i - 1]) / F[n];
+    m.breakFactors.set(n, g);
+    return g;
+  }
+
+  /**
+   * Score shares a play on chart `scoreId` keeps, as weighted outcomes [share, weight]: accuracy {perfectRate (0..1),
+   * breaks (combo breaks per live)}. Each non-Perfect note is taken as a Great (80%). Breaks fall at uniform judged
+   * notes: enumerated for one break, sampled (fixed seed) for more; a fraction of a break mixes the two neighbouring
+   * counts.
+   */
+  function playShares(m, scoreId, accuracy) {
+    const great = accuracy ? 1 - 0.2 * Math.min(1, Math.max(0, 1 - (accuracy.perfectRate ?? 1))) : 1;
+    const b = accuracy ? Math.max(0, accuracy.breaks || 0) : 0;
+    const sc = m.musicScores.get(scoreId);
+    const n = sc ? sc._fullComboCount : 0;
+    if (!b || n < 2) return [[great, 1]];
+    const g = comboBreakFactors(m, n);
+    const k = Math.floor(b);
+    const frac = b - k;
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    const of = (breaks, weight) => {
+      if (!weight) return [];
+      if (breaks === 0) return [[great, weight]];
+      if (breaks === 1) return Array.from(g, (x) => [great * x, weight / n]);
+      const N = 2000;
+      return Array.from({ length: N }, () => {
+        let x = great;
+        for (let j = 0; j < breaks; j++) x *= g[Math.floor(rnd() * n)];
+        return [x, weight / N];
+      });
+    };
+    return of(k, 1 - frac).concat(of(k + 1, frac));
+  }
+
+  /** Expected score share of a play on chart `scoreId` (the mean of playShares). */
+  function accuracyFactor(m, scoreId, accuracy) {
+    return playShares(m, scoreId, accuracy).reduce((a, [x, w]) => a + x * w, 0);
+  }
+
+  /** K equal-weight quantiles (ascending) of playShares, for rank chances in the search. */
+  function shareQuantiles(m, scoreId, accuracy, K = 64) {
+    const out = playShares(m, scoreId, accuracy).sort((a, b) => a[0] - b[0]);
+    const q = new Float64Array(K);
+    let acc = 0;
+    let i = 0;
+    for (let k = 0; k < K; k++) {
+      const target = (k + 0.5) / K;
+      while (i < out.length - 1 && acc + out[i][1] < target) acc += out[i++][1];
+      q[k] = out[i][0];
+    }
+    return q;
+  }
+
+  /** The share of quantiles `q` (ascending) at least `t`. */
+  function survive(q, t) {
+    let a = 0;
+    let b = q.length;
+    while (a < b) {
+      const mid = (a + b) >> 1;
+      if (q[mid] < t) a = mid + 1;
+      else b = mid;
+    }
+    return (q.length - a) / q.length;
+  }
+
   function pickToSnaps(pick) {
     const snaps = [null, null, null, null, null];
     for (let p = pick; p; p = p.prev) snaps[p.i] = p.j;
@@ -634,7 +808,10 @@
   /**
    * Finds the best decks for one event mode.
    * input: {master, event, mode: "normal"|"challenge", members: [owned], snaps: [owned], player, perPowerByScore,
-   *         maxLevel, difficulties, calibration (score multiplier), powerCalibration (in-game / model power),
+   *         skillWeights (skillWeightsFromMusicData: adds the members' expected live skill score; snap skills are
+   *         left to the simulation), maxLevel, difficulties, calibration (score multiplier), powerCalibration
+   *         (in-game / model power), accuracy ({perfectRate, breaks}: see playShares; null plays all Perfect; with
+   *         combo breaks the score varies, and decks are ranked by their expected payoff over the ranks they may reach),
    *         boosts, objective: "points"|"items", topK, musicIds, fixed: {memberIds, excludeMemberIds},
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
    *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds,
@@ -651,6 +828,22 @@
     const player = input.player || {};
     const topK = input.topK || 5;
     const calib = input.calibration || 1;
+    const accuracy = input.accuracy || null;
+    const stochastic = !!(accuracy && accuracy.breaks > 0);
+    const sharesOf = new Map(); // scoreId -> {mean, max, q}
+    const shares = (c) => {
+      let v = sharesOf.get(c.scoreId);
+      if (!v) {
+        const out = playShares(m, c.scoreId, accuracy);
+        v = {
+          mean: out.reduce((a, [x, w]) => a + x * w, 0),
+          max: Math.max(...out.map(([x]) => x)),
+          q: stochastic ? shareQuantiles(m, c.scoreId, accuracy) : null,
+        };
+        sharesOf.set(c.scoreId, v);
+      }
+      return v;
+    };
     const pcal = input.powerCalibration || 1;
     const exclude = new Set((input.excludeMemberIds || []).map(Number));
     const members = input.members.filter((o) => !exclude.has(Number(o.id))).map((o) => memberView(m, o, player)).filter(Boolean);
@@ -670,6 +863,7 @@
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
     const perMinute = input.perMinute ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
     const minutesOf = (c) => ((c.lengthSec || 0) + (perMinute ? perMinute.overhead : 0)) / 60;
+    const sw = input.skillWeights && input.skillWeights.kinds.length ? input.skillWeights : null;
 
     const musicIds = mode === "challenge"
       ? m.t.MasterChallengeMusic.filter((r) => r._eventId === event._id).map((r) => r._liveMusicId)
@@ -780,11 +974,17 @@
     }
 
     // Per rank, the chart needing the least power among `list`; rankFor(power) is the best rank that power reaches.
-    function rankTable(list) {
+    // `skill` (aligned with `list`, or null) adds the deck's live skill score per unit of power to each chart's.
+    // `optimistic` takes each chart's best play share instead of its mean: a bound on the expected payoff. With combo
+    // breaks, a mean table also lists the candidate charts for the expected payoff (`cands`): per rank the three
+    // needing the least power, or per minute the frontier charts.
+    function rankTable(list, skill, optimistic) {
+      const rateP = new Map(list.map((c, i) => [c, c.perPower + (skill ? skill[i] : 0)]));
+      const rate = new Map(list.map((c) => [c, rateP.get(c) * (optimistic ? shares(c).max : shares(c).mean)]));
       const need = new Map();
       for (const c of list) {
         for (const [r, req] of ownThresholds(c)) {
-          const p = Math.ceil(req / (c.perPower * calib) / pcal);
+          const p = Math.ceil(req / (rate.get(c) * calib) / pcal);
           const cur = need.get(r);
           if (!cur || p < cur.power || (p === cur.power && c.level < cur.chart.level)) need.set(r, { power: p, chart: c });
         }
@@ -802,7 +1002,7 @@
           const opts = [];
           for (const c of list) {
             const th = ownThresholds(c).find((x) => x[0] === r);
-            if (th && c.lengthSec) opts.push({ power: Math.ceil(th[1] / (c.perPower * calib) / pcal), chart: c, min: minutesOf(c) });
+            if (th && c.lengthSec) opts.push({ power: Math.ceil(th[1] / (rate.get(c) * calib) / pcal), chart: c, min: minutesOf(c) });
           }
           opts.sort((a, b) => a.power - b.power || a.min - b.min || a.chart.level - b.chart.level);
           const kept = [];
@@ -810,11 +1010,34 @@
           frontier.set(r, kept);
         }
       }
-      return { need, rankList, rankFor, frontier };
+      let cands = null;
+      if (stochastic && !optimistic) {
+        const picked = new Set();
+        if (frontier) for (const kept of frontier.values()) for (const o of kept) picked.add(o.chart);
+        else {
+          for (const r of rankList) {
+            const needOf = (c) => {
+              const th = ownThresholds(c).find((x) => x[0] === r);
+              return th ? th[1] / rate.get(c) : Infinity;
+            };
+            list.slice().sort((a, b) => needOf(a) - needOf(b)).slice(0, 3).forEach((c) => picked.add(c));
+          }
+        }
+        cands = [...picked].map((c) => ({
+          chart: c,
+          // [rank, power reaching it at share 1], highest rank first
+          xs: ownThresholds(c).map(([r, req]) => [r, req / (rateP.get(c) * calib) / pcal]).sort((a, b) => b[0] - a[0]),
+          q: shares(c).q,
+          mean: shares(c).mean,
+          min: perMinute ? minutesOf(c) : 0,
+        }));
+      }
+      return { need, rankList, rankFor, frontier, rate, cands };
     }
     // Rank and chart a deck of `power` with bonuses pb/ib plays: the best rank (per live), or the best rank and chart
     // pair per minute. Monotone in power and bonuses, so it also gives the upper bounds.
     function choose(rt, power, pb, ib) {
+      if (rt.cands) return chooseExpected(rt, power, pb, ib);
       const at = (r, chart, needPower, min) => {
         const points = eventPoints(pb, rate, pay.points.get(r) || 0);
         const items = eventItems(pay.items.get(r) || 0, ib, rate);
@@ -838,6 +1061,43 @@
       const r = rt.rankFor(power);
       const n = rt.need.get(r);
       return at(r, n.chart, n.power, rt.frontier && n.chart.lengthSec ? minutesOf(n.chart) : 0);
+    }
+    // With combo breaks: per candidate chart, the chance of each rank over the play's shares, and the expected payoff
+    // (per minute: over the chart's minutes). `rank` is the median rank and `chance` the chance of reaching it.
+    function chooseExpected(rt, power, pb, ib) {
+      let best = null;
+      for (const cd of rt.cands) {
+        let above = 0;
+        let sc = 0;
+        let points = 0;
+        let items = 0;
+        let cp = 0;
+        let median = null;
+        const dist = [];
+        for (const [r, x] of cd.xs) {
+          const P = Math.max(above, x <= 0 ? 1 : survive(cd.q, x / power));
+          const p = P - above;
+          if (p > 0) {
+            const pt = eventPoints(pb, rate, pay.points.get(r) || 0);
+            const it = eventItems(pay.items.get(r) || 0, ib, rate);
+            sc += p * scoreOf(pt, it, r);
+            points += p * pt;
+            items += p * it;
+            cp += p * cpOf(r);
+            dist.push([r, p]);
+          }
+          if (!median && P >= 0.5) median = { rank: r, chance: P, x };
+          above = P;
+        }
+        if (cd.min) sc /= cd.min;
+        if (!best || sc > best.sc) {
+          best = {
+            rank: median.rank, chance: median.chance, dist, chart: cd.chart, needPower: Math.ceil(median.x / cd.mean),
+            points, items, cp, sc,
+          };
+        }
+      }
+      return best;
     }
     const upperBound = (s, bf, rt) => choose(rt, bf.f + s.g, s.pt + maxSnapPoint, s.it + maxSnapItem).sc;
     // The exact best deck of a member set: leader from bestF, snaps from the slot-mask DP.
@@ -867,20 +1127,25 @@
         needDisplayPower: Math.ceil(best.needPower * pcal),
         pointBonus: best.pb,
         itemBonus: best.ib,
-        points: best.points,
-        items: best.items,
-        cp: cpOf(best.rank),
-        cpPoints: cpOf(best.rank) * cpValue,
+        points: Math.round(best.points),
+        items: Math.round(best.items),
+        cp: best.cp === undefined ? cpOf(best.rank) : Math.round(best.cp),
+        cpPoints: (best.cp === undefined ? cpOf(best.rank) : best.cp) * cpValue,
         score: best.sc,
         music,
       };
+      if (best.dist) {
+        deck.expectedPoints = best.points;
+        deck.rankChance = best.chance;
+        deck.rankDist = best.dist.map(([r, p]) => ({ rank: r, rankName: RANK_NAMES[r] || String(r), p }));
+      }
       // Next rank: on any chart of the table per live, on the same chart per minute.
       const nextRank = rt.rankList.slice().reverse().find((r) => r > best.rank);
       if (nextRank) {
         let need = rt.need.get(nextRank).power;
         if (perMinute) {
           const th = ownThresholds(best.chart).find((x) => x[0] === nextRank);
-          need = th ? Math.ceil(th[1] / (best.chart.perPower * calib) / pcal) : null;
+          need = th ? Math.ceil(th[1] / (rt.rate.get(best.chart) * calib) / pcal) : null;
         }
         if (need !== null) {
           deck.nextRank = nextRank;
@@ -889,7 +1154,10 @@
         }
       }
       if (perMinute) deck.minutes = minutesOf(best.chart);
-      deck.estScore = Math.floor(best.power * pcal * deck.chart.perPower * calib);
+      deck.scoreRate = rt.rate.get(best.chart);
+      deck.accuracy = accuracyFactor(m, best.chart.scoreId, accuracy);
+      deck.estScore = Math.floor(best.power * pcal * deck.scoreRate * calib);
+      deck.baseScore = Math.floor(best.power * pcal * deck.chart.perPower * deck.accuracy * calib);
       return deck;
     }
 
@@ -898,7 +1166,42 @@
     let evaluated = 0;
     for (const group of groups.values()) {
       const music = group.music;
-      const rt = rankTable(group.charts);
+      const gc = group.charts;
+      // Live skill score per unit of power of each candidate on each chart of the group; a set adds its five. The
+      // bound takes, per chart, the five largest gains of any candidates.
+      const skillOf = new Map();
+      if (sw) {
+        for (const v of allCand) {
+          const terms = liveSkillTerms(m, v, sw.kinds);
+          if (!terms.length) continue;
+          const a = new Float64Array(gc.length);
+          gc.forEach((c, i) => {
+            const w = sw.byScore.get(c.scoreId);
+            if (w) for (const [q, f] of terms) a[i] += f * w[q];
+          });
+          skillOf.set(v, a);
+        }
+      }
+      const anySkill = skillOf.size > 0;
+      const maxSkill = new Float64Array(gc.length);
+      if (anySkill) {
+        const all = [...skillOf.values()];
+        for (let i = 0; i < gc.length; i++) {
+          const top = all.map((a) => a[i]).sort((a, b) => b - a);
+          for (let k = 0; k < 5 && k < top.length; k++) maxSkill[i] += top[k];
+        }
+      }
+      const setSkill = (vs) => {
+        const a = new Float64Array(gc.length);
+        for (const v of vs) {
+          const x = skillOf.get(v);
+          if (x) for (let i = 0; i < a.length; i++) a[i] += x[i];
+        }
+        return a;
+      };
+      const rt = rankTable(gc, anySkill ? maxSkill : null, stochastic);
+      const tables = (skill) =>
+        stochastic ? { bound: rankTable(gc, skill, true), mean: rankTable(gc, skill, false) } : { bound: rankTable(gc, skill), mean: null };
       const fNo = new Map(allCand.map((v) => [v, slotF(m, v, [0, 0, 0], music, ctx)]));
 
       // Best leader F of each set: simple leaders from precomputed terms, others exactly.
@@ -933,7 +1236,9 @@
       let kth = -Infinity;
       for (const { s, bf, ub } of scored) {
         if (groupFound.length >= topK && ub < kth) break;
-        groupFound.push(evaluate(s, bf, rt, music));
+        const t = anySkill || stochastic ? tables(anySkill ? setSkill(s.vs) : null) : { bound: rt, mean: null };
+        if (anySkill && groupFound.length >= topK && upperBound(s, bf, t.bound) < kth) continue;
+        groupFound.push(evaluate(s, bf, t.mean || t.bound, music));
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
         if (groupFound.length > topK) groupFound.length = topK;
         if (groupFound.length >= topK) kth = groupFound[topK - 1].score;
@@ -944,25 +1249,35 @@
       // highest bound gives a floor; only sets whose bound reaches it can beat it.
       if (input.compareSongs) {
         const bySong = new Map();
-        for (const c of group.charts) {
+        gc.forEach((c, i) => {
           if (!bySong.has(c.musicId)) bySong.set(c.musicId, []);
-          bySong.get(c.musicId).push(c);
-        }
-        for (const list of bySong.values()) {
-          const srt = rankTable(list);
+          bySong.get(c.musicId).push(i);
+        });
+        for (const idx of bySong.values()) {
+          const list = idx.map((i) => gc[i]);
+          const pick = (a) => Float64Array.from(idx, (i) => a[i]);
+          const srt = rankTable(list, anySkill ? pick(maxSkill) : null, stochastic);
+          const songTables = (s) => {
+            const sk = anySkill ? pick(setSkill(s.vs)) : null;
+            if (stochastic) return { bound: rankTable(list, sk, true), mean: rankTable(list, sk, false) };
+            const b = anySkill ? rankTable(list, sk) : srt;
+            return { bound: b, mean: b };
+          };
           const ubs = new Float64Array(sets.length);
           let top = 0;
           for (let i = 0; i < sets.length; i++) {
             ubs[i] = upperBound(sets[i], bfs[i], srt);
             if (ubs[i] > ubs[top]) top = i;
           }
-          let best = evaluate(sets[top], bfs[top], srt, music);
+          let best = evaluate(sets[top], bfs[top], songTables(sets[top]).mean, music);
           const rest = [];
           for (let i = 0; i < sets.length; i++) if (i !== top && ubs[i] >= best.score) rest.push(i);
           rest.sort((a, b) => ubs[b] - ubs[a]);
           for (const i of rest) {
             if (ubs[i] < best.score) break;
-            const d = evaluate(sets[i], bfs[i], srt, music);
+            const ti = songTables(sets[i]);
+            if ((anySkill || stochastic) && upperBound(sets[i], bfs[i], ti.bound) < best.score) continue;
+            const d = evaluate(sets[i], bfs[i], ti.mean, music);
             if (d.score > best.score || (d.score === best.score && d.power > best.power)) best = d;
           }
           songs.push(best);
@@ -1036,7 +1351,7 @@
     TABLES, RANK_NAMES, buildMaster, memberView, snapView, memberLimits, snapLimit, makeContext, deckPower,
     leaderBonuses, cardEventBonus, eventEffects, describeEventBonus, payoff, boostRate, eventPoints, eventItems,
     charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
-    parseTime,
+    parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Engine = api;
