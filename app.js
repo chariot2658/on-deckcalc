@@ -1389,6 +1389,8 @@
     const el = $("#tab-settings");
     const s = state.settings;
     const p = state.roster.player;
+    // The preset and the file sync need serve.py (start.cmd); a static host such as GitHub Pages has neither.
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
     const m = state.master;
     // Same order as the in-game 角色TOP screen: bands in id order, members by _displayOrder.
     const chars = m.t.MasterCharacter.filter((c) => !c._isNonPlayable).sort((a, b) => a._bandID - b._bandID || a._displayOrder - b._displayOrder);
@@ -1434,15 +1436,15 @@
       <div class="panel">
         <h2>卡片清單</h2>
         <div class="row">
-          <button id="loadPreset">載入從截圖辨識的清單</button>
-          <button class="ghost" id="syncRoster">同步到檔案</button>
+          ${local ? `<button id="loadPreset">載入從截圖辨識的清單</button>
+          <button class="ghost" id="syncRoster">同步到檔案</button>` : ""}
           <button class="ghost" id="exportRoster">匯出 JSON</button>
           <label class="ghost" style="cursor:pointer"><input type="file" id="importFile" accept=".json,application/json" hidden><span class="muted">匯入 JSON 檔…</span></label>
           <button class="ghost" id="clearRoster">清除全部持有</button>
           <button class="ghost" id="clearCache">清除下載快取</button>
         </div>
-        <p class="note">清單存在這個瀏覽器裡（每個區服各一份）。換電腦或瀏覽器時用匯出／匯入搬過去。
-        「同步到檔案」把目前的清單和設定存到 deckcalc/presets/browser-roster.json（需用 start.cmd 開啟本工具）。</p>
+        <p class="note">清單存在這個瀏覽器裡（每個區服各一份）。換電腦或瀏覽器時用匯出／匯入搬過去。${local ? `
+        「同步到檔案」把目前的清單和設定存到 deckcalc/presets/browser-roster.json。` : ""}</p>
         <p class="note" id="syncMsg"></p>
         <textarea id="rosterJson" readonly hidden></textarea>
       </div>`;
@@ -1464,7 +1466,7 @@
       inp.value = v || "";
       saveRoster();
     }));
-    $("#loadPreset").onclick = async () => {
+    if (local) $("#loadPreset").onclick = async () => {
       if (Object.keys(state.roster.members).length && !confirmReplace()) return;
       try {
         const res = await fetch("presets/my-roster.json", { cache: "no-store" });
@@ -1473,7 +1475,7 @@
         alertBox("無法讀取 presets/my-roster.json：" + e.message);
       }
     };
-    $("#syncRoster").onclick = async () => {
+    if (local) $("#syncRoster").onclick = async () => {
       const msg = $("#syncMsg");
       msg.textContent = "同步中…";
       try {

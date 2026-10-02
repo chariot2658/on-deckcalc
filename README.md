@@ -2,9 +2,13 @@
 
 根據最新的活動資料和你持有的卡片，找出活動點數（或活動道具）最多的配隊。
 
+本專案為非官方愛好者專案，與遊戲的開發和營運方無關。倉庫不包含任何遊戲資源：卡面縮圖、masterdata 和譜面資料都是開啟時從下方「資料來源」下載。
+
 ## 使用方式
 
-1. 雙擊 `start.cmd`（需要 Python），瀏覽器會開啟 <http://localhost:8765/>。
+1. 開啟 <https://chariot2658.github.io/deckcalc/>。
+   也可以在本機執行：雙擊 `start.cmd`（需要 Python），瀏覽器會開啟 <http://localhost:8765/>。
+   兩個網址的卡片清單各自分開存，要搬的話用「設定」的「匯出 JSON」／「匯入 JSON 檔」。
 2. 登錄持有的卡片，有三種方式：
    - 「截圖匯入」：選擇遊戲裡「團員名單」「快照清單」畫面的截圖（可多張、拖曳或 Ctrl+V 貼上）。檢查辨識結果後按「套用」。
    - 「設定」→「載入從截圖辨識的清單」。
@@ -92,6 +96,16 @@
 
 ## 開發
 
+沒有建置步驟，也沒有 npm 套件。測試要用 Node.js，並且需要在 deckcalc 的上一層準備兩份資料：
+
+```sh
+cd ..                                   # deckcalc 的上一層
+git clone --depth 1 https://github.com/StarMoe-org/moenotes-masterdata.git
+mkdir data
+curl -o data/music-data.json https://storage.bdon.moe/moenotes/music-data/music-data.json
+cd deckcalc
+```
+
 ```sh
 node test/power.test.js    # 綜合力模型 vs 截圖
 node test/search.test.js   # 搜尋與活動點數公式
@@ -103,3 +117,7 @@ node test/gekisou.test.js  # 多人激奏：開激奏的分數、名次、JUST �
 檔案：`engine.js`（計算核心，瀏覽器與 Node 共用）、`data.js`（下載與快取）、`worker.js`（背景搜尋與模擬）、
 `simulate.js`（呼叫 ournotes-deck 的 WASM 做整場模擬，瀏覽器與 Node 共用）、
 `recognize.js`（截圖辨識，瀏覽器與 Node 共用，輸入是 `{width, height, data}` RGBA）、`app.js`（介面）。
+
+## 授權
+
+[MIT](LICENSE)。`engine.js`、`simulate.js` 的算式移植自 [ournotes-deck](https://github.com/empty-sekai/ournotes-deck)（MIT），其授權聲明一併收在 [LICENSE](LICENSE)。
