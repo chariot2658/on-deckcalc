@@ -1,18 +1,21 @@
 """Serves this folder on http://localhost:8765/ and asks the browser to revalidate every file, so an edited
 script is picked up on the next reload instead of an older cached copy.
 
-POST /api/roster saves the roster sent by the page (設定 → 同步到檔案) to presets/browser-roster.json, so tools
-outside the browser can read what the browser holds. Only same-origin JSON requests are accepted: a page on another
+POST /api/roster saves the roster sent by the page (設定 → 同步到檔案) to presets/browser-roster-{profileId}.json
+(presets/browser-roster.json when the page sends no profile), so tools outside the browser can read what the browser
+holds. Only same-origin JSON requests are accepted: a page on another
 site cannot send application/json here without a CORS preflight, which this server never approves."""
 import functools
 import http.server
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-ROSTER_FILE = os.path.join(ROOT, "presets", "browser-roster.json")
+PRESETS = os.path.join(ROOT, "presets")
+PROFILE_ID = re.compile(r"[A-Za-z0-9_-]{1,40}")
 MAX_BODY = 4 * 1024 * 1024
 ORIGINS = {f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}", f"http://[::1]:{PORT}"}
 
@@ -49,12 +52,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply(400, {"error": f"bad json: {e}"})
         if not isinstance(data, dict) or data.get("format") != "deckcalc-roster/1":
             return self.reply(400, {"error": "not a deckcalc roster"})
-        tmp = ROSTER_FILE + ".tmp"
+        profile = data.get("profileId")
+        if profile is None:
+            name = "browser-roster.json"
+        elif isinstance(profile, str) and PROFILE_ID.fullmatch(profile):
+            name = f"browser-roster-{profile}.json"
+        else:
+            return self.reply(400, {"error": "bad profile id"})
+        target = os.path.join(PRESETS, name)
+        tmp = target + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
-        os.replace(tmp, ROSTER_FILE)
-        self.reply(200, {"saved": os.path.relpath(ROSTER_FILE, ROOT).replace(os.sep, "/")})
+        os.replace(tmp, target)
+        self.reply(200, {"saved": os.path.relpath(target, ROOT).replace(os.sep, "/")})
 
 
 if __name__ == "__main__":

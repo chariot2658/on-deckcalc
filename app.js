@@ -39,8 +39,41 @@
     multiJustRate: 50, // %, of the Just-count ranges' notes
   };
 
+  // Profiles (設定檔) each keep their own settings (region included), roster and backup reminder, under
+  // deckcalc:p:{id}:{settings|roster|unsaved}. deckcalc:profiles = {active, list: [{id, name}]}.
+  const pkey = (id, k) => "deckcalc:p:" + id + ":" + k;
+  const profiles = loadProfiles();
+  const activeProfile = () => profiles.list.find((p) => p.id === profiles.active);
+  const saveProfiles = () => Data.safeSet("deckcalc:profiles", JSON.stringify(profiles));
+  const loadSettings = () => ({ ...DEFAULT_SETTINGS, ...loadJson(pkey(profiles.active, "settings"), {}) });
+
+  // Before profiles, settings were global and the roster was kept per region: each region with a roster (and the
+  // region last used) becomes a profile named after it. The old keys are left in place.
+  function loadProfiles() {
+    const reg = loadJson("deckcalc:profiles", null);
+    if (reg && Array.isArray(reg.list) && reg.list.length) {
+      if (!reg.list.some((p) => p.id === reg.active)) reg.active = reg.list[0].id;
+      return reg;
+    }
+    const old = loadJson("deckcalc:settings", {});
+    const current = Data.REGIONS[old.region] ? old.region : DEFAULT_SETTINGS.region;
+    const list = [];
+    for (const region of Object.keys(Data.REGIONS)) {
+      const roster = Data.safeGet("deckcalc:roster:" + region);
+      if (!roster && region !== current) continue;
+      list.push({ id: region, name: Data.REGIONS[region].label });
+      Data.safeSet(pkey(region, "settings"), JSON.stringify({ ...old, region, eventId: region === current ? old.eventId || null : null }));
+      if (roster) Data.safeSet(pkey(region, "roster"), roster);
+      const unsaved = Data.safeGet("deckcalc:unsaved:" + region);
+      if (unsaved) Data.safeSet(pkey(region, "unsaved"), unsaved);
+    }
+    const out = { active: current, list };
+    Data.safeSet("deckcalc:profiles", JSON.stringify(out));
+    return out;
+  }
+
   const state = {
-    settings: loadJson("deckcalc:settings", {}),
+    settings: loadSettings(),
     roster: null, // {members: {id: {level, awake, rank, skillLevel, gekisouSkillLevel, guess}}, snaps: {id: {level, rank, guess}}, player}
     master: null,
     version: null,
@@ -55,7 +88,6 @@
     lastResults: null,
     filters: { m: { band: "", rarity: "", owned: false, bonus: false, q: "" }, s: { band: "", rarity: "", owned: false, bonus: false, q: "" } },
   };
-  state.settings = { ...DEFAULT_SETTINGS, ...state.settings };
 
   function loadJson(key, fallback) {
     try {
@@ -65,16 +97,16 @@
       return fallback;
     }
   }
-  const saveSettings = () => Data.safeSet("deckcalc:settings", JSON.stringify(state.settings));
-  const rosterKey = () => "deckcalc:roster:" + state.settings.region;
+  const saveSettings = () => Data.safeSet(pkey(profiles.active, "settings"), JSON.stringify(state.settings));
+  const rosterKey = () => pkey(profiles.active, "roster");
   function loadRoster() {
     const r = loadJson(rosterKey(), null);
     state.roster = r && r.members ? r : { members: {}, snaps: {}, player: { vipRank: 1, characterRanks: {}, eventParameters: false } };
     state.roster.player = { vipRank: 1, characterRanks: {}, eventParameters: false, ...(state.roster.player || {}) };
   }
   // The roster lives only in this browser, so changes not yet exported are tracked (ISO time of the first one, per
-  // region) to remind the user to back up.
-  const unsavedKey = () => "deckcalc:unsaved:" + state.settings.region;
+  // profile) to remind the user to back up.
+  const unsavedKey = () => pkey(profiles.active, "unsaved");
   const BACKUP_REMIND_MS = 24 * 3600 * 1000;
   function saveRoster() {
     Data.safeSet(rosterKey(), JSON.stringify(state.roster));
@@ -165,6 +197,7 @@
 
   async function loadAll(force) {
     const region = state.settings.region;
+    renderProfileSelect();
     setLoading("讀取 masterdata 版本…");
     try {
       if (force) await Data.clearAll();
@@ -281,7 +314,7 @@
   // Rendering
 
   function renderAll() {
-    renderRegion();
+    renderProfileSelect();
     renderCalc();
     renderMembers();
     renderSnaps();
@@ -289,11 +322,45 @@
     renderSettings();
   }
 
-  function renderRegion() {
-    const sel = $("#region");
-    sel.innerHTML = Object.entries(Data.REGIONS)
-      .map(([k, v]) => `<option value="${k}" ${k === state.settings.region ? "selected" : ""}>${esc(v.label)}</option>`)
+  const regionLabel = (r) => (Data.REGIONS[r] || { label: r }).label;
+  // A profile's name, with its region when the name does not already say it.
+  function profileLabel(p) {
+    const region = p.id === profiles.active ? state.settings.region : (loadJson(pkey(p.id, "settings"), {}).region || DEFAULT_SETTINGS.region);
+    return p.name === regionLabel(region) ? p.name : `${p.name}（${regionLabel(region)}）`;
+  }
+
+  function renderProfileSelect() {
+    const sel = $("#profile");
+    sel.innerHTML = profiles.list
+      .map((p) => `<option value="${esc(p.id)}" ${p.id === profiles.active ? "selected" : ""}>${esc(profileLabel(p))}</option>`)
       .join("");
+  }
+
+  function switchProfile(id) {
+    if (!profiles.list.some((p) => p.id === id)) return;
+    profiles.active = id;
+    saveProfiles();
+    state.settings = loadSettings();
+    state.lastResults = null;
+    loadAll(false);
+  }
+
+  // A new profile, empty or a copy of the current one (settings and roster), made active.
+  function addProfile(name, region, copy) {
+    const id = "p" + Date.now().toString(36);
+    const settings = copy ? { ...state.settings, region } : { ...DEFAULT_SETTINGS, region };
+    if (region !== state.settings.region) settings.eventId = null;
+    Data.safeSet(pkey(id, "settings"), JSON.stringify(settings));
+    if (copy) Data.safeSet(pkey(id, "roster"), JSON.stringify(state.roster));
+    profiles.list.push({ id, name });
+    switchProfile(id);
+  }
+
+  function deleteProfile() {
+    const id = profiles.active;
+    for (const k of ["settings", "roster", "unsaved"]) Data.safeRemove(pkey(id, k));
+    profiles.list = profiles.list.filter((p) => p.id !== id);
+    switchProfile(profiles.list[0].id);
   }
 
   // --- event rules ---
@@ -1419,7 +1486,27 @@
     // Same order as the in-game 角色TOP screen: bands in id order, members by _displayOrder.
     const chars = m.t.MasterCharacter.filter((c) => !c._isNonPlayable).sort((a, b) => a._bandID - b._bandID || a._displayOrder - b._displayOrder);
     const bandList = m.t.MasterBand.slice().sort((a, b) => a._id - b._id);
+    const prof = activeProfile();
+    const regionOptions = (sel) => Object.entries(Data.REGIONS)
+      .map(([k, v]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${esc(v.label)}</option>`)
+      .join("");
     el.innerHTML = `
+      <div class="panel">
+        <h2>設定檔</h2>
+        <div class="row">
+          <label class="field"><span>名稱</span><input type="text" id="profileName" maxlength="40" value="${esc(prof.name)}"></label>
+          <label class="field"><span>區服</span><select id="profileRegion">${regionOptions(s.region)}</select></label>
+          ${profiles.list.length > 1 ? `<button class="ghost" id="deleteProfile">刪除這個設定檔</button>` : ""}
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="field"><span>新設定檔名稱</span><input type="text" id="newProfileName" maxlength="40" placeholder="例如：日服"></label>
+          <label class="field"><span>區服</span><select id="newProfileRegion">${regionOptions(s.region === "jp" ? "hk-tw-mo" : "jp")}</select></label>
+          <button id="addProfile">新增空白設定檔</button>
+          <button class="ghost" id="copyProfile">複製目前的設定檔</button>
+        </div>
+        <p class="note">每個設定檔有自己的區服、設定、角色等級和卡片清單，用畫面右上角的選單切換。</p>
+        <p class="note" id="profileMsg"></p>
+      </div>
       <div class="panel">
         <h2>校正</h2>
         <div class="row">
@@ -1467,14 +1554,44 @@
           <button class="ghost" id="clearRoster">清除全部持有</button>
           <button class="ghost" id="clearCache">清除下載快取</button>
         </div>
-        <p class="note">清單只存在這個瀏覽器裡（每個區服各一份），不會上傳。清除瀏覽資料、用無痕視窗，或 iPhone／iPad 的 Safari
+        <p class="note">清單只存在這個瀏覽器裡（每個設定檔各一份），不會上傳。清除瀏覽資料、用無痕視窗，或 iPhone／iPad 的 Safari
         7 天沒開這個網站時，清單可能消失，請用「匯出 JSON」備份。換電腦或瀏覽器時用「匯入 JSON 檔」搬過去。${local ? `
-        「同步到檔案」把目前的清單和設定存到 deckcalc/presets/browser-roster.json。` : ""}</p>
+        「同步到檔案」把目前設定檔的清單和設定存到 deckcalc/presets/browser-roster-${esc(prof.id)}.json。` : ""}</p>
         <p class="note" id="backupHint"></p>
         <p class="note" id="syncMsg"></p>
         <textarea id="rosterJson" readonly hidden></textarea>
       </div>`;
     renderBackupHint();
+    $("#profileName").onchange = (e) => {
+      const name = e.target.value.trim();
+      if (!name) return void (e.target.value = prof.name);
+      prof.name = name;
+      saveProfiles();
+      renderProfileSelect();
+    };
+    $("#profileRegion").onchange = (e) => {
+      // Card ids are shared by the regions, so the roster stays; the event list is per region.
+      state.settings.region = e.target.value;
+      state.settings.eventId = null;
+      state.lastResults = null;
+      saveSettings();
+      loadAll(false);
+    };
+    if ($("#deleteProfile")) $("#deleteProfile").onclick = () => {
+      if (Date.now() - pendingConfirm < 4000) {
+        pendingConfirm = 0;
+        return deleteProfile();
+      }
+      pendingConfirm = Date.now();
+      $("#profileMsg").innerHTML = `<span class="warn">會刪除「${esc(prof.name)}」的設定和卡片清單，4 秒內再按一次確認。</span>`;
+    };
+    const newProfile = (copy) => {
+      const region = $("#newProfileRegion").value;
+      const name = $("#newProfileName").value.trim() || (copy ? prof.name + " 副本" : regionLabel(region));
+      addProfile(name, region, copy);
+    };
+    $("#addProfile").onclick = () => newProfile(false);
+    $("#copyProfile").onclick = () => newProfile(true);
     $("#powerCal").onchange =(e) => ((s.powerCal = Number(e.target.value) || 1), saveSettings());
     $("#vip").onchange = (e) => ((p.vipRank = clamp(Number(e.target.value), 1, 30)), saveRoster());
     $("#eventParam").onchange = (e) => ((p.eventParameters = e.target.checked), saveRoster());
@@ -1506,7 +1623,7 @@
       const msg = $("#syncMsg");
       msg.textContent = "同步中…";
       try {
-        const body = { ...exportRoster(), settings: state.settings, syncedAt: new Date().toISOString() };
+        const body = { ...exportRoster(), profileId: profiles.active, settings: state.settings, syncedAt: new Date().toISOString() };
         const res = await fetch("api/roster", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const out = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(res.status === 501 ? "伺服器不支援，請關掉後重新執行 start.cmd" : out.error || "HTTP " + res.status);
@@ -1520,7 +1637,7 @@
       const blob = new Blob([JSON.stringify(exportRoster(), null, 2)], { type: "application/json" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `deckcalc-roster-${state.settings.region}.json`;
+      a.download = `deckcalc-roster-${activeProfile().name.replace(/[\\/:*?"<>|\s]+/g, "_")}.json`;
       a.click();
       URL.revokeObjectURL(a.href);
       markBackedUp();
@@ -1591,6 +1708,7 @@
   function exportRoster() {
     return {
       format: "deckcalc-roster/1",
+      profile: activeProfile().name,
       region: state.settings.region,
       player: state.roster.player,
       members: Object.entries(state.roster.members).map(([id, o]) => ({ id: Number(id), ...o })),
@@ -1621,13 +1739,7 @@
     document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("active", x === b));
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === "tab-" + b.dataset.tab));
   }));
-  $("#region").onchange = (e) => {
-    state.settings.region = e.target.value;
-    state.settings.eventId = null;
-    state.lastResults = null;
-    saveSettings();
-    loadAll(false);
-  };
+  $("#profile").onchange = (e) => switchProfile(e.target.value);
   $("#reload").onclick = () => loadAll(true);
   // Pasting a screenshot anywhere while the import tab is open reads it.
   document.addEventListener("paste", (e) => {

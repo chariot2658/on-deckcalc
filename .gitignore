@@ -1,3 +1,3 @@
 __pycache__/
-presets/browser-roster.json
-presets/browser-roster.json.tmp
+presets/browser-roster*.json
+presets/browser-roster*.json.tmp
