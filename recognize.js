@@ -82,18 +82,20 @@
   /**
    * Best regular grid on one axis: n cells of `size` every `pitch` from `start`, all inside the axis. The score is
    * the strength of `startSig` at each cell start plus `endSig` at each cell end, summed over the 2n edges and
-   * divided by sqrt(2n), which prefers the true pitch over half or double of it.
+   * divided by sqrt(2n), which prefers the true pitch over half or double of it. The pitch goes in `pitchStep`
+   * steps: a whole-pixel pitch drifts off the edges over five rows when the true one falls between two (IMG_0049's
+   * rows are 91.5 apart at the working width, and the fit dropped its first row).
    */
-  function fitAxis(startSig, endSig, { minSize, maxSize, pitchRange, minCount = 1 }) {
+  function fitAxis(startSig, endSig, { minSize, maxSize, pitchRange, minCount = 1, pitchStep = 1 }) {
     const len = startSig.length;
     let best = null;
     for (let size = minSize; size <= Math.min(maxSize, len); size++) {
       const [pLo, pHi] = pitchRange(size);
       for (let start = 0; start + size < len; start++) {
         const first = startSig[start] + endSig[start + size];
-        for (let pitch = Math.max(size + 1, pLo); pitch <= pHi; pitch++) {
+        for (let pitch = Math.max(size + 1, pLo); pitch <= pHi; pitch += pitchStep) {
           let sum = first, n = 1;
-          for (let p = start + pitch; p + size < len; p += pitch) {
+          for (let q = start + pitch, p = Math.round(q); p + size < len; q += pitch, p = Math.round(q)) {
             sum += startSig[p] + endSig[p + size];
             n++;
           }
@@ -165,6 +167,7 @@
         minSize: Math.round(h * 0.9),
         maxSize: Math.round(h * 1.1),
         pitchRange: (size) => [size + 2, Math.round(size * 1.35)],
+        pitchStep: 0.25,
       });
       if (rows && (!best || rows.score > best.rows.score)) best = { kind, rows };
     }
