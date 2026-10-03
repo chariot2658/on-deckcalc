@@ -145,3 +145,69 @@ for (const mode of ["normal", "challenge"]) {
   console.log(`== per minute: per live ${title(perLive)} ${perLive.rankName} ${Math.round(perLive.chart.lengthSec)} s ${Math.round(pm(perLive))}/min` +
     ` -> ${title(best)} ${best.chart.difficulty} ${best.rankName} ${Math.round(best.chart.lengthSec)} s ${Math.round(pm(best))}/min`);
 }
+
+// Score mode: no event, decks ranked by expected score. Exhaustive check on a small roster (7 characters, 5 snaps),
+// and the song comparison equals per-song searches on the full roster.
+{
+  const sw = E.skillWeightsFromMusicData(md);
+  const acc = { perfectRate: 0.98, breaks: 1 };
+  const now = new Date("2026-10-01T12:00:00+08:00");
+  const views = roster.members.map((o) => [o, E.memberView(m, o, roster.player)]).filter((x) => x[1]);
+  const chars = [...new Set(views.map((x) => x[1].characterId))].slice(3, 10);
+  const mem = views.filter((x) => chars.includes(x[1].characterId)).map((x) => x[0]);
+  const sn = roster.snaps.slice(4, 9);
+  const opts = { maxLevel: 40, difficulties: ["expert", "hard"], musicIds: [100094], now };
+  const d = E.search({
+    master: m, event: null, mode: "score", members: mem, snaps: sn, player: roster.player, perPowerByScore: perPower,
+    skillWeights: sw, accuracy: acc, topK: 1, ...opts,
+  }).results[0];
+  const mv = mem.map((o) => E.memberView(m, o, roster.player));
+  const svs = sn.map((o) => E.snapView(m, o));
+  const ctx = E.makeContext(m, roster.player, null, mv, svs, "score");
+  const cs = E.charts(m, perPower, opts);
+  const music = E.musicView(m, 100094);
+  const byChar = new Map();
+  for (const v of mv) byChar.set(v.characterId, (byChar.get(v.characterId) || []).concat([v]));
+  const C = [...byChar.values()];
+  function* comb(n, k, s = 0, p = []) {
+    if (p.length === k) yield p;
+    else for (let i = s; i <= n - (k - p.length); i++) yield* comb(n, k, i + 1, p.concat([i]));
+  }
+  function* prod(lists, i = 0, p = []) {
+    if (i === lists.length) yield p;
+    else for (const x of lists[i]) yield* prod(lists, i + 1, p.concat([x]));
+  }
+  function* perms(a, k) {
+    if (k === 0) yield [];
+    else for (let i = 0; i < a.length; i++) for (const r of perms(a.slice(0, i).concat(a.slice(i + 1)), k - 1)) yield [a[i], ...r];
+  }
+  const snapPerms = [...perms(svs, 5)];
+  let best = -1;
+  for (const cc of comb(C.length, 5)) {
+    for (const set of prod(cc.map((i) => C[i]))) {
+      const rate = Math.max(...cs.map((c) => (c.perPower + E.liveSkillRate(m, set, c.scoreId, sw)) * E.accuracyFactor(m, c.scoreId, acc)));
+      for (let L = 0; L < 5; L++) {
+        const order = set.slice();
+        [order[L], order[2]] = [order[2], order[L]];
+        for (const sp of snapPerms) best = Math.max(best, E.deckPower(m, order, sp, music, ctx) * rate);
+      }
+    }
+  }
+  assert.ok(Math.abs(d.score - best) < 1e-6 * best, `score mode ${d.score} vs exhaustive ${best}`);
+  assert.strictEqual(d.estScore, Math.floor(d.score));
+  assert.strictEqual(d.rank, E.scoreRankOf(d.chart.thresholds, d.score));
+
+  const input = {
+    master: m, event: null, mode: "score", members: roster.members, snaps: roster.snaps, player: roster.player,
+    perPowerByScore: perPower, skillWeights: sw, accuracy: acc, maxLevel: 27, topK: 3, now,
+  };
+  const t0 = Date.now();
+  const out = E.search({ ...input, compareSongs: true });
+  const ms = Date.now() - t0;
+  assert.strictEqual(out.songs[0].score, out.results[0].score);
+  for (const s of out.songs.filter((_, i) => i % 10 === 0)) {
+    assert.strictEqual(s.score, E.search({ ...input, musicIds: [s.chart.musicId], topK: 1 }).results[0].score, "song " + s.chart.musicId);
+  }
+  const top = out.results[0];
+  console.log(`== score (${ms} ms): ${top.rankName} ${top.estScore} ${m.text(m.musics.get(top.chart.musicId)._titleTextID)} ${top.chart.difficulty} ${top.chart.level} power ${top.displayPower}`);
+}

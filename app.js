@@ -442,11 +442,12 @@
             <div class="chips">
               <label><input type="radio" name="mode" value="normal" ${s.mode === "normal" ? "checked" : ""}>一般 Live</label>
               <label><input type="radio" name="mode" value="challenge" ${s.mode === "challenge" ? "checked" : ""}>挑戰 Live</label>
+              <label title="不看活動加成和評級收益，只找預估分數最高的隊伍和歌曲"><input type="radio" name="mode" value="score" ${s.mode === "score" ? "checked" : ""}>只看分數（不計活動）</label>
             </div>
           </div>
-          <label class="field" ${s.mode === "challenge" ? "hidden" : ""}><span>加成道具（LB）用量</span>
+          <label class="field" ${s.mode === "normal" ? "" : "hidden"}><span>加成道具（LB）用量</span>
             <input type="number" id="boosts" min="0" max="10" value="${s.boosts}"></label>
-          <div class="field" ${s.mode === "challenge" ? "hidden" : ""}><span>遊玩方式</span>
+          <div class="field" ${s.mode === "normal" ? "" : "hidden"}><span>遊玩方式</span>
             <div class="chips">
               <label><input type="radio" name="multi" value="solo" ${s.multi ? "" : "checked"}>單人</label>
               <label><input type="radio" name="multi" value="multi" ${s.multi ? "checked" : ""}>多人（激奏）</label>
@@ -468,15 +469,15 @@
           <label class="field" title="斷 combo 的只有 MISS 和 BAD（GOOD 不會斷）。斷在曲子中段最傷，可能少 6~7% 分數"><span>每場斷 combo 次數（MISS＋BAD）</span>
             <input type="number" id="comboBreaks" min="0" max="20" step="0.5" value="${s.comboBreaks}" style="width:80px"></label>
           <div class="field"><span>難度</span><div class="chips">${diffChips}</div></div>
-          <div class="field"><span>選歌</span>
+          <div class="field" ${s.mode === "score" ? "hidden" : ""}><span>選歌</span>
             <div class="chips">
               <label><input type="radio" name="songPick" value="live" ${s.songPick !== "minute" ? "checked" : ""}>每場收益最高</label>
               <label><input type="radio" name="songPick" value="minute" ${s.songPick === "minute" ? "checked" : ""}>每分鐘收益最高</label>
             </div>
           </div>
-          <label class="field" ${s.songPick === "minute" ? "" : "hidden"}><span>每場額外時間（載入＋結算，秒）</span>
+          <label class="field" ${s.songPick === "minute" && s.mode !== "score" ? "" : "hidden"}><span>每場額外時間（載入＋結算，秒）</span>
             <input type="number" id="pickOverhead" min="0" max="300" value="${s.songOverhead}" style="width:80px"></label>
-          <div class="field"><span>優先</span>
+          <div class="field" ${s.mode === "score" ? "hidden" : ""}><span>優先</span>
             <div class="chips">
               <label><input type="radio" name="objective" value="points" ${s.objective === "points" ? "checked" : ""}>活動點數</label>
               <label><input type="radio" name="objective" value="items" ${s.objective === "items" ? "checked" : ""}>活動道具</label>
@@ -581,14 +582,14 @@
       difficulties: s.difficulties,
       accuracy: { perfectRate: s.perfectRate / 100, breaks: s.comboBreaks },
       powerCalibration: s.powerCal,
-      boosts: s.mode === "challenge" ? s.cp : s.boosts,
+      boosts: s.mode === "challenge" ? s.cp : s.mode === "score" ? 0 : s.boosts,
       objective: s.objective,
       topK: s.topK,
       compareSongs: true,
       multi: s.mode === "normal" && s.multi
         ? { players: s.multiPlayers, othersScore: s.multiOthersAvg * (s.multiPlayers - 1), gekisouRank: s.multiGekisouRank, justRate: s.multiJustRate / 100 }
         : null,
-      perMinute: s.songPick === "minute" ? { overhead: s.songOverhead } : null,
+      perMinute: s.songPick === "minute" && s.mode !== "score" ? { overhead: s.songOverhead } : null,
     };
     try {
       // Normal lives also earn CP (by rank only). Value it at what the best challenge deck turns it into, so the
@@ -623,6 +624,7 @@
     const mu = d.chart.musicId;
     const margin = d.needDisplayPower > 0 ? d.displayPower / d.needDisplayPower - 1 : null;
     const multi = out.input.multi;
+    const scoreMode = out.mode === "score";
     const slots = d.members
       .map((v, k) => {
         const c = m.memberCards.get(v.id);
@@ -634,19 +636,21 @@
           ${k === 2 ? '<span class="leader">隊長</span>' : ""}
           <img class="m-img" loading="lazy" src="${Data.memberThumb(s.region, c._assetID)}" alt="">
           <div class="nm">${typeDot(c._cardType)} ${esc(cardName(c))}<br><span class="muted">${esc(memberTitle(c))} · Lv${v.level}</span>
-          ${b.point ? `<br><span class="tag-point">點數 +${pct(b.point)}</span>` : ""}</div>
+          ${b.point && !scoreMode ? `<br><span class="tag-point">點數 +${pct(b.point)}</span>` : ""}</div>
           ${sc ? `<img class="s-img" loading="lazy" src="${Data.snapThumb(s.region, sc._assetID)}" alt="">
             <div class="nm">${typeDot(sc._cardType)} ${esc(cardName(sc))}<br><span class="muted">${esc(snapTitle(sc))} · Lv${sn.level}</span>
-            ${sb && sb.item ? `<br><span class="tag-item">道具 +${pct(sb.item)}</span>` : ""}</div>` : `<div class="nm muted">（無快照）</div>`}
+            ${sb && sb.item && !scoreMode ? `<br><span class="tag-item">道具 +${pct(sb.item)}</span>` : ""}</div>` : `<div class="nm muted">（無快照）</div>`}
         </div>`;
       })
       .join("");
     return `<div class="result">
       <div class="result-head">
         <div class="rank-badge" title="${multi ? "預估房間評級" : "預估評級"}">${esc(d.rankName)}</div>
-        <div><div class="big"><span class="points">${fmt(d.points)} pt</span>${
-          d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""
-        } · <span class="items">${fmt(d.items)} 道具</span></div>
+        <div><div class="big">${
+          scoreMode
+            ? `預估分數 <span class="points">${fmt(d.estScore)}</span>`
+            : `<span class="points">${fmt(d.points)} pt</span>${d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""} · <span class="items">${fmt(d.items)} 道具</span>`
+        }</div>
           ${rankDistLine(d)}
           ${
             out.cpPlan && d.cp
@@ -660,14 +664,14 @@
                 }</b>（一場約 ${mmss(d.minutes * 60)}，含載入＋結算 ${fmt(out.input.perMinute.overhead)} 秒）</div>`
               : ""
           }
-          <div class="muted small">${esc(label)} · ${unit} · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}</div></div>
+          <div class="muted small">${esc(label)} · ${scoreMode ? "不計活動加成" : `${unit} · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}`}</div></div>
         <div style="margin-left:auto;text-align:right">
           <div><b>${esc(musicTitle(mu))}</b> ${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</div>
-          <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>（${
+          <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>${
             margin === null
-              ? `${esc(d.rankName)} 靠其他玩家的分數就夠`
-              : `${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕 <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>`
-          }）</div>
+              ? scoreMode ? "" : `（${esc(d.rankName)} 靠其他玩家的分數就夠）`
+              : `（${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕 <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>）`
+          }</div>
           ${d.nextRankName ? `<div class="small muted">${esc(d.nextRankName)} 需要 ${fmt(d.nextNeedDisplayPower)}</div>` : ""}
           <div class="small muted">預估${out.gekisou ? "激奏" : ""}分數約 ${fmt(d.estScore)}${skillParts(d)}${
             multi ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""
@@ -715,7 +719,7 @@
   }
 
   const resultUnit = (out) =>
-    out.mode === "challenge" ? `每次（${state.settings.cp} CP）` : `每場（${out.input.boosts} 個加成道具，倍率 ×${out.rate}）`;
+    out.mode === "challenge" ? `每次（${state.settings.cp} CP）` : out.mode === "score" ? "每場" : `每場（${out.input.boosts} 個加成道具，倍率 ×${out.rate}）`;
 
   function renderResults(out) {
     const el = $("#results");
@@ -738,9 +742,16 @@
       })
       .join("");
     const hasSongs = out.songs && out.songs.length > 0;
+    const note = out.mode === "score"
+      ? `<p class="note">只看分數：不計活動加成（點數、道具、數值都不算），找預估分數最高的隊伍，歌曲也一起選（限「可穩定打的最高等級」和勾選的難度內）。
+        預估分數＝全 Perfect 的計分資料加上演出技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折；綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
+        徽章是這個分數在該曲的評級。快照技能不在搜尋裡，「模擬分數」再加上快照技能，用 ournotes-deck 的整場模擬算出 120 種發動順序的分數，可以拿來比較名次接近的隊伍。${
+          hasSongs ? "各首歌的最高分在下方「歌曲比較」。" : ""
+        }搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>`
+      : null;
     el.innerHTML = `<div class="panel">
         <h2>結果</h2>
-        <p class="note">預估分數＝全 Perfect 的計分資料加上演出技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折；綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
+        ${note || `<p class="note">預估分數＝全 Perfect 的計分資料加上演出技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折；綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
         有斷 combo 時分數會隨斷的位置變動（斷在中段最傷），排名改用各評級機率加權的期望收益，餘裕太小、可能掉級的隊伍會排在後面。
         「模擬分數」再加上快照技能：用 ournotes-deck 的整場模擬算出 120 種發動順序的分數，評級機率同時考慮發動順序和斷 combo 的位置。
         餘裕小於 3% 的隊伍，實際可能差一級。${
@@ -759,7 +770,7 @@
           out.input.perMinute
             ? `<br>選歌依「每分鐘收益」：每支隊伍都改選每分鐘（歌曲長度＋每場額外 ${fmt(out.input.perMinute.overhead)} 秒）賺最多的歌和評級，所以可能故意選短歌、拿低一級的評級。LB 有限、會用完的話，請改回「每場收益最高」。`
             : ""
-        }${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>
+        }${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>`}
       </div>${cards || '<div class="panel">沒有結果。</div>'}${hasSongs ? `<div class="panel" id="songs"></div><div id="song-deck"></div>` : ""}`;
     bindCalibration(el, decks);
     fillSims(el, decks, out);
@@ -844,6 +855,7 @@
   const SONG_LIMIT = 15;
 
   function renderSongs(out) {
+    if (out.mode === "score") return renderScoreSongs(out);
     const el = $("#songs");
     const s = state.settings;
     const items = out.input.objective === "items";
@@ -907,6 +919,46 @@
       saveSettings();
       renderSongs(out);
     };
+    const more = $("#songMore");
+    if (more) more.onclick = () => ((songView.showAll = !songView.showAll), renderSongs(out));
+    el.querySelectorAll(".song-row").forEach((tr) => (tr.onclick = () => {
+      const k = Number(tr.dataset.k);
+      songView.selected = songView.selected === k ? null : k;
+      renderSongs(out);
+    }));
+    renderSongDeck(out);
+  }
+
+  // Score mode: each song's highest expected score.
+  function renderScoreSongs(out) {
+    const el = $("#songs");
+    const list = out.songs.map((d, k) => ({ d, k })).sort((a, b) => b.d.score - a.d.score);
+    const shown = songView.showAll ? list : list.slice(0, SONG_LIMIT);
+    if (songView.selected !== null && !shown.some((r) => r.k === songView.selected)) {
+      const sel = list.find((r) => r.k === songView.selected);
+      if (sel) shown.push(sel);
+    }
+    const body = shown
+      .map((r) => {
+        const d = r.d;
+        const margin = d.needDisplayPower > 0 ? d.displayPower / d.needDisplayPower - 1 : null;
+        return `<tr class="song-row ${r.k === songView.selected ? "sel" : ""}" data-k="${r.k}">
+          <td class="num">${list.indexOf(r) + 1}</td>
+          <td><b>${esc(musicTitle(d.chart.musicId))}</b> <span class="muted small">${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</span></td>
+          <td class="num"><b>${fmt(d.estScore)}</b></td>
+          <td>${esc(d.rankName)}</td>
+          <td class="num">${fmt(d.displayPower)}</td>
+          <td class="num">${margin === null ? "—" : `<span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>`}</td>
+          <td class="num muted">${d.nextRankName ? `${esc(d.nextRankName)}：${fmt(d.nextNeedDisplayPower)}` : "—"}</td>
+        </tr>`;
+      })
+      .join("");
+    el.innerHTML = `<h2>歌曲比較</h2>
+      <p class="note">每首歌各自配出分數最高的隊伍後的預估分數（同一首歌只列分數最高的難度）。點一列可看那首歌的隊伍。</p>
+      <div class="table-scroll"><table class="rules songs">
+        <thead><tr><th>#</th><th>歌曲</th><th class="num">預估分數</th><th>評級</th><th class="num">綜合力</th><th class="num">評級餘裕</th><th class="num">下一級需要</th></tr></thead>
+        <tbody>${body}</tbody></table></div>
+      ${list.length > SONG_LIMIT ? `<p><button class="ghost small" id="songMore">${songView.showAll ? `只顯示前 ${SONG_LIMIT} 首` : `顯示全部 ${list.length} 首`}</button></p>` : ""}`;
     const more = $("#songMore");
     if (more) more.onclick = () => ((songView.showAll = !songView.showAll), renderSongs(out));
     el.querySelectorAll(".song-row").forEach((tr) => (tr.onclick = () => {

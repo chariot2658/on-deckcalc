@@ -881,8 +881,9 @@
   }
 
   /**
-   * Finds the best decks for one event mode.
-   * input: {master, event, mode: "normal"|"challenge", members: [owned], snaps: [owned], player, perPowerByScore,
+   * Finds the best decks for one event mode, or with mode "score" the decks of the highest expected score (no event
+   * bonuses or payoff; `event` may be null; boosts, objective, cpValue, multi and perMinute are ignored).
+   * input: {master, event, mode: "normal"|"challenge"|"score", members: [owned], snaps: [owned], player, perPowerByScore,
    *         skillWeights (skillWeightsFromMusicData: adds the members' expected live skill score; snap skills are
    *         left to the simulation), maxLevel, difficulties, calibration (score multiplier), powerCalibration
    *         (in-game / model power), accuracy ({perfectRate, breaks}: see playShares; null plays all Perfect; with
@@ -903,11 +904,13 @@
     const m = input.master;
     const event = input.event;
     const mode = input.mode || "normal";
+    const scoreMode = mode === "score";
     const player = input.player || {};
     const topK = input.topK || 5;
     const calib = input.calibration || 1;
     const accuracy = input.accuracy || null;
-    const stochastic = !!(accuracy && accuracy.breaks > 0);
+    // The expected score is linear in the play share, so the score mode needs only its mean.
+    const stochastic = !scoreMode && !!(accuracy && accuracy.breaks > 0);
     const sharesOf = new Map(); // scoreId -> {mean, max, q}
     const shares = (c) => {
       let v = sharesOf.get(c.scoreId);
@@ -926,20 +929,20 @@
     const exclude = new Set((input.excludeMemberIds || []).map(Number));
     const members = input.members.filter((o) => !exclude.has(Number(o.id))).map((o) => memberView(m, o, player)).filter(Boolean);
     const snaps = input.snaps.map((o) => snapView(m, o)).filter(Boolean);
-    const ctx = makeContext(m, player, event._id, members, snaps, mode);
-    const pay = payoff(m, event, mode);
-    const rate = boostRate(m, mode, input.boosts || 0);
+    const ctx = makeContext(m, player, scoreMode ? null : event._id, members, snaps, mode);
+    const pay = scoreMode ? { points: new Map(), items: new Map(), cp: new Map() } : payoff(m, event, mode);
+    const rate = scoreMode ? 1 : boostRate(m, mode, input.boosts || 0);
     const W = input.objective === "items" ? { point: 1, item: 1e6 } : { point: 1e6, item: 1 };
     const cpValue = mode === "challenge" ? 0 : input.cpValue || 0;
     const cpOf = (rank) => (pay.cp.get(rank) || 0) * rate;
-    const multi = mode !== "challenge" && input.multi && input.multi.players >= 1 ? input.multi : null;
+    const multi = mode === "normal" && input.multi && input.multi.players >= 1 ? input.multi : null;
     // Own score each rank needs on a chart: solo thresholds, or in a room what the others' scores leave (E counts as D).
     const ownThresholds = (c) =>
       multi
         ? c.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
         : c.thresholds;
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
-    const perMinute = input.perMinute ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
+    const perMinute = input.perMinute && !scoreMode ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
     const minutesOf = (c) => ((c.lengthSec || 0) + (perMinute ? perMinute.overhead : 0)) / 60;
     // A multiplayer live scores with Gekisou (battleRates): the chart rates, live skill weights and Gekisou skills at
     // the rank assumed in every range (at most the room size) and the Just rate.
@@ -1200,6 +1203,69 @@
       }
     }
 
+    // Score mode: the payoff is the expected score, linear in power, so there are no breakpoints to split buckets at (and
+    // with no event bonuses one bucket holds every set). Each group sorts the sets into bins by powBound once
+    // (binSets, a counting sort), and walkScore visits the bins from the top, bounding a bin by its largest powBound at
+    // T's best rate, then the sets by ubOf.
+    const NB = 4096;
+    let bins = null;
+    let binPow = null;
+    let binOrder = null;
+    function binSets(powBound) {
+      if (!binPow) {
+        binPow = new Int32Array(nSets);
+        binOrder = new Int32Array(nSets);
+      }
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let s = 0; s < nSets; s++) {
+        const p = powBound(s);
+        binPow[s] = p;
+        if (p < lo) lo = p;
+        if (p > hi) hi = p;
+      }
+      const w = (hi - lo + 1) / NB;
+      const binOf = (p) => Math.min(NB - 1, Math.floor((p - lo) / w));
+      const start = new Int32Array(NB + 1);
+      const max = new Float64Array(NB).fill(-Infinity);
+      for (let s = 0; s < nSets; s++) {
+        const b = binOf(binPow[s]);
+        start[b + 1]++;
+        if (binPow[s] > max[b]) max[b] = binPow[s];
+      }
+      for (let b = 0; b < NB; b++) start[b + 1] += start[b];
+      const fill = start.slice(0, NB);
+      for (let s = 0; s < nSets; s++) binOrder[fill[binOf(binPow[s])]++] = s;
+      return { start, max, order: binOrder };
+    }
+    function walkScore(T, bMax, powBound, ubOf, threshold, visit) {
+      const { start, max, order } = bins;
+      const rMax = T.rate.get(T.best);
+      const sets = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.e < y.e));
+      let b = NB - 1;
+      for (;;) {
+        while (b >= 0) {
+          if (start[b] === start[b + 1]) {
+            b--;
+            continue;
+          }
+          const key = max[b] * pcal * rMax * calib;
+          if (key < threshold() || (sets.size && key < sets.top().key)) break;
+          const th = threshold();
+          for (let i = start[b]; i < start[b + 1]; i++) {
+            const s = order[i];
+            const k = ubOf(s, T);
+            if (k >= th) sets.push({ key: k, s, e: setEnum[s] });
+          }
+          b--;
+        }
+        if (!sets.size) break;
+        const x = sets.pop();
+        if (x.key < threshold()) break;
+        visit(x.s);
+      }
+    }
+
     // Per rank, the chart needing the least power among `list`; rankFor(power) is the best rank that power reaches.
     // `skill` (aligned with `list`, or null) adds the deck's live skill score per unit of power to each chart's.
     // `optimistic` takes each chart's best play share instead of its mean: a bound on the expected payoff. With combo
@@ -1208,6 +1274,12 @@
     function rankTable(list, skill, optimistic) {
       const rateP = new Map(list.map((c, i) => [c, c.perPower + (skill ? skill[i] : 0)]));
       const rate = new Map(list.map((c) => [c, rateP.get(c) * (optimistic ? shares(c).max : shares(c).mean)]));
+      // Score mode: the chart of the highest expected score per unit of power (the same for every power).
+      if (scoreMode) {
+        let best = list[0];
+        for (const c of list) if (rate.get(c) > rate.get(best)) best = c;
+        return { need: new Map(), rankList: [], rankFor: () => 0, frontier: null, rate, cands: null, best, charts: list };
+      }
       const need = new Map();
       for (const c of list) {
         for (const [r, req] of ownThresholds(c)) {
@@ -1264,6 +1336,14 @@
     // Rank and chart a deck of `power` with bonuses pb/ib plays: the best rank (per live), or the best rank and chart
     // pair per minute. Monotone in power and bonuses, so it also gives the upper bounds.
     function choose(rt, power, pb, ib) {
+      if (rt.best) {
+        // Score mode: the expected score, and the score rank it reaches on the chart (needPower: that rank's power).
+        const c = rt.best;
+        const sc = power * pcal * rt.rate.get(c) * calib;
+        const rank = scoreRankOf(c.thresholds, sc);
+        const th = c.thresholds.find((x) => x[0] === rank);
+        return { rank, chart: c, needPower: th ? Math.ceil(th[1] / (rt.rate.get(c) * calib) / pcal) : 0, points: 0, items: 0, sc };
+      }
       if (rt.cands) return chooseExpected(rt, power, pb, ib);
       const at = (r, chart, needPower, min) => {
         const points = eventPoints(pb, rate, pay.points.get(r) || 0);
@@ -1367,6 +1447,14 @@
         deck.rankDist = best.dist.map(([r, p]) => ({ rank: r, rankName: RANK_NAMES[r] || String(r), p }));
       }
       // Next rank: on any chart of the table per live, on the same chart per minute.
+      if (scoreMode) {
+        const nx = best.chart.thresholds.filter(([r]) => r > best.rank).sort((a, b) => a[0] - b[0])[0];
+        if (nx) {
+          deck.nextRank = nx[0];
+          deck.nextRankName = RANK_NAMES[nx[0]];
+          deck.nextNeedDisplayPower = Math.ceil(Math.ceil(nx[1] / (rt.rate.get(best.chart) * calib) / pcal) * pcal);
+        }
+      }
       const nextRank = rt.rankList.slice().reverse().find((r) => r > best.rank);
       if (nextRank) {
         let need = rt.need.get(nextRank).power;
@@ -1476,19 +1564,37 @@
         return setSU[s] + fNo[setV[o]] + fNo[setV[o + 1]] + fNo[setV[o + 2]] + fNo[setV[o + 3]] + fNo[setV[o + 4]];
       };
       const bMax = new Float64Array(B);
-      for (let b = 0; b < B; b++) {
-        let mx = -Infinity;
-        for (let s = bStart[b]; s < bEnd[b]; s++) {
-          const p = powBound(s);
-          if (p > mx) mx = p;
+      if (scoreMode) bins = binSets(powBound);
+      else {
+        for (let b = 0; b < B; b++) {
+          let mx = -Infinity;
+          for (let s = bStart[b]; s < bEnd[b]; s++) {
+            const p = powBound(s);
+            if (p > mx) mx = p;
+          }
+          bMax[b] = mx;
         }
-        bMax[b] = mx;
       }
-      const ubOf = (s, T) => upperBound(setOf(s), bestF(s), T);
+      // Score mode bounds a set by its own live skills on T's charts (choose's arithmetic at the power bound).
+      const gcIndex = new Map(gc.map((c, i) => [c, i]));
+      const ubOf = scoreMode
+        ? (s, T) => {
+            const so = setOf(s);
+            const bf = bestF(s);
+            const sk = anySkill ? setSkill(so.vs) : null;
+            let r = 0;
+            for (const c of T.charts) {
+              const x = (c.perPower + (sk ? sk[gcIndex.get(c)] : 0)) * shares(c).mean;
+              if (x > r) r = x;
+            }
+            return (bf.f + so.g) * pcal * r * calib;
+          }
+        : (s, T) => upperBound(setOf(s), bestF(s), T);
+      const walk = scoreMode ? walkScore : bestFirst;
 
       const groupFound = [];
       let kth = -Infinity;
-      bestFirst(rt, bMax, powBound, ubOf, () => (groupFound.length >= topK ? kth : -Infinity), (s) => {
+      walk(rt, bMax, powBound, ubOf, () => (groupFound.length >= topK ? kth : -Infinity), (s) => {
         const so = setOf(s);
         const bf = bestF(s);
         const t = anySkill || stochastic ? tables(anySkill ? setSkill(so.vs) : null) : { bound: rt, mean: null };
@@ -1519,7 +1625,7 @@
             return { bound: b, mean: b };
           };
           let best = null;
-          bestFirst(srt, bMax, powBound, ubOf, () => (best ? best.score : -Infinity), (s) => {
+          walk(srt, bMax, powBound, ubOf, () => (best ? best.score : -Infinity), (s) => {
             const so = setOf(s);
             const bf = bestF(s);
             const ti = songTables(so.vs);
