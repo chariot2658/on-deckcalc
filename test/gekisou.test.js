@@ -34,11 +34,13 @@ console.log(`${battle.byScore.size} charts with Gekisou data, ${battle.shapes.si
 const input = {
   master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
   perPowerByScore: perPower, skillWeights: sw, battle, maxLevel: 27, boosts: 3, topK: 1, musicIds: [100094], difficulties: ["expert"],
-  now: new Date("2026-10-01T12:00:00+08:00"),
+  now: new Date("2026-10-01T12:00:00+08:00"), compareSongs: true,
 };
-const solo = E.search({ ...input, multi: { players: 5, othersScore: 4 * 4.9e6 }, battle: null }).results[0];
+// A room's song is random: `results` are decks by the mean over the songs, `songs` the best one on each song.
+const solo = E.search({ ...input, multi: { players: 5, othersScore: 4 * 4.9e6 }, battle: null }).songs[0];
 const room = E.search({ ...input, multi: { players: 5, othersScore: 4 * 4.9e6, gekisouRank: 3, justRate: 0.5 } });
-const d = room.results[0];
+const d = room.songs[0];
+assert.ok(room.results[0].random && room.results[0].rankName === "B" && room.results[0].points === d.points);
 console.log(`TearJerker: score per power without Gekisou ${solo.scoreRate.toFixed(3)}, with Gekisou (rank 3) ${d.scoreRate.toFixed(3)};`,
   `deck ${d.displayPower}: ${d.estScore}`,
   `(live skills +${d.estScore - d.baseScore - d.gekisouScore}, Gekisou skills +${d.gekisouScore}); room ${d.rankName}`);
@@ -47,6 +49,80 @@ assert.ok(d.scoreRate > 1.5 * solo.scoreRate);
 assert.deepStrictEqual(room.gekisou, { rank: 3, justRate: 0.5 });
 // The assumed rank is at most the room size.
 assert.strictEqual(E.search({ ...input, multi: { players: 2, othersScore: 0, gekisouRank: 5 } }).gekisou.rank, 2);
+
+// Random song: the best deck by the mean payoff over every song (each on its best chart) against a brute force over
+// member sets, leaders and the placements of two snaps (no skills, all Perfect), with others' scores that leave some
+// songs' ranks to the deck.
+{
+  const few = roster.members.slice(0, 14);
+  const two = roster.snaps.filter((s) => E.snapView(m, s)).slice(0, 2);
+  const multi = { players: 5, othersScore: 4 * 1.2e6 };
+  const base = {
+    master: m, event, mode: "normal", members: few, snaps: two, player: roster.player, perPowerByScore: perPower,
+    maxLevel: 27, boosts: 3, topK: 3, multi, now: input.now, compareSongs: true,
+  };
+  const out = E.search(base);
+  const mv = few.map((o) => E.memberView(m, o, roster.player));
+  const sv = two.map((o) => E.snapView(m, o));
+  const ctx = E.makeContext(m, roster.player, event._id, mv, sv, "normal");
+  const pay = E.payoff(m, event, "normal");
+  const rate = E.boostRate(m, "normal", 3);
+  const songs = new Map();
+  for (const c of E.charts(m, perPower, { maxLevel: 27, now: input.now })) {
+    if (!songs.has(c.musicId)) songs.set(c.musicId, []);
+    songs.get(c.musicId).push(c);
+  }
+  const music = new Map([...songs.keys()].map((id) => [id, E.musicView(m, id)]));
+  const rankOn = (list, power) => {
+    let best = 0;
+    for (const c of list) {
+      const own = c.battle.map(([r, b]) => [Math.max(r, 2), Math.max(0, E.battleRequiredScore(b, 5) - multi.othersScore)]);
+      best = Math.max(best, E.scoreRankOf(own, power * c.perPower));
+    }
+    return best;
+  };
+  const value = (sum, points, rank) => E.eventPoints(points, rate, pay.points.get(rank) || 0) * 1e6 + E.eventItems(pay.items.get(rank) || 0, sum.it, rate);
+  // Snap placements: each snap in one slot or unused.
+  const places = [];
+  for (let a = -1; a < 5; a++) for (let b = -1; b < 5; b++) if (a < 0 || a !== b) places.push([a, b]);
+  let best = -Infinity;
+  const pick = (k, from, acc) => {
+    if (acc.length === 5) {
+      for (let L = 0; L < 5; L++) {
+        const order = acc.slice();
+        [order[L], order[2]] = [order[2], order[L]];
+        for (const [a, b] of places) {
+          const sn = [null, null, null, null, null];
+          if (a >= 0) sn[a] = sv[0];
+          if (b >= 0) sn[b] = sv[1];
+          const pt = order.reduce((x, v) => x + ctx.memberBonus.get(v).point, 0) + sn.reduce((x, s) => x + (s ? ctx.snapBonus.get(s).point : 0), 0);
+          const it = order.reduce((x, v) => x + ctx.memberBonus.get(v).item, 0) + sn.reduce((x, s) => x + (s ? ctx.snapBonus.get(s).item : 0), 0);
+          let sum = 0;
+          for (const [id, list] of songs) sum += value({ it }, pt, rankOn(list, E.deckPower(m, order, sn, music.get(id), ctx)));
+          best = Math.max(best, sum / songs.size);
+        }
+      }
+      return;
+    }
+    for (let i = from; i < mv.length; i++) {
+      if (acc.some((v) => v.characterId === mv[i].characterId)) continue;
+      pick(k, i + 1, acc.concat([mv[i]]));
+    }
+  };
+  pick(0, 0, []);
+  const top = out.results[0];
+  console.log(`random song: ${out.stats.songs} songs, best mean ${(top.score / 1e6).toFixed(2)} pt (brute force ${(best / 1e6).toFixed(2)}),`,
+    `ranks ${top.rankDist.map((x) => `${x.rankName} ${Math.round(x.p * 100)}%`).join(" ")}`);
+  assert.ok(Math.abs(top.score - best) < 1e-6 * best, `${top.score} vs ${best}`);
+  assert.ok(top.rankDist.length > 1);
+  assert.strictEqual(out.songs.length, songs.size);
+  // The per-song decks are the same deck, and their mean is the deck's.
+  assert.ok(Math.abs(out.songs.reduce((a, d) => a + d.score, 0) / songs.size - top.score) < 1e-6 * top.score);
+  for (const d of out.songs) assert.deepStrictEqual(d.members.map((v) => v.id), top.members.map((v) => v.id));
+  // A private room picks its song: the best deck on the best song pays at least the random song's mean.
+  const picked = E.search({ ...base, multi: { ...multi, pickSong: true } });
+  assert.ok(!picked.random && picked.results[0].chart && picked.results[0].score >= top.score);
+}
 
 (async () => {
   const dir = path.join(root, "data", "replay");
@@ -101,10 +177,10 @@ assert.strictEqual(E.search({ ...input, multi: { players: 2, othersScore: 0, gek
     }
   }
 
-  // The best multiplayer deck of the roster: the simulation (snap skills, Gekisou support skills, all 120 orders)
-  // against the search's estimate.
+  // The best multiplayer deck of the roster on its best song: the simulation (snap skills, Gekisou support skills, all
+  // 120 orders) against the search's estimate.
   const all = E.search({ ...input, musicIds: undefined, difficulties: undefined, gekisouLevels: levels, multi: { players: 5, othersScore: 4 * 4.9e6, gekisouRank: 3, justRate: 1 } });
-  const best = all.results[0];
+  const best = all.songs[0];
   const members = best.members.map((v) => ({ id: v.id, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel }));
   const snaps = best.snaps.map((s) => (s ? { id: s.id, rank: s.rank } : null));
   const sid = best.chart.scoreId;
