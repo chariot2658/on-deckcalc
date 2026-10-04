@@ -36,6 +36,8 @@ function slim(d) {
     rankChance: d.rankChance === undefined ? null : d.rankChance,
     rankDist: d.rankDist || null,
     minutes: d.minutes || null,
+    random: !!d.random,
+    songCount: d.songCount || null,
   };
 }
 
@@ -107,7 +109,7 @@ async function search(msg) {
     });
     const results = out.results.map(slim);
     const songs = (out.songs || []).map(slim);
-    self.postMessage({ type: "result", id: msg.id, error: out.error || null, results, songs, rate: out.rate, gekisou: out.gekisou, stats: out.stats });
+    self.postMessage({ type: "result", id: msg.id, error: out.error || null, results, songs, rate: out.rate, gekisou: out.gekisou, random: !!out.random, stats: out.stats });
   } catch (err) {
     self.postMessage({ type: "error", id: msg.id, message: String((err && err.stack) || err) });
   }

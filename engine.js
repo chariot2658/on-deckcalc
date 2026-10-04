@@ -890,11 +890,12 @@
    *         boosts, objective: "points"|"items", topK, musicIds, fixed: {memberIds, excludeMemberIds},
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
    *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds,
-   *         multi: {players, othersScore, gekisouRank, justRate} for a multiplayer (激奏) normal live: the rank is the
+   *         multi: {players, othersScore, gekisouRank, justRate, pickSong} for a multiplayer (激奏) normal live: the rank is the
    *         room's, reached when the player's score plus othersScore (the other players' total) meets the battle
    *         threshold; with `battle` (battleFromMusicData) the player's score is the Gekisou score at gekisouRank in
    *         every range (default 1, at most players) and justRate (default 1), members' Gekisou skills included
-   *         (gekisouLevels: level factors, see gekisouSkillRate),
+   *         (gekisouLevels: level factors, see gekisouSkillRate); the song is drawn at random (public rooms: decks by the
+   *         mean over the songs, see randomSongSearch) unless pickSong (a private room choosing its song),
    *         perMinute: {overhead} to choose the chart and rank paying the most per minute (song length + overhead
    *         seconds) instead of per live; a deck's `score` is then per minute and `minutes` is one live's duration}
    */
@@ -939,7 +940,9 @@
         ? c.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
         : c.thresholds;
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
-    const perMinute = input.perMinute ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
+    // A public room draws its song at random: no song to choose, per minute or otherwise.
+    const randomSong = !!(multi && !multi.pickSong);
+    const perMinute = input.perMinute && !randomSong ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
     const minutesOf = (c) => ((c.lengthSec || 0) + (perMinute ? perMinute.overhead : 0)) / 60;
     // A multiplayer live scores with Gekisou (battleRates): the chart rates, live skill weights and Gekisou skills at
     // the rank assumed in every range (at most the room size) and the Just rate.
@@ -1208,12 +1211,15 @@
     function rankTable(list, skill, optimistic) {
       const rateP = new Map(list.map((c, i) => [c, c.perPower + (skill ? skill[i] : 0)]));
       const rate = new Map(list.map((c) => [c, rateP.get(c) * (optimistic ? shares(c).max : shares(c).mean)]));
+      // Ties (in a room, often ranks the others' scores reach alone) go solo to the easier chart, in a room to the
+      // higher own score, which leaves the room more margin.
+      const tie = (c, cur) => (multi ? rate.get(c) > rate.get(cur.chart) : c.level < cur.chart.level);
       const need = new Map();
       for (const c of list) {
         for (const [r, req] of ownThresholds(c)) {
           const p = Math.ceil(req / (rate.get(c) * calib) / pcal);
           const cur = need.get(r);
-          if (!cur || p < cur.power || (p === cur.power && c.level < cur.chart.level)) need.set(r, { power: p, chart: c });
+          if (!cur || p < cur.power || (p === cur.power && tie(c, cur))) need.set(r, { power: p, chart: c });
         }
       }
       const rankList = [...need.keys()].sort((a, b) => b - a);
@@ -1342,6 +1348,11 @@
         if (!best || v.sc > best.sc || (v.sc === best.sc && power > best.power)) best = { ...v, power, pb, ib, st };
       }
       const snapObjs = pickToSnaps(best.st.pick).map((j) => (j === null ? null : snaps[j]));
+      return deckOf(order, snapObjs, best, rt, music);
+    }
+    // The deck of members `order` (leader in LEADER_SLOT) and `snapObjs` playing `best` (a `choose` result with the
+    // deck's power, pb and ib) on table rt.
+    function deckOf(order, snapObjs, best, rt, music) {
       const deck = {
         members: order,
         snaps: snapObjs,
@@ -1392,23 +1403,18 @@
       return deck;
     }
 
-    const found = [];
-    const songs = [];
-    let evaluated = 0;
-    for (const group of groups.values()) {
-      const music = group.music;
-      const gc = group.charts;
-      // Live skill score per unit of power of each candidate on each chart of the group; a set adds its five. The
-      // bound takes, per chart, the five largest gains of any candidates.
-      // With Gekisou, a member's Gekisou skill adds its own gain (whatever the performance order).
+    // Live skill score per unit of power of each candidate on each chart of `list`; a set adds its five. The bound takes,
+    // per chart, the five largest gains of any candidates.
+    // With Gekisou, a member's Gekisou skill adds its own gain (whatever the performance order).
+    function skillRates(list) {
       const skillOf = new Map();
       if (sw) {
         for (const v of allCand) {
           const terms = liveSkillTerms(m, v, sw.kinds);
-          const gk = bt ? gc.map((c) => gekisouSkillRate(m, battle, bt, v, c.scoreId, input.gekisouLevels)) : null;
+          const gk = bt ? list.map((c) => gekisouSkillRate(m, battle, bt, v, c.scoreId, input.gekisouLevels)) : null;
           if (!terms.length && !(gk && gk.some((x) => x > 0))) continue;
-          const a = new Float64Array(gc.length);
-          gc.forEach((c, i) => {
+          const a = new Float64Array(list.length);
+          list.forEach((c, i) => {
             const w = sw.byScore.get(c.scoreId);
             if (w) for (const [q, f] of terms) a[i] += f * w[q];
             if (gk) a[i] += gk[i];
@@ -1417,22 +1423,282 @@
         }
       }
       const anySkill = skillOf.size > 0;
-      const maxSkill = new Float64Array(gc.length);
+      const maxSkill = new Float64Array(list.length);
       if (anySkill) {
         const all = [...skillOf.values()];
-        for (let i = 0; i < gc.length; i++) {
+        for (let i = 0; i < list.length; i++) {
           const top = all.map((a) => a[i]).sort((a, b) => b - a);
           for (let k = 0; k < 5 && k < top.length; k++) maxSkill[i] += top[k];
         }
       }
       const setSkill = (vs) => {
-        const a = new Float64Array(gc.length);
+        const a = new Float64Array(list.length);
         for (const v of vs) {
           const x = skillOf.get(v);
           if (x) for (let i = 0; i < a.length; i++) a[i] += x[i];
         }
         return a;
       };
+      return { anySkill, maxSkill, setSkill };
+    }
+
+    let evaluated = 0;
+    if (randomSong) return randomSongSearch();
+
+    // A public room plays a song drawn at random (直接開始, or a draw among the players' picks): the deck is set
+    // before the song is known, so decks are ranked by the mean payoff over the songs, each played on its best allowed
+    // chart. One leader and one snap assignment serve every song; the power varies by song group (music type and tag
+    // bonuses). Bounds use, per group, a step table of how many songs reach each rank at each power level.
+    function randomSongSearch() {
+      const gl = [...groups.values()];
+      const nG = gl.length;
+      const chartIdx = new Map(chartList.map((c, i) => [c, i]));
+      const songList = [];
+      gl.forEach((g, gi) => {
+        const byMusic = new Map();
+        for (const c of g.charts) {
+          if (!byMusic.has(c.musicId)) byMusic.set(c.musicId, []);
+          byMusic.get(c.musicId).push(c);
+        }
+        for (const list of byMusic.values()) songList.push({ g: gi, list, idx: list.map((c) => chartIdx.get(c)) });
+      });
+      const nSongs = songList.length;
+      const sk = skillRates(chartList);
+      const pick = (a, so) => (a ? Float64Array.from(so.idx, (i) => a[i]) : null);
+      const tablesOf = (skill, optimistic) => songList.map((so) => rankTable(so.list, pick(skill, so), optimistic));
+      const boundT = tablesOf(sk.anySkill ? sk.maxSkill : null, stochastic);
+      let meanNoSkill = null;
+      let RMAX = 1;
+      for (const t of boundT) for (const r of t.rankList) RMAX = Math.max(RMAX, r + 1);
+      // Payoff of each rank with bonuses pb/ib, indexed by rank.
+      const values = (pb, ib) => {
+        const out = new Float64Array(RMAX);
+        for (let r = 0; r < RMAX; r++) {
+          out[r] = scoreOf(eventPoints(pb, rate, pay.points.get(r) || 0), eventItems(pay.items.get(r) || 0, ib, rate), r);
+        }
+        return out;
+      };
+      // Per group: power levels P (a power p is in level l when P[l - 1] <= p < P[l]) and cnt[l * RMAX + r], the songs
+      // the bound tables put at rank r in level l.
+      const steps = gl.map((g, gi) => {
+        const ks = [];
+        songList.forEach((so, k) => so.g === gi && ks.push(k));
+        const ps = new Set();
+        for (const k of ks) for (const n of boundT[k].need.values()) ps.add(n.power);
+        const P = Float64Array.from(ps).sort();
+        const cnt = new Float64Array((P.length + 1) * RMAX);
+        for (const k of ks) for (let l = 0; l <= P.length; l++) cnt[l * RMAX + boundT[k].rankFor(l ? P[l - 1] : -Infinity)]++;
+        const fNo = Int32Array.from(allCand, (v) => slotF(m, v, [0, 0, 0], g.music, ctx));
+        return { P, cnt, fNo };
+      });
+      const levelOf = (P, p) => {
+        let a = 0;
+        let b = P.length;
+        while (a < b) {
+          const mid = (a + b) >> 1;
+          if (P[mid] <= p) a = mid + 1;
+          else b = mid;
+        }
+        return a;
+      };
+      // Per group, the summed payoff of its songs at each level.
+      const levelVals = (pb, ib) => {
+        const vals = values(pb, ib);
+        return steps.map(({ P, cnt }) => {
+          const lv = new Float64Array(P.length + 1);
+          for (let l = 0; l <= P.length; l++) for (let r = 0; r < RMAX; r++) lv[l] += cnt[l * RMAX + r] * vals[r];
+          return lv;
+        });
+      };
+      // Song-independent bound on a set's power in group g (F without leader + setSU).
+      const powBound = (g, s) => {
+        const o = s * 5;
+        const f = steps[g].fNo;
+        return setSU[s] + f[setV[o]] + f[setV[o + 1]] + f[setV[o + 2]] + f[setV[o + 3]] + f[setV[o + 4]];
+      };
+      const bMax = new Float64Array(nG * B).fill(-Infinity);
+      for (let g = 0; g < nG; g++) {
+        for (let b = 0; b < B; b++) {
+          for (let s = bStart[b]; s < bEnd[b]; s++) {
+            const p = powBound(g, s);
+            if (p > bMax[g * B + b]) bMax[g * B + b] = p;
+          }
+        }
+      }
+      // Sums over songs in a different order: a bound may fall a rounding error short of the exact payoff.
+      const slack = (x) => x - Math.abs(x) * 1e-9;
+
+      // The exact best deck of set s (sum of the payoff over the songs), or null when its own bound misses `th`.
+      function exact(s, th) {
+        evaluated++;
+        const o = s * 5;
+        const vs = [0, 1, 2, 3, 4].map((i) => allCand[setV[o + i]]);
+        const bk = bucketIdx(s);
+        const pt = bPt[bk];
+        const it = bIt[bk];
+        const skill = sk.anySkill ? sk.setSkill(vs) : null;
+        const bndT = skill ? tablesOf(skill, stochastic) : boundT;
+        const meanT = !stochastic ? bndT : skill ? tablesOf(skill, false) : meanNoSkill || (meanNoSkill = tablesOf(null, false));
+        if (skill && th > -Infinity) {
+          const vals = values(pt + maxSnapPoint, it + maxSnapItem);
+          const pb = gl.map((_, g) => powBound(g, s));
+          let ub = 0;
+          songList.forEach((so, k) => (ub += vals[bndT[k].rankFor(pb[so.g])]));
+          if (ub < th) return null;
+        }
+        // Exact F per group for each leader; leaders another matches or beats in every group are dropped.
+        const leads = [];
+        for (let L = 0; L < 5; L++) {
+          const li = setV[o + L];
+          const order = vs.slice();
+          [order[L], order[LEADER_SLOT]] = [order[LEADER_SLOT], order[L]];
+          let lt = 0;
+          if (simpleAt[li]) for (let i = 0; i < 5; i++) lt += LT[li * N + setV[o + i]];
+          const f = new Float64Array(nG);
+          gl.forEach((g, gi) => {
+            if (simpleAt[li]) {
+              f[gi] = lt;
+              for (let i = 0; i < 5; i++) f[gi] += steps[gi].fNo[setV[o + i]];
+            } else {
+              const lead = leaderBonuses(m, order, LEADER_SLOT, g.music);
+              order.forEach((v, i) => (f[gi] += slotF(m, v, lead[i], g.music, ctx)));
+            }
+          });
+          leads.push({ L, f });
+        }
+        const geq = (a, b) => a.f.every((x, g) => x >= b.f[g]);
+        const kept = leads.filter((a, i) => !leads.some((b, j) => j !== i && geq(b, a) && (j < i || !geq(a, b))));
+        const G = vs.map((v) => Gm.get(v));
+        let best = null;
+        for (const st of snapStates(G, snapPoint, snapItem, snaps.length)) {
+          const pb = pt + st.pt;
+          const ib = it + st.it;
+          const vals = stochastic ? null : values(pb, ib);
+          for (const ld of kept) {
+            let sum = 0;
+            for (let k = 0; k < nSongs; k++) {
+              const p = ld.f[songList[k].g] + st.power;
+              sum += vals ? vals[meanT[k].rankFor(p)] : choose(meanT[k], p, pb, ib).sc;
+            }
+            if (!best || sum > best.sum || (sum === best.sum && st.power > best.st.power)) best = { sum, st, ld, pb, ib };
+          }
+        }
+        return { s, vs, best, meanT };
+      }
+
+      const found = [];
+      const threshold = () => (found.length >= topK ? slack(found[topK - 1].best.sum) : -Infinity);
+      const buckets = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.b < y.b));
+      for (let b = 0; b < B; b++) {
+        if (bEnd[b] === bStart[b]) continue;
+        const lv = levelVals(bPt[b] + maxSnapPoint, bIt[b] + maxSnapItem);
+        let key = 0;
+        for (let g = 0; g < nG; g++) key += lv[g][levelOf(steps[g].P, bMax[g * B + b])];
+        buckets.push({ key, b });
+      }
+      const sets = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.e < y.e));
+      for (;;) {
+        while (buckets.size && buckets.top().key >= threshold() && (!sets.size || buckets.top().key >= sets.top().key)) {
+          const { b } = buckets.pop();
+          const lv = levelVals(bPt[b] + maxSnapPoint, bIt[b] + maxSnapItem);
+          const th = threshold();
+          for (let s = bStart[b]; s < bEnd[b]; s++) {
+            let key = 0;
+            for (let g = 0; g < nG; g++) key += lv[g][levelOf(steps[g].P, powBound(g, s))];
+            if (key >= th) sets.push({ key, s, e: setEnum[s] });
+          }
+        }
+        if (!sets.size) break;
+        const x = sets.pop();
+        if (x.key < threshold()) break;
+        const r = exact(x.s, threshold());
+        if (!r) continue;
+        r.e = x.e;
+        found.push(r);
+        found.sort((a, b) => b.best.sum - a.best.sum || a.e - b.e);
+        if (found.length > topK) found.length = topK;
+      }
+
+      // A found set as a deck: the mean payoff over the songs, the share of songs at each rank and the power the
+      // multiplayer formation screen shows (no song, so no music bonus); `songs` holds the deck on each song.
+      const build = (r) => {
+        const { best, vs, meanT } = r;
+        const order = vs.slice();
+        const snapObjs = pickToSnaps(best.st.pick).map((j) => (j === null ? null : snaps[j]));
+        const L = best.ld.L;
+        [order[L], order[LEADER_SLOT]] = [order[LEADER_SLOT], order[L]];
+        [snapObjs[L], snapObjs[LEADER_SLOT]] = [snapObjs[LEADER_SLOT], snapObjs[L]];
+        const dist = new Map();
+        let points = 0;
+        let items = 0;
+        let cp = 0;
+        const perSong = songList.map((so, k) => {
+          const power = best.ld.f[so.g] + best.st.power;
+          const v = choose(meanT[k], power, best.pb, best.ib);
+          if (v.dist) for (const [rk, p] of v.dist) dist.set(rk, (dist.get(rk) || 0) + p / nSongs);
+          else dist.set(v.rank, (dist.get(v.rank) || 0) + 1 / nSongs);
+          points += v.points / nSongs;
+          items += v.items / nSongs;
+          cp += (v.cp === undefined ? cpOf(v.rank) : v.cp) / nSongs;
+          return deckOf(order, snapObjs, { ...v, power, pb: best.pb, ib: best.ib }, meanT[k], gl[so.g].music);
+        });
+        const rankDist = [...dist].sort((a, b) => b[0] - a[0]).map(([rk, p]) => ({ rank: rk, rankName: RANK_NAMES[rk] || String(rk), p }));
+        let acc = 0;
+        let median = rankDist[rankDist.length - 1];
+        for (const x of rankDist) {
+          acc += x.p;
+          if (acc >= 0.5 - 1e-9) {
+            median = { ...x, chance: acc };
+            break;
+          }
+        }
+        const power = deckPower(m, order, snapObjs, null, ctx);
+        const mean = (f) => perSong.reduce((a, d) => a + (f(d) || 0), 0) / nSongs;
+        const deck = {
+          members: order,
+          snaps: snapObjs,
+          power,
+          displayPower: Math.floor(power * pcal),
+          random: true,
+          songCount: nSongs,
+          rank: median.rank,
+          rankName: median.rankName,
+          rankChance: median.chance,
+          rankDist,
+          chart: null,
+          pointBonus: best.pb,
+          itemBonus: best.ib,
+          points: Math.round(points),
+          items: Math.round(items),
+          cp: Math.round(cp * 10) / 10,
+          cpPoints: cp * cpValue,
+          score: best.sum / nSongs,
+          estScore: Math.round(mean((d) => d.estScore)),
+          baseScore: Math.round(mean((d) => d.baseScore)),
+        };
+        if (bt) deck.gekisouScore = Math.round(mean((d) => d.gekisouScore));
+        perSong.sort((a, b) => b.score - a.score || b.power - a.power);
+        return { deck, perSong };
+      };
+      const built = found.map(build);
+      return {
+        results: built.map((x) => x.deck),
+        songs: input.compareSongs && built.length ? built[0].perSong : [],
+        random: true,
+        rate,
+        gekisou: bt ? { rank: bt.rank, justRate: bt.justRate } : null,
+        payoff: pay,
+        ctx,
+        stats: { sets: nSets, evaluated, groups: nG, songs: nSongs, ms: Date.now() - t0 },
+      };
+    }
+
+    const found = [];
+    const songs = [];
+    for (const group of groups.values()) {
+      const music = group.music;
+      const gc = group.charts;
+      const { anySkill, maxSkill, setSkill } = skillRates(gc);
       const rt = rankTable(gc, anySkill ? maxSkill : null, stochastic);
       const tables = (skill) =>
         stochastic ? { bound: rankTable(gc, skill, true), mean: rankTable(gc, skill, false) } : { bound: rankTable(gc, skill), mean: null };
