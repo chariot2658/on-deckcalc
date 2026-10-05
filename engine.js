@@ -209,9 +209,12 @@
     const live = m.liveSkills.get(c._liveSkillID);
     const skillMax = m.liveSkillMaxLevel.get(c._liveSkillID) || 1;
     const gekisouMax = m.gekisouSkillMaxLevel.get(c._gekisouSkillID) || 1;
+    const gekisou = m.gekisouSkills.get(c._gekisouSkillID);
     return {
       kind: "member",
       liveSkillCategories: live ? live._skillCategories || [] : [],
+      gekisouSkillCategories: gekisou ? gekisou._skillCategories || [] : [],
+      gekisouMissionType: gekisou ? gekisou._gekisouMissionType || 0 : 0,
       liveSkillId: c._liveSkillID,
       liveSkillLevel: Math.min(skillMax, Math.max(1, Math.floor(Number(owned.skillLevel) || 1))),
       gekisouSkillId: c._gekisouSkillID || 0,
@@ -325,7 +328,10 @@
     if (t._tagID > 0 && v.tags.includes(t._tagID)) return true;
     const cats = t._liveSkillCategories || [];
     if (cats.length && v.liveSkillCategories.some((c) => cats.includes(c))) return true;
-    return false; // Gekisou skill targets are not modelled
+    const gcats = t._gekisouSkillCategories || [];
+    if (gcats.length && v.gekisouSkillCategories.some((c) => gcats.includes(c))) return true;
+    // e.g. Cute·Float's leader skill: +18% Vis to cards whose Gekisou skill is a Just mission (power.test.js, 402409).
+    return t._gekisouMissionType > 0 && t._gekisouMissionType === v.gekisouMissionType;
   }
 
   const matchesAny = (v, ts) => !!ts && ts.some((t) => isTargetMember(v, t));
@@ -986,7 +992,8 @@
     const leaderAsGood = (b, a) =>
       !isUsefulLeader(a) || (a.leaderSkillId === b.leaderSkillId && b.leaderSkillLevel >= a.leaderSkillLevel);
     const dominates = (b, a) => {
-      if (b.cardType !== a.cardType || !sameList(b.tags, a.tags) || !sameList(b.liveSkillCategories, a.liveSkillCategories)) return false;
+      if (b.cardType !== a.cardType || !sameList(b.tags, a.tags) || !sameList(b.liveSkillCategories, a.liveSkillCategories) ||
+        !sameList(b.gekisouSkillCategories, a.gekisouSkillCategories) || b.gekisouMissionType !== a.gekisouMissionType) return false;
       if (b.musicTypeRate < a.musicTypeRate || b.musicTagRate < a.musicTagRate || !leaderAsGood(b, a)) return false;
       const ea = ctx.memberBonus.get(a), eb = ctx.memberBonus.get(b);
       const sa = statBase.get(a), sb = statBase.get(b);

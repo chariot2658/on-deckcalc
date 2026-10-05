@@ -50,6 +50,28 @@ const ranks20261002 = {
   require("assert").strictEqual(p, 244053);
 }
 
+// Exact: a leader skill targeting a Gekisou mission type (宮永野乃花 Cute·Float: +72% Vis to 夢限大MewType and +18% Vis
+// to Just-mission Gekisou skills; 2026-10-05 綜合力詳情 on 夢現妄想世界, 402409, 隊長技能 62796; ranks as synced that day).
+{
+  const player = {
+    vipRank: 7,
+    characterRanks: {
+      1: 11, 2: 8, 3: 7, 4: 8, 5: 8, 6: 14, 7: 10, 8: 10, 9: 13, 10: 13, 11: 19, 12: 17, 13: 17, 14: 17, 15: 17,
+      16: 10, 17: 6, 18: 6, 19: 6, 20: 5, 21: 12, 22: 9, 23: 9, 24: 10, 25: 9,
+    },
+    bandItems: { 205: 1, 303: 1 },
+  };
+  // [member id, level, awake, rank, snap id, snap level, snap rank]
+  const team = [[11, 70, 5, 5, 61, 90, 5], [13, 70, 5, 5, 13, 70, 5], [62, 70, 3, 1, 63, 70, 3], [14, 70, 5, 5, 40, 70, 4],
+    [15, 70, 5, 5, 62, 60, 2]];
+  const members = team.map(([id, level, awake, rank]) => E.memberView(m, { id, level, awake, rank }, player));
+  const snaps = team.map(([, , , , id, level, rank]) => E.snapView(m, { id, level, rank }));
+  const ctx = E.makeContext(m, player, null, members, snaps);
+  const p = E.deckPower(m, members, snaps, E.musicView(m, 100054), ctx);
+  console.log("Cute·Float leader (402409) model", p, "(exact)");
+  require("assert").strictEqual(p, 402409);
+}
+
 // Older screenshots, taken with lower character ranks than recorded; no account bonuses, so the ratio is the gap.
 // [member id, level, snap id, snap level, snap rank]; slot 2 (index 2) is the leader.
 const cases = [
