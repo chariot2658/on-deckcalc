@@ -604,8 +604,8 @@
   // ---------------------------------------------------------------------------------------------------------------
 
   /**
-   * DP over snaps assigning each to at most one of the five slots. Keeps, per filled-slot mask and per
-   * (point bonus, item bonus) pair, the largest snap power. Returns every final state.
+   * DP over snaps assigning each to at most one of the five slots. Keeps, per filled-slot mask, the states that no
+   * other matches or beats in point bonus, item bonus and snap power. Returns the final states kept the same way.
    * A snap that five others match or beat in bonuses and in power on every slot is skipped: one of those five is
    * always free to take its place.
    */
@@ -623,29 +623,29 @@
       }
       if (n < 5) useful.push(j);
     }
-    let states = [new Map([[0, { pt: 0, it: 0, power: 0, pick: null }]])];
-    for (let mask = 1; mask < 32; mask++) states.push(new Map());
+    // Pareto front in (pt, it, power): what the callers rank states by is monotone in all three, and a dominated
+    // partial state stays dominated whatever snaps are added to it. Ties keep the earlier state.
+    const front = (list) => {
+      list.sort((a, b) => b.power - a.power || b.pt - a.pt || b.it - a.it);
+      const kept = [];
+      for (const st of list) if (!kept.some((k) => k.pt >= st.pt && k.it >= st.it)) kept.push(st);
+      return kept;
+    };
+    let states = [[{ pt: 0, it: 0, power: 0, pick: null }]];
+    for (let mask = 1; mask < 32; mask++) states.push([]);
     for (const j of useful) {
-      const next = states.map((b) => new Map(b));
+      const next = states.map((b) => b.slice());
       for (let mask = 0; mask < 32; mask++) {
-        for (const st of states[mask].values()) {
+        for (const st of states[mask]) {
           for (let i = 0; i < 5; i++) {
             if (mask & (1 << i)) continue;
-            const nm = mask | (1 << i);
-            const pt = st.pt + snapPoint[j];
-            const it = st.it + snapItem[j];
-            const power = st.power + G[i][j];
-            const key = pt * 1e7 + it;
-            const cur = next[nm].get(key);
-            if (!cur || cur.power < power) next[nm].set(key, { pt, it, power, pick: { i, j, prev: st.pick } });
+            next[mask | (1 << i)].push({ pt: st.pt + snapPoint[j], it: st.it + snapItem[j], power: st.power + G[i][j], pick: { i, j, prev: st.pick } });
           }
         }
       }
-      states = next;
+      states = next.map((b, mask) => (b.length > states[mask].length ? front(b) : b));
     }
-    const out = [];
-    for (const b of states) for (const st of b.values()) out.push(st);
-    return out;
+    return front([].concat(...states));
   }
 
   // ---------------------------------------------------------------------------------------------------------------
