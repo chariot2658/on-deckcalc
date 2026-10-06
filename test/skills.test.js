@@ -5,9 +5,9 @@
 const fs = require("fs");
 const path = require("path");
 const assert = require("assert");
-const { pathToFileURL } = require("url");
 const E = require("../engine.js");
 const S = require("../simulate.js");
+const loadReplay = require("./replay.js");
 
 const root = path.join(__dirname, "..", "..");
 const raw = {};
@@ -32,13 +32,10 @@ const est = Math.floor(power * (perPower.get(scoreId) + E.liveSkillRate(m, views
 console.log("no skills", base, "expected with live skills", est);
 
 (async () => {
-  const dir = path.join(root, "data", "replay");
-  if (!fs.existsSync(path.join(dir, "deck-data.json"))) {
+  const session = await loadReplay();
+  if (!session) {
     console.log("skip simulation: run node test/fetch-replay.js");
   } else {
-    const mod = await import(pathToFileURL(path.join(dir, "engine", "ournotes_replay.js")).href);
-    mod.initSync({ module: fs.readFileSync(path.join(dir, "engine", "ournotes_replay_bg.wasm")) });
-    const session = new mod.ReplaySession(fs.readFileSync(path.join(dir, "deck-data.json"), "utf8"));
     const members = team.map(([id]) => ({ id, skillLevel: 1 }));
     const snaps = team.map(([, id, rank]) => ({ id, rank }));
     const t0 = Date.now();

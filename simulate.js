@@ -136,6 +136,32 @@
   }
 
   /**
+   * Snap skill score per unit of power of each kind of member/snap pairing on chart `scoreId`, for the score search
+   * (Engine.search snapSkill; pairs from Engine.scoreScope: [{key, member: {id, skillLevel}, snap: {id, rank}}]).
+   * A pairing's gain at a performance position does not depend on the other slots, so five copies of it in one run
+   * add up its gains at the five positions: (five copies with the snap - five without) / 5 / power is its mean over the
+   * uniformly random order. Gekisou skills and Gekisou support skills are left out (the search adds the members' own;
+   * the snaps' are left to orderScores). `gekisou` as for orderScores. Returns Map key -> rate; `progress(done, total)`.
+   */
+  function snapSkillRates(session, m, scoreId, pairs, gekisou, progress, power = 1e6) {
+    let tpl = JSON.parse(session.template(scoreId, power, FPS));
+    if (gekisou) tpl = gekisouRequest(session, tpl, scoreId, gekisou);
+    const run = (p) => JSON.parse(session.run(JSON.stringify({ ...tpl, performers: [p, p, p, p, p] }))).score;
+    const without = new Map(); // member side -> score of five copies without snap skills
+    const out = new Map();
+    pairs.forEach((pr, i) => {
+      const p = { ...performers(m, [pr.member], [pr.snap])[0], gekisouSkill: null, gekisouSupportSkills: [] };
+      const bare = { ...p, supportSkills: [] };
+      // Members of one live skill score alike without snaps (the key's member part, Engine.snapSkillKey).
+      const k = pr.memberKey || JSON.stringify(bare);
+      if (!without.has(k)) without.set(k, run(bare));
+      out.set(pr.key, (run(p) - without.get(k)) / 5 / power);
+      if (progress) progress(i + 1, pairs.length);
+    });
+    return out;
+  }
+
+  /**
    * Level factors of member Gekisou skills for the search (Engine.gekisouSkillRate): music-data measured each skill at
    * its top level only, and a lower level changes trigger conditions or the activation time rather than a value. For
    * each [skillId, level] below the top: the simulated increment of the skill alone at that level over the increment at
@@ -230,7 +256,7 @@
     }
   }
 
-  const api = { ORDERS, performers, gekisouRequest, orderScores, gekisouLevelFactors, loadReplay };
+  const api = { ORDERS, performers, gekisouRequest, orderScores, snapSkillRates, gekisouLevelFactors, loadReplay };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Simulate = api;
 })(typeof self !== "undefined" ? self : this);
