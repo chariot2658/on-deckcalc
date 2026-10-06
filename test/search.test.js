@@ -36,7 +36,7 @@ assert.strictEqual(E.battleRequiredScore(4127689, 5), 20638445);
 {
   const input = {
     master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
-    perPowerByScore: perPower, maxLevel: 27, powerCalibration: 1.0, boosts: 3, topK: 1, musicIds: [100094],
+    perPowerByScore: perPower, maxLevel: 27, boosts: 3, topK: 1, musicIds: [100094],
     now: new Date("2026-10-01T12:00:00+08:00"),
   };
   const solo = E.search(input).results[0];
@@ -62,8 +62,6 @@ for (const mode of ["normal", "challenge"]) {
     player: roster.player,
     perPowerByScore: perPower,
     maxLevel: 27,
-    powerCalibration: 1.0,
-    calibration: 1.0,
     boosts: mode === "challenge" ? 200 : 3,
     topK: 5,
     now: new Date("2026-10-01T12:00:00+08:00"),
@@ -83,7 +81,7 @@ for (const mode of ["normal", "challenge"]) {
   const t0 = Date.now();
   const plan = E.planEvent({
     master: m, event, members: roster.members, snaps: roster.snaps, player: roster.player, perPowerByScore: perPower,
-    maxLevel: 27, powerCalibration: 1.0, calibration: 1.0, boosts: 3, topK: 5, now: new Date("2026-10-01T12:00:00+08:00"),
+    maxLevel: 27, boosts: 3, topK: 5, now: new Date("2026-10-01T12:00:00+08:00"),
   });
   console.log(`== plan (${Date.now() - t0} ms): 1 CP = ${plan.cpValue.toFixed(2)} pt`);
   for (const d of plan.normal.results) {
@@ -102,8 +100,8 @@ for (const mode of ["normal", "challenge"]) {
   const t0 = Date.now();
   const input = {
     master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
-    perPowerByScore: perPower, lengthByScore: E.chartLengthsFromMusicData(md), maxLevel: 27, powerCalibration: 1.0,
-    calibration: 1.0, boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
+    perPowerByScore: perPower, lengthByScore: E.chartLengthsFromMusicData(md), maxLevel: 27,
+    boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
   };
   const out = E.search({ ...input, compareSongs: true });
   const ms = Date.now() - t0;
@@ -128,8 +126,8 @@ for (const mode of ["normal", "challenge"]) {
   const lengths = E.chartLengthsFromMusicData(md);
   const input = {
     master: m, event, mode: "normal", members: roster.members, snaps: roster.snaps, player: roster.player,
-    perPowerByScore: perPower, lengthByScore: lengths, maxLevel: 27, powerCalibration: 1.0,
-    calibration: 1.0, boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
+    perPowerByScore: perPower, lengthByScore: lengths, maxLevel: 27,
+    boosts: 3, topK: 5, cpValue: 22, now: new Date("2026-10-01T12:00:00+08:00"),
   };
   const perLive = E.search(input).results[0];
   const out = E.search({ ...input, perMinute: { overhead: 40 }, compareSongs: true });
