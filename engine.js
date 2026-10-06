@@ -7,7 +7,7 @@
  *   points = (10000 + pointBonus) * boostRate * value(rank) / 10000
  *   items  = count(rank) * (10000 + itemBonus) * boostRate / 10000
  * The live score is estimated as power * (no-skill score per unit of power of the chart, from nnnotes'
- * music-data.json) * a calibration factor for skills and play accuracy.
+ * music-data.json, plus the members' expected live skill gain) * a play accuracy factor.
  *
  * Runs in the browser (window.Engine) and in Node (module.exports) for tests.
  */
@@ -1072,8 +1072,7 @@
    *         skillWeights (skillWeightsFromMusicData: adds the members' expected live skill score),
    *         snapSkill ({byScore: scoreId -> Map(snapSkillKey -> score per unit of power)}, Simulate.snapSkillRates: the
    *         score objective adds the snap skills and plays only the charts measured; otherwise snap skills are left to
-   *         the simulation), maxLevel, difficulties, calibration (score multiplier), powerCalibration
-   *         (in-game / model power), accuracy ({perfectRate, breaks}: see playShares; null plays all Perfect; with
+   *         the simulation), maxLevel, difficulties, accuracy ({perfectRate, breaks}: see playShares; null plays all Perfect; with
    *         combo breaks the score varies, and decks are ranked by their expected payoff over the ranks they may reach),
    *         boosts, objective: "points"|"items"|"score", topK, musicIds, fixed: {memberIds, excludeMemberIds},
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
@@ -1095,7 +1094,6 @@
     const scoreMode = input.objective === "score";
     const player = input.player || {};
     const topK = input.topK || 5;
-    const calib = input.calibration || 1;
     const accuracy = input.accuracy || null;
     // The expected score is linear in the play share, so the score mode needs only its mean.
     const stochastic = !scoreMode && !!(accuracy && accuracy.breaks > 0);
@@ -1113,7 +1111,6 @@
       }
       return v;
     };
-    const pcal = input.powerCalibration || 1;
     const exclude = new Set((input.excludeMemberIds || []).map(Number));
     const members = input.members.filter((o) => !exclude.has(Number(o.id))).map((o) => memberView(m, o, player)).filter(Boolean);
     const snaps = input.snaps.map((o) => snapView(m, o)).filter(Boolean);
@@ -1465,7 +1462,7 @@
             b--;
             continue;
           }
-          const key = max[b] * pcal * rMax * calib;
+          const key = max[b] * rMax;
           if (key < threshold() || (sets.size && key < sets.top().key)) break;
           const th = threshold();
           for (let i = start[b]; i < start[b + 1]; i++) {
@@ -1502,7 +1499,7 @@
       const need = new Map();
       for (const c of list) {
         for (const [r, req] of ownThresholds(c)) {
-          const p = Math.ceil(req / (rate.get(c) * calib) / pcal);
+          const p = Math.ceil(req / rate.get(c));
           const cur = need.get(r);
           if (!cur || p < cur.power || (p === cur.power && tie(c, cur))) need.set(r, { power: p, chart: c });
         }
@@ -1520,7 +1517,7 @@
           const opts = [];
           for (const c of list) {
             const th = ownThresholds(c).find((x) => x[0] === r);
-            if (th && c.lengthSec) opts.push({ power: Math.ceil(th[1] / (rate.get(c) * calib) / pcal), chart: c, min: minutesOf(c) });
+            if (th && c.lengthSec) opts.push({ power: Math.ceil(th[1] / rate.get(c)), chart: c, min: minutesOf(c) });
           }
           opts.sort((a, b) => a.power - b.power || a.min - b.min || a.chart.level - b.chart.level);
           const kept = [];
@@ -1544,7 +1541,7 @@
         cands = [...picked].map((c) => ({
           chart: c,
           // [rank, power reaching it at share 1], highest rank first
-          xs: ownThresholds(c).map(([r, req]) => [r, req / (rateP.get(c) * calib) / pcal]).sort((a, b) => b[0] - a[0]),
+          xs: ownThresholds(c).map(([r, req]) => [r, req / rateP.get(c)]).sort((a, b) => b[0] - a[0]),
           q: shares(c).q,
           mean: shares(c).mean,
           min: perMinute ? minutesOf(c) : 0,
@@ -1560,10 +1557,10 @@
         // Score mode: the expected score, and the score rank it reaches on the chart (needPower: that rank's power).
         const c = rt.best;
         const r = rt.rate.get(c) + x * shares(c).mean;
-        const sc = power * pcal * r * calib;
+        const sc = power * r;
         const rank = scoreRankOf(c.thresholds, sc);
         const th = c.thresholds.find((t) => t[0] === rank);
-        return { rank, chart: c, needPower: th ? Math.ceil(th[1] / (r * calib) / pcal) : 0, points: 0, items: 0, sc, x };
+        return { rank, chart: c, needPower: th ? Math.ceil(th[1] / r) : 0, points: 0, items: 0, sc, x };
       }
       if (rt.cands) return chooseExpected(rt, power, pb, ib);
       const at = (r, chart, needPower, min) => {
@@ -1653,12 +1650,12 @@
         members: order,
         snaps: snapObjs,
         power: best.power,
-        displayPower: Math.floor(best.power * pcal),
+        displayPower: Math.floor(best.power),
         rank: best.rank,
         rankName: RANK_NAMES[best.rank] || String(best.rank),
         chart: best.chart,
         needPower: best.needPower,
-        needDisplayPower: Math.ceil(best.needPower * pcal),
+        needDisplayPower: Math.ceil(best.needPower),
         pointBonus: best.pb,
         itemBonus: best.ib,
         points: Math.round(best.points),
@@ -1681,7 +1678,7 @@
         if (nx) {
           deck.nextRank = nx[0];
           deck.nextRankName = RANK_NAMES[nx[0]];
-          deck.nextNeedDisplayPower = Math.ceil(Math.ceil(nx[1] / ((rt.rate.get(best.chart) + snapRate) * calib) / pcal) * pcal);
+          deck.nextNeedDisplayPower = Math.ceil(nx[1] / (rt.rate.get(best.chart) + snapRate));
         }
       }
       const nextRank = rt.rankList.slice().reverse().find((r) => r > best.rank);
@@ -1689,23 +1686,23 @@
         let need = rt.need.get(nextRank).power;
         if (perMinute) {
           const th = ownThresholds(best.chart).find((x) => x[0] === nextRank);
-          need = th ? Math.ceil(th[1] / (rt.rate.get(best.chart) * calib) / pcal) : null;
+          need = th ? Math.ceil(th[1] / rt.rate.get(best.chart)) : null;
         }
         if (need !== null) {
           deck.nextRank = nextRank;
           deck.nextRankName = RANK_NAMES[nextRank];
-          deck.nextNeedDisplayPower = Math.ceil(need * pcal);
+          deck.nextNeedDisplayPower = Math.ceil(need);
         }
       }
       if (perMinute) deck.minutes = minutesOf(best.chart);
       deck.scoreRate = rt.rate.get(best.chart) + snapRate;
       deck.accuracy = accuracyFactor(m, best.chart.scoreId, accuracy);
-      deck.estScore = Math.floor(best.power * pcal * deck.scoreRate * calib);
-      deck.baseScore = Math.floor(best.power * pcal * deck.chart.perPower * deck.accuracy * calib);
-      if (best.x) deck.snapScore = Math.floor(best.power * pcal * snapRate * calib);
+      deck.estScore = Math.floor(best.power * deck.scoreRate);
+      deck.baseScore = Math.floor(best.power * deck.chart.perPower * deck.accuracy);
+      if (best.x) deck.snapScore = Math.floor(best.power * snapRate);
       if (bt) {
         const g = order.reduce((a, v) => a + gekisouSkillRate(m, battle, bt, v, best.chart.scoreId, input.gekisouLevels), 0);
-        deck.gekisouScore = Math.floor(best.power * pcal * g * deck.accuracy * calib);
+        deck.gekisouScore = Math.floor(best.power * g * deck.accuracy);
       }
       return deck;
     }
@@ -1978,7 +1975,7 @@
           members: order,
           snaps: snapObjs,
           power,
-          displayPower: Math.floor(power * pcal),
+          displayPower: Math.floor(power),
           random: true,
           songCount: nSongs,
           rank: median.rank,
@@ -2088,7 +2085,7 @@
               const x = (c.perPower + (sk ? sk[gcIndex.get(c)] : 0)) * shares(c).mean;
               if (x > r) r = x;
             }
-            return (bf.f + so.g) * pcal * r * calib;
+            return (bf.f + so.g) * r;
           }
         : (s, T) => upperBound(setOf(s), bestF(s), T);
       const walk = scoreMode ? walkScore : bestFirst;

@@ -25,7 +25,6 @@
     difficulties: ["easy", "normal", "hard", "expert"],
     objective: "points",
     topK: 5,
-    powerCal: 1.0,
     perfectRate: 100, // %, of judged notes
     comboBreaks: 0, // Miss + Bad per live
     importMaxLevel: false,
@@ -631,7 +630,6 @@
       maxLevel: s.maxLevel,
       difficulties: s.difficulties,
       accuracy: { perfectRate: s.perfectRate / 100, breaks: s.comboBreaks },
-      powerCalibration: s.powerCal,
       boosts: score ? 0 : s.mode === "challenge" ? s.cp : s.boosts,
       objective: s.objective,
       topK: s.topK,
@@ -675,7 +673,7 @@
   }
 
   // One deck: rank, payoff, song and the five slots. `label` heads the summary line; `key` finds the deck again for
-  // the calibration button.
+  // the simulation line.
   function deckCard(d, label, key, unit, out) {
     const s = state.settings;
     const m = state.master;
@@ -730,11 +728,6 @@
         <div style="margin-left:auto;text-align:right">${d.random ? randomSide(d, out) : scoreMode ? scoreSide(d, key, out) : chartSide(d, key, out)}</div>
       </div>
       <div class="slots">${slots}</div>
-      <div class="calib">
-        用這隊實際打一場後，可以回報綜合力校正模型：
-        遊戲顯示綜合力 <input type="number" class="cal-power" style="width:100px">
-        <button class="small cal-apply" data-key="${key}">校正</button>
-      </div>
     </div>`;
   }
 
@@ -795,19 +788,6 @@
     return `<div class="small">依你的準度（斷 combo 的位置不同）：${parts}，數字是期望值</div>`;
   }
 
-  function bindCalibration(el, decks) {
-    el.querySelectorAll(".cal-apply").forEach((b) => (b.onclick = () => {
-      const d = decks.get(b.dataset.key);
-      const box = b.closest(".calib");
-      const shown = Number($(".cal-power", box).value);
-      if (!(shown > 0)) return;
-      state.settings.powerCal = shown / d.power;
-      const msgs = [`綜合力校正 = ${state.settings.powerCal.toFixed(4)}`];
-      saveSettings();
-      box.insertAdjacentHTML("beforeend", `<div class="good">已更新：${msgs.join("，")}。請重新計算。</div>`);
-    }));
-  }
-
   const resultUnit = (out) =>
     out.input.objective === "score" ? "每場" : out.mode === "challenge" ? `每次（${state.settings.cp} CP）` : `每場（${out.input.boosts} 個加成道具，倍率 ×${out.rate}）`;
 
@@ -835,7 +815,7 @@
     const note = out.input.objective === "score" ? scoreNote(out, hasSongs) : null;
     el.innerHTML = `<div class="panel">
         <h2>結果</h2>
-        ${note || `<p class="note">預估分數＝全 Perfect 的計分資料加上演出技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折；綜合力 × 綜合力校正 ${s.powerCal.toFixed(3)}。
+        ${note || `<p class="note">預估分數＝全 Perfect 的計分資料加上演出技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折。
         有斷 combo 時分數會隨斷的位置變動（斷在中段最傷），排名改用各評級機率加權的期望收益，餘裕太小、可能掉級的隊伍會排在後面。
         「模擬分數」再加上快照技能：用 ournotes-deck 的整場模擬算出 120 種發動順序的分數，評級機率同時考慮發動順序和斷 combo 的位置。
         餘裕小於 3% 的隊伍，實際可能差一級。${
@@ -860,7 +840,6 @@
             : ""
         }${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>`}
       </div>${cards || '<div class="panel">沒有結果。</div>'}${hasSongs ? `<div class="panel" id="songs"></div><div id="song-deck"></div>` : ""}`;
-    bindCalibration(el, decks);
     fillSims(el, decks, out);
     if (hasSongs) renderSongs(out);
   }
@@ -1110,7 +1089,6 @@
       return;
     }
     el.innerHTML = deckCard(d, out.random ? `推薦 #1 打 ${musicTitle(d.chart.musicId)}` : `${musicTitle(d.chart.musicId)} 的最佳隊伍`, "s", resultUnit(out), out);
-    bindCalibration(el, new Map([["s", d]]));
     fillSims(el, new Map([["s", d]]), out);
   }
 
@@ -1693,15 +1671,13 @@
         <p class="note" id="profileMsg"></p>
       </div>
       <div class="panel">
-        <h2>校正</h2>
+        <h2>綜合力</h2>
         <div class="row">
-          <label class="field"><span>綜合力校正（遊戲顯示 ÷ 模型）</span><input type="number" step="0.001" id="powerCal" value="${s.powerCal}"></label>
           <label class="field"><span>T.G.W CARD 等級</span><input type="number" id="vip" min="1" max="30" value="${p.vipRank || 1}"></label>
           <label><input type="checkbox" id="eventParam" ${p.eventParameters ? "checked" : ""}> 一般 Live 也計入活動「數值」加成</label>
         </div>
-        <p class="note">模型有角色等級、強化樂團與 T.G.W CARD 加成，其餘差距由綜合力校正補上。填好角色等級和 T.G.W CARD 等級後模型與遊戲完全一致（378,423 實測），校正應為 1.000。
-        活動「數值」加成在挑戰 Live 一律計入（244,053 實測），一般 Live 不計入，除非勾選上面的選項。
-        分數校正 1.0 表示不計演出技能；實測一場後可在結果卡片上回報，讓工具自動算。</p>
+        <p class="note">角色等級、強化樂團和 T.G.W CARD 等級都填好時，模型與遊戲顯示的綜合力完全一致（378,423、597,619 實測）；對不上時請先檢查這三項有沒有更新。
+        活動「數值」加成在挑戰 Live 一律計入（244,053 實測），一般 Live 不計入，除非勾選上面的選項。</p>
       </div>
       <div class="panel">
         <h2>角色等級（選填）</h2>
@@ -1777,7 +1753,6 @@
     };
     $("#addProfile").onclick = () => newProfile(false);
     $("#copyProfile").onclick = () => newProfile(true);
-    $("#powerCal").onchange =(e) => ((s.powerCal = Number(e.target.value) || 1), saveSettings());
     $("#vip").onchange = (e) => ((p.vipRank = clamp(Number(e.target.value), 1, 30)), saveRoster());
     $("#eventParam").onchange = (e) => ((p.eventParameters = e.target.checked), saveRoster());
     el.querySelectorAll("[data-char]").forEach((inp) => (inp.onchange = () => {
