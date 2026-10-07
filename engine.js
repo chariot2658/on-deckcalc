@@ -42,7 +42,8 @@
     "MasterChallengeLiveEventPoint", "MasterChallengeLiveEventReward", "MasterChallengeMusic", "MasterLiveChallengePoint",
     "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterLiveSkillEffect", "MasterText",
     "MasterBandItem", "MasterBandItemSkillEffect", "MasterLiveComboScoreBonus", "MasterGekisouSkill",
-    "MasterGekisouSkillEffect", "MasterGekisouSupportSkill", "MasterLiveJudgementTiming", "MasterSupportSkillEffect",
+    "MasterGekisouSkillEffect", "MasterGekisouSupportSkill", "MasterGekisouSupportSkillEffect", "MasterLiveJudgementTiming",
+    "MasterSupportSkillEffect",
   ];
 
   function rows(table) {
@@ -92,6 +93,8 @@
       liveSkillMaxLevel: new Map(),
       gekisouSkillEffects: new Map(),
       gekisouSkillMaxLevel: new Map(),
+      gekisouSupportSkillEffects: new Map(),
+      gekisouSupportSkillMaxLevel: new Map(),
       supportSkillEffects: new Map(),
       bandItemEffects: new Map(),
     };
@@ -121,6 +124,13 @@
       if (!m.gekisouSkillEffects.has(k)) m.gekisouSkillEffects.set(k, []);
       m.gekisouSkillEffects.get(k).push(r);
       m.gekisouSkillMaxLevel.set(r._gekisouSkillID, Math.max(m.gekisouSkillMaxLevel.get(r._gekisouSkillID) || 1, r._level));
+    }
+    for (const r of t.MasterGekisouSupportSkillEffect) {
+      const k = r._gekisouSupportSkillID + ":" + r._level;
+      if (!m.gekisouSupportSkillEffects.has(k)) m.gekisouSupportSkillEffects.set(k, []);
+      m.gekisouSupportSkillEffects.get(k).push(r);
+      const id = r._gekisouSupportSkillID;
+      m.gekisouSupportSkillMaxLevel.set(id, Math.max(m.gekisouSupportSkillMaxLevel.get(id) || 1, r._level));
     }
     for (const r of t.MasterSupportSkillEffect) {
       const k = r._supportSkillID + ":" + r._level;
@@ -216,6 +226,7 @@
     const skillMax = m.liveSkillMaxLevel.get(c._liveSkillID) || 1;
     const gekisouMax = m.gekisouSkillMaxLevel.get(c._gekisouSkillID) || 1;
     const gekisou = m.gekisouSkills.get(c._gekisouSkillID);
+    const gekisouLevel = Math.min(gekisouMax, Math.max(1, Math.floor(Number(owned.gekisouSkillLevel) || 1)));
     return {
       kind: "member",
       liveSkillCategories: live ? live._skillCategories || [] : [],
@@ -224,7 +235,9 @@
       liveSkillId: c._liveSkillID,
       liveSkillLevel: Math.min(skillMax, Math.max(1, Math.floor(Number(owned.skillLevel) || 1))),
       gekisouSkillId: c._gekisouSkillID || 0,
-      gekisouSkillLevel: Math.min(gekisouMax, Math.max(1, Math.floor(Number(owned.gekisouSkillLevel) || 1))),
+      gekisouSkillLevel: gekisouLevel,
+      luckGauge: luckGaugeOf(m, c._gekisouSkillID, gekisouLevel),
+      comboCount: comboCountOf(m, c._gekisouSkillID, gekisouLevel),
       id: c._id,
       assetId: c._assetID,
       characterId: c._characterID,
@@ -264,10 +277,15 @@
     const supportSkills = [];
     if (rk && s._supportSkillId01) supportSkills.push([s._supportSkillId01, rk._supportSkill01Level]);
     if (rk && s._supportSkillId02) supportSkills.push([s._supportSkillId02, rk._supportSkill02Level]);
+    // Gekisou support skills (multiplayer lives only; they act when the paired member has a Gekisou skill).
+    const gekisouSupportSkills = [];
+    if (rk && s._gekisouSupportSkillId01) gekisouSupportSkills.push([s._gekisouSupportSkillId01, rk._gekisouSupportSkill01Level]);
+    if (rk && s._gekisouSupportSkillId02) gekisouSupportSkills.push([s._gekisouSupportSkillId02, rk._gekisouSupportSkill02Level]);
     return {
       kind: "snap",
       id: s._id,
       supportSkills,
+      gekisouSupportSkills,
       assetId: s._assetID,
       characterIds: s._characterIDs || [],
       bandIds: bands,
@@ -622,10 +640,11 @@
 
   /**
    * DP over snaps assigning each to at most one of the five slots. Keeps, per filled-slot mask, the states that no
-   * other matches or beats in point bonus, item bonus, snap skill rate and snap power. Returns the final states kept the
-   * same way. A snap that five others match or beat in bonuses, and in power and skill rate on every slot, is skipped:
-   * one of those five is always free to take its place. `X` (or null): X[slot][snap] = the snap skill's score per unit
-   * of power paired with that slot's member; a state's `x` sums them.
+   * other matches or beats in point bonus, item bonus, pair rate and snap power. Returns the final states kept the
+   * same way. A snap that five others match or beat in bonuses, and in power and pair rate on every slot, is skipped:
+   * one of those five is always free to take its place. `X` (or null): X[slot][snap] = the snap's pair rate with that
+   * slot's member (the score objective: its snap skills' and Gekisou support skills' score per unit of power on the
+   * chart; points on a random song: supportMeans); a state's `x` sums them.
    */
   function snapStates(G, snapPoint, snapItem, nSnaps, X) {
     const atLeast = (k, j) => {
@@ -959,30 +978,35 @@
     return acc;
   }
 
+  /** The seconds snap `s` extends member `v`'s live skill by (15000 rows whose member conditions `v` meets). */
+  function snapExtension(m, v, s) {
+    let ext = 0;
+    for (const [id, level] of (s && s.supportSkills) || []) {
+      for (const e of m.supportSkillEffects.get(id + ":" + level) || []) {
+        if (e._skillEffectType !== 15000) continue;
+        let hit = true;
+        for (const cs of e._skillConditionGroup > 0 ? m.conditionSets.get(e._skillConditionGroup) || [] : []) {
+          for (const cid of cs._conditionIds) {
+            const c = m.skillConditions.get(cid);
+            if (c && c._conditionType === 5000 && matchesAny(v, targetsOf(m, c._conditionTargetIDs)) !== c._isPositive) hit = false;
+          }
+        }
+        if (hit) ext += e._effectValue / 1000;
+      }
+    }
+    return ext;
+  }
+
   /**
    * A rough snap skill score per unit of power of a deck (member and snap views, slot by slot) on chart `scoreId`:
    * each snap's live skill extension (15000) over the live skill's own 5 s, times the member's live skill rate. On the
-   * charts checked it is 8% below the replay's rates (spread ±15%); it only picks which songs to measure.
+   * charts checked it is 8% below the replay's rates (spread ±15%). It picks which songs the score objective measures,
+   * and it is what snap skills add in the points search, which has no measured rates.
    */
   function roughSnapRate(m, members, snaps, scoreId, skillWeights) {
     let r = 0;
     members.forEach((v, i) => {
-      const s = snaps[i];
-      if (!s) return;
-      let ext = 0;
-      for (const [id, level] of s.supportSkills || []) {
-        for (const e of m.supportSkillEffects.get(id + ":" + level) || []) {
-          if (e._skillEffectType !== 15000) continue;
-          let hit = true;
-          for (const cs of e._skillConditionGroup > 0 ? m.conditionSets.get(e._skillConditionGroup) || [] : []) {
-            for (const cid of cs._conditionIds) {
-              const c = m.skillConditions.get(cid);
-              if (c && c._conditionType === 5000 && matchesAny(v, targetsOf(m, c._conditionTargetIDs)) !== c._isPositive) hit = false;
-            }
-          }
-          if (hit) ext += e._effectValue / 1000;
-        }
-      }
+      const ext = snapExtension(m, v, snaps[i]);
       if (ext) r += (liveSkillRate(m, [v], scoreId, skillWeights) * ext) / 5;
     });
     return r;
@@ -1064,10 +1088,49 @@
   }
 
   /**
+   * What Simulate.comboBoosts measures before a multiplayer search (input as for search): the owned members' COMBO
+   * count-up skills (comboCountOf keys), and per song with a COMBO range among the allowed charts its hardest one
+   * (another difficulty of the song takes its shares), with the support skill and idle Gekisou skill to measure them
+   * with. null when there is nothing to measure.
+   */
+  function comboScope(input) {
+    const m = input.master;
+    const { bt, battle, chartList } = liveSetup(input);
+    if (!bt || !battle.supportShapes || !battle.supportShapes.size) return null;
+    const keys = new Set();
+    for (const o of input.members) {
+      const v = memberView(m, o, input.player || {});
+      if (v && v.comboCount) keys.add(v.comboCount);
+    }
+    const support = [...m.gekisouSupportSkills.keys()].find((id) => gekisouSupportKind(m, id) === "combo");
+    // A Gekisou skill that adds no score: a JUST count-up (mission points only).
+    const idle = m.t.MasterGekisouSkill.find((g) => {
+      const rows = m.gekisouSkillEffects.get(g._id + ":1") || [];
+      return rows.length > 0 && rows.every((e) => e._skillEffectType === 13000);
+    });
+    if (!keys.size || !support || !idle) return null;
+    const bySong = new Map();
+    for (const c of chartList) {
+      const b = battle.byScore.get(c.scoreId);
+      if (!b || !(b.missions || []).includes(1)) continue;
+      const cur = bySong.get(c.musicId);
+      if (!cur || c.level > cur.level) bySong.set(c.musicId, c);
+    }
+    if (!bySong.size) return null;
+    return {
+      keys: [...keys].sort(),
+      scoreIds: [...bySong.values()].map((c) => c.scoreId),
+      byMusic: new Map([...bySong].map(([id, c]) => [id, c.scoreId])),
+      support,
+      idle: idle._id,
+    };
+  }
+
+  /**
    * Finds the best decks for one event mode, or with objective "score" the decks of the highest expected score: no
    * event points, items or CP (boosts, cpValue and perMinute are ignored); a challenge live keeps the event's parameter
-   * bonus and plays its challenge songs; a normal live needs no `event` (null); a multiplayer live plays the chosen
-   * songs (no random draw) and scores with Gekisou. The score is the expected one over performance orders.
+   * bonus and plays its challenge songs; a normal live needs no `event` (null); a multiplayer live scores with Gekisou
+   * (a random song: the mean over the songs, randomScoreSearch). The score is the expected one over performance orders.
    * input: {master, event, mode: "normal"|"challenge", members: [owned], snaps: [owned], player, perPowerByScore,
    *         skillWeights (skillWeightsFromMusicData: adds the members' expected live skill score),
    *         snapSkill ({byScore: scoreId -> Map(snapSkillKey -> score per unit of power)}, Simulate.snapSkillRates: the
@@ -1081,8 +1144,10 @@
    *         room's, reached when the player's score plus othersScore (the other players' total) meets the battle
    *         threshold; with `battle` (battleFromMusicData) the player's score is the Gekisou score at gekisouRank in
    *         every range (default 1, at most players) and justRate (default 1), members' Gekisou skills included
-   *         (gekisouLevels: level factors, see gekisouSkillRate); the song is drawn at random (public rooms: decks by the
-   *         mean over the songs, see randomSongSearch) unless pickSong (a private room choosing its song),
+   *         (gekisouLevels: level factors, see gekisouSkillRate; comboBoost: {byScore, byMusic} -> Simulate.comboBoosts
+   *         entries, the COMBO count-up shares, see comboCountBoost); the song is drawn at random (public rooms: decks by
+   *         the mean over the songs, musicIds narrowing them, see randomSongSearch and randomScoreSearch) unless pickSong
+   *         (a private room choosing its song),
    *         perMinute: {overhead} to choose the chart and rank paying the most per minute (song length + overhead
    *         seconds) instead of per live; a deck's `score` is then per minute and `minutes` is one live's duration}
    */
@@ -1129,19 +1194,31 @@
         ? c.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
         : c.thresholds;
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
-    // A public room draws its song at random: no song to choose, per minute or otherwise. The score objective plays
-    // the chosen songs.
-    const randomSong = !!(multi && !multi.pickSong && !scoreMode);
+    // A public room draws its song at random: no song to choose, per minute or otherwise. Decks are ranked by the mean
+    // over the songs (randomSongSearch; the score objective: randomScoreSearch), musicIds narrowing them (the songs of
+    // one Gekisou range type, for a deck saved for them).
+    const randomSong = !!(multi && !multi.pickSong);
     const perMinute = input.perMinute && !randomSong && !scoreMode ? { overhead: Math.max(0, input.perMinute.overhead || 0) } : null;
     const minutesOf = (c) => ((c.lengthSec || 0) + (perMinute ? perMinute.overhead : 0)) / 60;
     // Snap skill rates (score objective; Simulate.snapSkillRates): {byScore: scoreId -> Map(snapSkillKey -> score per
     // unit of power)}. Only the measured charts are played.
     const snapSkill = scoreMode && input.snapSkill ? input.snapSkill : null;
-    const chartList = snapSkill ? playable.filter((c) => snapSkill.byScore.has(c.scoreId)) : playable;
+    // Snaps' Gekisou support skills (a live with Gekisou): music-data's measured gain of each pairing on each chart
+    // (gekisouSupportTerms). Points have no measured snap skill rates: their snap skills are roughSnapRate's estimate
+    // (`roughSnaps`, off with input.roughSnapSkills false). With any of them, a snap adds score depending on its member
+    // and the chart (`pairX`; `pairPts` in points).
+    const gkSup = !!(bt && battle.supportShapes && battle.supportShapes.size);
+    const roughSnaps = !scoreMode && !!sw && input.roughSnapSkills !== false;
+    const pairPts = !scoreMode && (gkSup || roughSnaps);
+    const pairX = !!snapSkill || gkSup || roughSnaps;
+    // The score objective plays one chart per group with pair rates; without measured snap skill rates, the charts
+    // scoreScope would measure (a random song: one chart per song).
+    const scope = scoreMode && gkSup && !snapSkill ? new Set(scoreScope(input, randomSong ? 0 : undefined).scoreIds) : null;
+    const chartList = snapSkill ? playable.filter((c) => snapSkill.byScore.has(c.scoreId)) : scope ? playable.filter((c) => scope.has(c.scoreId)) : playable;
     if (chartList.length === 0) return { error: "no-charts", results: [] };
 
-    // Charts grouped by the song features that change deck power; with snap skill rates, which depend on the chart,
-    // one chart per group.
+    // Charts grouped by the song features that change deck power; with pair rates in the score objective, which
+    // depend on the chart, one chart per group.
     const groups = new Map();
     for (const c of chartList) {
       const mv = musicView(m, c.musicId);
@@ -1149,37 +1226,156 @@
         const row = m.t.MasterChallengeMusic.find((r) => r._eventId === event._id && r._liveMusicId === c.musicId);
         if (row && row._musicType) mv.musicType = row._musicType;
       }
-      const key = mv.musicType + "|" + mv.tags.join(",") + (snapSkill ? "|" + c.scoreId : "");
+      const key = mv.musicType + "|" + mv.tags.join(",") + (scoreMode && pairX ? "|" + c.scoreId : "");
       if (!groups.has(key)) groups.set(key, { music: mv, charts: [] });
       groups.get(key).charts.push(c);
     }
 
-    // Live skill (and Gekisou skill) score per unit of power of a member on a chart, and with snap skill rates the
-    // snaps' rates paired with it (per snap, aligned with `snaps`).
+    // Live skill (and Gekisou skill) score per unit of power of a member on a chart, and with pair rates the snaps'
+    // rates paired with it (per snap, aligned with `snaps`): snap skills and Gekisou support skills.
     const skillRateOf = (v, c) => liveRateOf(v, c.scoreId);
+    const chartIdx = new Map(chartList.map((c, i) => [c, i]));
+    // Gekisou interactions the pairs miss (gekisouSupportTerms measured each support skill beside a member whose own
+    // Gekisou skill does nothing): a member's LUCK gauge skill brings more rushes, which every LUCKY RUSH 分數UP of the
+    // deck acts in (luckGaugeBoost), and a member's COMBO count-up skill makes every COMBO-stacking support skill of the
+    // deck stack sooner (comboBoost). A deck's boost profile `g` (boostOf; null without any) gives, per chart of
+    // chartList, the share each kind of support gain grows by: `rush`, and `combo` by member match. Bounds and card
+    // pruning use the largest, `gMax` (the strongest gauge owned and each chart's saturation).
+    const comboData = gkSup && input.comboBoost ? input.comboBoost : null;
+    const comboOf = (c) => (comboData ? comboData.byScore.get(c.scoreId) || (comboData.byMusic && comboData.byMusic.get(c.musicId)) || null : null);
+    const comboCharts = chartList.map(comboOf);
+    const boosts = new Map(); // profile key -> profile
+    const boostOf = (vs) => {
+      if (!gkSup) return null;
+      let gauge = 0;
+      const keys = [];
+      for (const v of vs) {
+        if (v.luckGauge > gauge) gauge = v.luckGauge;
+        if (comboData && v.comboCount) keys.push(v.comboCount);
+      }
+      if (!gauge && !keys.length) return null;
+      keys.sort();
+      const key = gauge + "|" + keys.join(",");
+      if (!boosts.has(key)) {
+        boosts.set(key, {
+          key,
+          rush: Float64Array.from(chartList, (c) => luckGaugeBoost(battle, gauge, c.scoreId)),
+          combo: [0, 1].map((match) => Float64Array.from(comboCharts, (cb) => (cb ? comboCountBoost(cb, keys, match) : 0))),
+        });
+      }
+      return boosts.get(key);
+    };
+    const gMax = gkSup
+      ? {
+          key: "max",
+          rush: Float64Array.from(chartList, (c) => luckGaugeBoost(battle, Math.max(0, ...members.map((v) => v.luckGauge)), c.scoreId)),
+          combo: [0, 1].map((match) => Float64Array.from(comboCharts, (cb) => (cb && members.some((v) => v.comboCount) ? cb.s[match] : 0))),
+        }
+      : null;
+    // A card's COMBO count-up is at least another's on every chart and member match.
+    const comboAsGood = (b, a) => {
+      if (!comboData || !a.comboCount || a.comboCount === b.comboCount) return true;
+      if (!b.comboCount) return false;
+      return comboCharts.every((cb) => !cb || [0, 1].every((k) => comboCountBoost(cb, [b.comboCount], k) >= comboCountBoost(cb, [a.comboCount], k)));
+    };
+    // Gekisou support gain of snap j beside member v on each chart of chartList (Float64Array), or null, in a deck of
+    // boost profile g. Members that meet the same member conditions share it.
+    const supKeys = new Map(); // member view -> cache key per snap
+    const supCache = new Map(); // key -> {all, rush, combo: [by match] (the parts a profile raises, or null), by: profile key -> gains} or null
+    const supOf = (v, j, g = null) => {
+      if (!supKeys.has(v)) {
+        const match = (id) => (gekisouSupportMatch(m, v, id, m.gekisouSupportSkillMaxLevel.get(id) || 1) ? 1 : 0);
+        supKeys.set(v, snaps.map((s, k) => (v.gekisouSkillId && s.gekisouSupportSkills.length ? k + "|" + s.gekisouSupportSkills.map(([id]) => match(id)).join("") : null)));
+      }
+      const key = supKeys.get(v)[j];
+      if (!key) return null;
+      if (!supCache.has(key)) {
+        const nC = chartList.length;
+        const all = new Float64Array(nC);
+        const parts = { rush: new Float64Array(nC), combo0: new Float64Array(nC), combo1: new Float64Array(nC) };
+        chartList.forEach((c, i) => {
+          for (const [, x, kind, match] of gekisouSupportTerms(m, battle, bt, v, snaps[j], c.scoreId, input.gekisouSupportLevels)) {
+            all[i] += x;
+            if (kind === "rush") parts.rush[i] += x;
+            if (kind === "combo") parts[match ? "combo1" : "combo0"][i] += x;
+          }
+        });
+        const some = (a) => (a.some((x) => x !== 0) ? a : null);
+        supCache.set(key, all.some((x) => x !== 0) ? { all, rush: some(parts.rush), combo: [some(parts.combo0), some(parts.combo1)], by: new Map() } : null);
+      }
+      const e = supCache.get(key);
+      if (!e || !g || !(e.rush || e.combo[0] || e.combo[1])) return e ? e.all : null;
+      if (!e.by.has(g.key)) {
+        e.by.set(g.key, e.all.map((x, i) =>
+          x + (e.rush ? g.rush[i] * e.rush[i] : 0) + (e.combo[0] ? g.combo[0][i] * e.combo[0][i] : 0) + (e.combo[1] ? g.combo[1][i] * e.combo[1][i] : 0)));
+      }
+      return e.by.get(g.key);
+    };
+    // Rough snap skill gain (roughSnapRate) of snap j beside member v on each chart of chartList, or null; members of
+    // one live skill and level that get the same extension share it.
+    const roughKeys = new Map(); // member view -> cache key per snap
+    const roughCache = new Map();
+    const roughOf = (v, j) => {
+      if (!roughSnaps) return null;
+      if (!roughKeys.has(v)) roughKeys.set(v, snaps.map((s) => {
+        const ext = v.liveSkillId ? snapExtension(m, v, s) : 0;
+        return ext ? v.liveSkillId + ":" + v.liveSkillLevel + "|" + ext : null;
+      }));
+      const key = roughKeys.get(v)[j];
+      if (!key) return null;
+      if (!roughCache.has(key)) {
+        const a = Float64Array.from(chartList, (c) => roughSnapRate(m, [v], [snaps[j]], c.scoreId, sw));
+        roughCache.set(key, a.some((x) => x !== 0) ? a : null);
+      }
+      return roughCache.get(key);
+    };
+    // Points: a pairing's whole gain (Gekisou support skills and rough snap skills) in a deck of boost profile g, or null.
+    const pairCache = new Map(); // member view -> profile key -> per snap
+    const pairOf = (v, j, g = null) => {
+      if (!pairCache.has(v)) pairCache.set(v, new Map());
+      const byG = pairCache.get(v);
+      const gk = g ? g.key : "";
+      if (!byG.has(gk)) byG.set(gk, new Array(snaps.length));
+      const row = byG.get(gk);
+      if (row[j] === undefined) {
+        const a = gkSup ? supOf(v, j, g) : null;
+        const b = roughOf(v, j);
+        row[j] = a && b ? a.map((x, i) => x + b[i]) : a || b;
+      }
+      return row[j];
+    };
     const snapKeys = new Map(); // member view -> snapSkillKey per snap
-    const snapRatesOf = (v, c) => {
-      if (!snapKeys.has(v)) snapKeys.set(v, snaps.map((s) => snapSkillKey(m, v, s)));
-      const rates = snapSkill.byScore.get(c.scoreId);
-      return Float64Array.from(snapKeys.get(v), (k) => (k && rates.get(k)) || 0);
+    const snapRatesOf = (v, c, g = null) => {
+      const i = chartIdx.get(c);
+      if (snapSkill && !snapKeys.has(v)) snapKeys.set(v, snaps.map((s) => snapSkillKey(m, v, s)));
+      const keys = snapSkill ? snapKeys.get(v) : null;
+      const rates = snapSkill ? snapSkill.byScore.get(c.scoreId) : null;
+      return Float64Array.from(snaps, (_, j) => {
+        const x = keys && keys[j] ? rates.get(keys[j]) || 0 : 0;
+        const sup = pairPts ? pairOf(v, j, g) : gkSup ? supOf(v, j, g) : null;
+        return sup ? x + sup[i] : x;
+      });
     };
 
     // Candidate member cards: per character, drop a card another card beats in every respect that feeds the deck: event
-    // bonuses, every stat, skills on every chart (live, Gekisou, and the snap skills paired with it), and the same card
+    // bonuses, every stat, skills on every chart (live, Gekisou, and the snap skills paired with it, with no boost
+    // profile and the largest: a gain is linear in it), the LUCK gauge and COMBO count-up it brings, and the same card
     // type, tags and skill categories (song bonus, snap type link, leader targets), song bonus rates and leader skill.
     // At most 4 are kept per character, the most promising first.
     const statBase = new Map(members.map((v) => [v, memberBase(m, v, ctx).map((b, i) => b + pctOf(b, v.bandItemPct[i]))]));
     const baseSum = new Map(members.map((v) => [v, statBase.get(v).reduce((a, b) => a + b, 0)]));
     const skillsOf = new Map(members.map((v) => [v, Float64Array.from(chartList, (c) => skillRateOf(v, c))]));
-    const snapsOf = snapSkill ? new Map(members.map((v) => [v, chartList.map((c) => snapRatesOf(v, c))])) : null;
+    const snapsOf = pairX ? new Map(members.map((v) => [v, chartList.map((c) => snapRatesOf(v, c, gMax))])) : null;
+    const snapsOf0 = pairX && gMax ? new Map(members.map((v) => [v, chartList.map((c) => snapRatesOf(v, c, null))])) : null;
     const sameList = (x, y) => x.length === y.length && x.every((e) => y.includes(e));
     const leaderAsGood = (b, a) =>
       !isUsefulLeader(a) || (a.leaderSkillId === b.leaderSkillId && b.leaderSkillLevel >= a.leaderSkillLevel);
     const skillAsGood = (b, a) => {
       const kb = skillsOf.get(b), ka = skillsOf.get(a);
       for (let i = 0; i < kb.length; i++) if (kb[i] < ka[i]) return false;
-      if (snapsOf) {
-        const xb = snapsOf.get(b), xa = snapsOf.get(a);
+      for (const of of [snapsOf, snapsOf0]) {
+        if (!of) continue;
+        const xb = of.get(b), xa = of.get(a);
         for (let i = 0; i < xb.length; i++) for (let j = 0; j < xb[i].length; j++) if (xb[i][j] < xa[i][j]) return false;
       }
       return true;
@@ -1188,11 +1384,13 @@
       if (b.cardType !== a.cardType || !sameList(b.tags, a.tags) || !sameList(b.liveSkillCategories, a.liveSkillCategories) ||
         !sameList(b.gekisouSkillCategories, a.gekisouSkillCategories) || b.gekisouMissionType !== a.gekisouMissionType) return false;
       if (b.musicTypeRate < a.musicTypeRate || b.musicTagRate < a.musicTagRate || !leaderAsGood(b, a) || !skillAsGood(b, a)) return false;
+      if (gMax && (b.luckGauge < a.luckGauge || !comboAsGood(b, a))) return false;
       const ea = ctx.memberBonus.get(a), eb = ctx.memberBonus.get(b);
       const sa = statBase.get(a), sb = statBase.get(b);
       if (eb.point < ea.point || eb.item < ea.item || sb.some((x, i) => x < sa[i])) return false;
       const gt = eb.point > ea.point || eb.item > ea.item || sb.some((x, i) => x > sa[i]) ||
-        b.musicTypeRate > a.musicTypeRate || b.musicTagRate > a.musicTagRate || b.leaderSkillLevel > a.leaderSkillLevel;
+        b.musicTypeRate > a.musicTypeRate || b.musicTagRate > a.musicTagRate || b.leaderSkillLevel > a.leaderSkillLevel ||
+        (!!gMax && (b.luckGauge > a.luckGauge || (!!comboData && !!b.comboCount && !a.comboCount)));
       return gt || !leaderAsGood(a, b) || !skillAsGood(a, b) || b.id < a.id;
     };
     const byChar = new Map();
@@ -1625,23 +1823,91 @@
       return best;
     }
     const upperBound = (s, bf, rt) => choose(rt, bf.f + s.g, s.pt + maxSnapPoint, s.it + maxSnapItem).sc;
-    // The exact best deck of a member set: leader from bestF, snaps from the slot-mask DP. `Xm` (or null): member view
-    // -> snap skill rates per snap on rt's chart.
-    function evaluate(s, bf, rt, music, Xm) {
+
+    // Points with pair gains (pairOf: Gekisou support skills, rough snap skills): a snap assignment's gains differ by chart,
+    // so each assignment the snap DP keeps plays a rank table of its own (pairTable). The DP ranks a pairing by its gain
+    // averaged over the charts (`supportMeans`): a random song keeps the assignments no other beats in that mean, power and bonuses (few
+    // sets are evaluated there); a chosen song, which evaluates many sets, adds the mean to the snap power at `w` power
+    // per unit of gain (`effectiveG`: a deck of power P on a chart of rate r scores P * (r + x), so P / r with the set's
+    // power bound and mean rate), which keeps the DP as small as without support skills. Either may drop an assignment
+    // that would have won on the chart that sets the rank, so this is approximate (in the cases checked, the top deck
+    // of a random song lost up to 0.7% of its payoff with effectiveG and none with the means). The score objective plays
+    // one chart per group and keeps (power, gain) pairs exactly. `px`: {list (charts), idx (their chartList indices),
+    // skill (the set's skill rates on them, or null), rate (their mean no-skill plus skill rate)}.
+    const pairsOn = (list, idx, skill) => {
+      let r = 0;
+      list.forEach((c, i) => (r += c.perPower + (skill ? skill[i] : 0)));
+      return { list, idx, skill, rate: r / list.length };
+    };
+    const supportMeans = (members, idx) => {
+      const g = boostOf(members);
+      return members.map((v) => {
+        const row = new Float64Array(snaps.length);
+        for (let j = 0; j < snaps.length; j++) {
+          const sup = pairOf(v, j, g);
+          if (!sup) continue;
+          let x = 0;
+          for (const ci of idx) x += sup[ci];
+          row[j] = x / idx.length;
+        }
+        return row;
+      });
+    };
+    const effectiveG = (members, G, idx, w) => supportMeans(members, idx).map((row, i) => row.map((x, j) => G[i][j] + w * x));
+    const pickPower = (G, pick) => {
+      let g = 0;
+      for (let p = pick; p; p = p.prev) g += G[p.i][p.j];
+      return g;
+    };
+    // The pair gains of the snaps `pick` (snapStates) gives `members` (slot by slot), on each chart of idx.
+    const pairSum = (members, pick, idx) => {
+      const out = new Float64Array(idx.length);
+      const g = boostOf(members);
+      for (let p = pick; p; p = p.prev) {
+        const sup = pairOf(members[p.i], p.j, g);
+        if (sup) for (let c = 0; c < idx.length; c++) out[c] += sup[idx[c]];
+      }
+      return out;
+    };
+    const pairTable = (px, members, pick) => {
+      const x = pairSum(members, pick, px.idx);
+      if (px.skill) for (let c = 0; c < x.length; c++) x[c] += px.skill[c];
+      return rankTable(px.list, x, false);
+    };
+    // The gain per unit of power of a deck's pairs on chart c from `of` (supOf: Gekisou support skills; roughOf).
+    const deckSupport = (members, snapObjs, c, of) => {
+      const ci = chartIdx.get(c);
+      const g = boostOf(members);
+      let x = 0;
+      members.forEach((v, i) => {
+        const sup = snapObjs[i] ? of(v, snaps.indexOf(snapObjs[i]), g) : null;
+        if (sup) x += sup[ci];
+      });
+      return x;
+    };
+
+    // The exact best deck of a member set: leader from bestF, snaps from the slot-mask DP. `Xm` (score objective, or
+    // null): the deck's boost profile -> member view -> pair rates per snap on rt's chart. `px` (points with Gekisou
+    // support, or null): see pairTable.
+    function evaluate(s, bf, rt, music, Xm, px) {
       evaluated++;
       const order = s.vs.slice();
       [order[bf.leader], order[LEADER_SLOT]] = [order[LEADER_SLOT], order[bf.leader]];
       const G = order.map((v) => Gm.get(v));
+      const xm = Xm ? Xm(boostOf(order)) : null;
+      const X = xm ? order.map((v) => xm.get(v)) : null;
+      const Gd = px ? effectiveG(order, G, px.idx, (bf.f + s.g) / px.rate) : G;
       let best = null;
-      for (const st of snapStates(G, snapPoint, snapItem, snaps.length, Xm ? order.map((v) => Xm.get(v)) : null)) {
-        const power = bf.f + st.power;
+      for (const st of snapStates(Gd, snapPoint, snapItem, snaps.length, X)) {
+        const power = bf.f + (px ? pickPower(G, st.pick) : st.power);
         const pb = s.pt + st.pt;
         const ib = s.it + st.it;
-        const v = choose(rt, power, pb, ib, st.x);
-        if (!best || v.sc > best.sc || (v.sc === best.sc && power > best.power)) best = { ...v, power, pb, ib, st };
+        const t = px ? pairTable(px, order, st.pick) : rt;
+        const v = choose(t, power, pb, ib, Xm ? st.x : 0);
+        if (!best || v.sc > best.sc || (v.sc === best.sc && power > best.power)) best = { ...v, power, pb, ib, st, t };
       }
       const snapObjs = pickToSnaps(best.st.pick).map((j) => (j === null ? null : snaps[j]));
-      return deckOf(order, snapObjs, best, rt, music);
+      return deckOf(order, snapObjs, best, best.t, music);
     }
     // The deck of members `order` (leader in LEADER_SLOT) and `snapObjs` playing `best` (a `choose` result with the
     // deck's power, pb and ib) on table rt.
@@ -1670,7 +1936,7 @@
         deck.rankChance = best.chance;
         deck.rankDist = best.dist.map(([r, p]) => ({ rank: r, rankName: RANK_NAMES[r] || String(r), p }));
       }
-      // Snap skills (score objective): their score per unit of power, with the play's share.
+      // Pair rates (score objective): their score per unit of power, with the play's share.
       const snapRate = (best.x || 0) * shares(best.chart).mean;
       // Next rank: on any chart of the table per live, on the same chart per minute.
       if (scoreMode) {
@@ -1699,7 +1965,14 @@
       deck.accuracy = accuracyFactor(m, best.chart.scoreId, accuracy);
       deck.estScore = Math.floor(best.power * deck.scoreRate);
       deck.baseScore = Math.floor(best.power * deck.chart.perPower * deck.accuracy);
-      if (best.x) deck.snapScore = Math.floor(best.power * snapRate);
+      // Snaps' Gekisou support skills apart from their (non-Gekisou) snap skills; in points they are in rt's rates.
+      const sup = gkSup ? deckSupport(order, snapObjs, best.chart, supOf) : 0;
+      if (best.x) deck.snapScore = Math.floor(best.power * Math.max(0, best.x - sup) * deck.accuracy);
+      if (roughSnaps) {
+        deck.snapScore = Math.floor(best.power * deckSupport(order, snapObjs, best.chart, roughOf) * deck.accuracy);
+        deck.snapRough = true;
+      }
+      if (gkSup) deck.gekisouSupportScore = Math.floor(best.power * sup * deck.accuracy);
       if (bt) {
         const g = order.reduce((a, v) => a + gekisouSkillRate(m, battle, bt, v, best.chart.scoreId, input.gekisouLevels), 0);
         deck.gekisouScore = Math.floor(best.power * g * deck.accuracy);
@@ -1710,8 +1983,9 @@
     // Live skill score per unit of power of each candidate on each chart of `list`; a set adds its five. The bound takes,
     // per chart, the five largest gains of any candidates.
     // With Gekisou, a member's Gekisou skill adds its own gain (whatever the performance order).
-    // With snap skill rates, a bound also adds each member's best snap pairing (`setBound`; `maxSkill` includes them)
-    // and `snapRates(c)` gives member view -> rates per snap on chart c.
+    // With pair rates (snap skills, Gekisou support skills), a bound also adds each member's best snap pairing at the
+    // largest boost profile (`setBound`; `maxSkill` includes them) and `snapRates(c, g)` gives member view -> rates per
+    // snap on chart c in a deck of boost profile g.
     function skillRates(list) {
       const skillOf = new Map();
       const boundOf = new Map();
@@ -1729,15 +2003,22 @@
           skillOf.set(v, a);
         }
       }
-      const snapByChart = snapSkill ? list.map((c) => new Map(allCand.map((v) => [v, snapRatesOf(v, c)]))) : null;
-      if (snapSkill) {
+      // Pair rates per chart of list (member view -> rates per snap) in a deck of boost profile g; bounds take gMax.
+      const ratesAt = new Map();
+      const snapRatesAt = (g) => {
+        const gk = g ? g.key : "";
+        if (!ratesAt.has(gk)) ratesAt.set(gk, list.map((c) => new Map(allCand.map((v) => [v, snapRatesOf(v, c, g)]))));
+        return ratesAt.get(gk);
+      };
+      const snapByChart = pairX ? snapRatesAt(gMax) : null;
+      if (pairX) {
         for (const v of allCand) {
           const a = Float64Array.from(skillOf.get(v) || new Float64Array(list.length));
           list.forEach((c, i) => (a[i] += Math.max(0, ...snapByChart[i].get(v))));
           boundOf.set(v, a);
         }
       }
-      const bounds = snapSkill ? boundOf : skillOf;
+      const bounds = pairX ? boundOf : skillOf;
       const anySkill = bounds.size > 0;
       const maxSkill = new Float64Array(list.length);
       if (anySkill) {
@@ -1755,12 +2036,249 @@
         }
         return a;
       };
-      const snapRates = snapSkill ? (c) => snapByChart[list.indexOf(c)] : null;
+      const snapRates = pairX ? (c, g = null) => snapRatesAt(g)[list.indexOf(c)] : null;
       return { anySkill, maxSkill, setSkill: sum(skillOf), setBound: sum(bounds), snapRates };
     }
 
     let evaluated = 0;
-    if (randomSong) return randomSongSearch();
+    if (randomSong) return scoreMode ? randomScoreSearch() : randomSongSearch();
+
+    // The score objective on a random song: decks by the mean expected score over the songs, each played on one chart
+    // (the one scoring most with the roster's five best skills, as scoreScope with margin 0). One leader and one snap
+    // assignment serve every song; the power varies by song group (music type and tag bonuses), skill and pair rates by
+    // chart. Sets are visited in the order of a cheap bound (the best skills of any five candidates on each chart), then
+    // bounded by their own skills and best pairings, and evaluated exactly: per leader kept (one another matches or
+    // beats in every song group is dropped) and per snap assignment the DP keeps in power and the pairs' mean rate.
+    // That mean weighs each chart by its play share and the leader's F there, so the DP can drop an assignment that the
+    // exact sum would have preferred by a rounding of the songs' bonuses.
+    function randomScoreSearch() {
+      const top5 = chartList.map((c, i) => {
+        const r = members.map((v) => skillsOf.get(v)[i]).sort((a, b) => b - a);
+        return r.slice(0, 5).reduce((a, b) => a + b, 0);
+      });
+      const pickBy = new Map();
+      chartList.forEach((c, i) => {
+        const r = (c.perPower + top5[i]) * shares(c).mean;
+        const cur = pickBy.get(c.musicId);
+        if (!cur || r > cur.r) pickBy.set(c.musicId, { c, r });
+      });
+      const list = [...pickBy.values()].map((x) => x.c);
+      const nS = list.length;
+      const w = list.map((c) => shares(c).mean);
+      const gKey = new Map();
+      const gl = [];
+      const gOf = new Int32Array(nS);
+      list.forEach((c, k) => {
+        const mv = musicView(m, c.musicId);
+        const key = mv.musicType + "|" + mv.tags.join(",");
+        if (!gKey.has(key)) {
+          gKey.set(key, gl.length);
+          gl.push({ music: mv, fNo: Int32Array.from(allCand, (v) => slotF(m, v, [0, 0, 0], mv, ctx)) });
+        }
+        gOf[k] = gKey.get(key);
+      });
+      const nG = gl.length;
+      const sk = skillRates(list);
+      const powB = (g, s) => {
+        const o = s * 5;
+        const f = gl[g].fNo;
+        return setSU[s] + f[setV[o]] + f[setV[o + 1]] + f[setV[o + 2]] + f[setV[o + 3]] + f[setV[o + 4]];
+      };
+      // Cheap bound: sum over groups of W_g * powB(g, s), W_g the group's charts' best rates (weighted by play share).
+      const Wg = new Float64Array(nG);
+      list.forEach((c, k) => (Wg[gOf[k]] += w[k] * (c.perPower + (sk.anySkill ? sk.maxSkill[k] : 0))));
+      const Wtot = Wg.reduce((a, b) => a + b, 0);
+      const h = Float64Array.from(allCand, (_, vi) => {
+        let x = 0;
+        for (let g = 0; g < nG; g++) x += Wg[g] * gl[g].fNo[vi];
+        return x;
+      });
+      const cheap = new Float64Array(nSets);
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let s = 0; s < nSets; s++) {
+        const o = s * 5;
+        const x = setSU[s] * Wtot + h[setV[o]] + h[setV[o + 1]] + h[setV[o + 2]] + h[setV[o + 3]] + h[setV[o + 4]];
+        cheap[s] = x;
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+      }
+      const bw = (hi - lo) / NB || 1;
+      const binOf = (x) => Math.min(NB - 1, Math.max(0, Math.floor((x - lo) / bw)));
+      const start = new Int32Array(NB + 1);
+      const bmax = new Float64Array(NB).fill(-Infinity);
+      for (let s = 0; s < nSets; s++) {
+        const b = binOf(cheap[s]);
+        start[b + 1]++;
+        if (cheap[s] > bmax[b]) bmax[b] = cheap[s];
+      }
+      for (let b = 0; b < NB; b++) start[b + 1] += start[b];
+      const fill = start.slice(0, NB);
+      const order = new Int32Array(nSets);
+      for (let s = 0; s < nSets; s++) order[fill[binOf(cheap[s])]++] = s;
+      const setVs = (s) => [0, 1, 2, 3, 4].map((i) => allCand[setV[s * 5 + i]]);
+      // A set's own bound: its skills and each member's best pairing (at the strongest gauge) at its power bound per group.
+      const ubOf = (s) => {
+        const b = sk.anySkill ? sk.setBound(setVs(s)) : null;
+        const pg = new Float64Array(nG);
+        for (let g = 0; g < nG; g++) pg[g] = powB(g, s);
+        let x = 0;
+        for (let k = 0; k < nS; k++) x += w[k] * pg[gOf[k]] * (list[k].perPower + (b ? b[k] : 0));
+        return x;
+      };
+      // Pair sums of a snap assignment on each chart (xr[k]: member view -> rates per snap).
+      const pairSums = (vs, pick, xr) => {
+        const xs = new Float64Array(nS);
+        if (!xr) return xs;
+        for (let p = pick; p; p = p.prev) {
+          const v = vs[p.i];
+          for (let k = 0; k < nS; k++) xs[k] += xr[k].get(v)[p.j];
+        }
+        return xs;
+      };
+      const ratesOf = (vs) => (sk.snapRates ? list.map((c) => sk.snapRates(c, boostOf(vs))) : null);
+
+      function exact(s) {
+        evaluated++;
+        const o = s * 5;
+        const vs = setVs(s);
+        const skill = sk.anySkill ? sk.setSkill(vs) : null;
+        const leads = [];
+        for (let L = 0; L < 5; L++) {
+          const li = setV[o + L];
+          const lorder = vs.slice();
+          [lorder[L], lorder[LEADER_SLOT]] = [lorder[LEADER_SLOT], lorder[L]];
+          let lt = 0;
+          if (simpleAt[li]) for (let i = 0; i < 5; i++) lt += LT[li * N + setV[o + i]];
+          const f = new Float64Array(nG);
+          gl.forEach((g, gi) => {
+            if (simpleAt[li]) {
+              f[gi] = lt;
+              for (let i = 0; i < 5; i++) f[gi] += g.fNo[setV[o + i]];
+            } else {
+              const lead = leaderBonuses(m, lorder, LEADER_SLOT, g.music);
+              lorder.forEach((v, i) => (f[gi] += slotF(m, v, lead[i], g.music, ctx)));
+            }
+          });
+          leads.push({ L, f });
+        }
+        const geq = (a, b) => a.f.every((x, g) => x >= b.f[g]);
+        const kept = leads.filter((a, i) => !leads.some((b, j) => j !== i && geq(b, a) && (j < i || !geq(a, b))));
+        const G = vs.map((v) => Gm.get(v));
+        const xr = ratesOf(vs);
+        let X = null;
+        if (xr) {
+          const f0 = kept[0].f;
+          X = vs.map((v) => {
+            const row = new Float64Array(snaps.length);
+            for (let k = 0; k < nS; k++) {
+              const r = xr[k].get(v);
+              const wk = w[k] * f0[gOf[k]];
+              for (let j = 0; j < row.length; j++) row[j] += wk * r[j];
+            }
+            return row;
+          });
+        }
+        let best = null;
+        for (const st of snapStates(G, snapPoint, snapItem, snaps.length, X)) {
+          const xs = pairSums(vs, st.pick, xr);
+          for (const ld of kept) {
+            let sum = 0;
+            for (let k = 0; k < nS; k++) sum += w[k] * (ld.f[gOf[k]] + st.power) * (list[k].perPower + (skill ? skill[k] : 0) + xs[k]);
+            if (!best || sum > best.sum || (sum === best.sum && st.power > best.g)) best = { sum, st, g: st.power, ld, xs };
+          }
+        }
+        return { s, vs, best };
+      }
+
+      const found = [];
+      const slack = (x) => x - Math.abs(x) * 1e-9;
+      const threshold = () => (found.length >= topK ? slack(found[topK - 1].best.sum) : -Infinity);
+      const heap = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.e < y.e));
+      let b = NB - 1;
+      for (;;) {
+        while (b >= 0) {
+          if (start[b] === start[b + 1]) {
+            b--;
+            continue;
+          }
+          if (bmax[b] < threshold() || (heap.size && bmax[b] < heap.top().key)) break;
+          const th = threshold();
+          for (let i = start[b]; i < start[b + 1]; i++) {
+            const s = order[i];
+            const key = ubOf(s);
+            if (key >= th) heap.push({ key, s, e: setEnum[s] });
+          }
+          b--;
+        }
+        if (!heap.size) break;
+        const x = heap.pop();
+        if (x.key < threshold()) break;
+        const r = exact(x.s);
+        r.e = x.e;
+        found.push(r);
+        found.sort((p, q) => q.best.sum - p.best.sum || p.e - q.e);
+        if (found.length > topK) found.length = topK;
+      }
+
+      // A found set as a deck: the mean expected score over the songs and the power the multiplayer formation screen
+      // shows (no song, so no music bonus); `perSong` holds the deck on each song.
+      const build = (r) => {
+        const { best, vs } = r;
+        const lorder = vs.slice();
+        const snapObjs = pickToSnaps(best.st.pick).map((j) => (j === null ? null : snaps[j]));
+        const L = best.ld.L;
+        [lorder[L], lorder[LEADER_SLOT]] = [lorder[LEADER_SLOT], lorder[L]];
+        [snapObjs[L], snapObjs[LEADER_SLOT]] = [snapObjs[LEADER_SLOT], snapObjs[L]];
+        const skill = sk.anySkill ? sk.setSkill(vs) : null;
+        const perSong = list.map((c, k) => {
+          const power = best.ld.f[gOf[k]] + best.g;
+          const rt = rankTable([c], skill ? [skill[k]] : null, false);
+          const v = choose(rt, power, 0, 0, best.xs[k]);
+          return deckOf(lorder, snapObjs, { ...v, power, pb: 0, ib: 0 }, rt, gl[gOf[k]].music);
+        });
+        const power = deckPower(m, lorder, snapObjs, null, ctx);
+        const mean = (f) => perSong.reduce((a, d) => a + (f(d) || 0), 0) / nS;
+        const deck = {
+          members: lorder,
+          snaps: snapObjs,
+          power,
+          displayPower: Math.floor(power),
+          random: true,
+          songCount: nS,
+          rank: null,
+          rankName: "—",
+          chart: null,
+          pointBonus: 0,
+          itemBonus: 0,
+          points: 0,
+          items: 0,
+          cp: 0,
+          cpPoints: 0,
+          score: best.sum / nS,
+          estScore: Math.round(mean((d) => d.estScore)),
+          baseScore: Math.round(mean((d) => d.baseScore)),
+          snapScore: Math.round(mean((d) => d.snapScore)),
+          accuracy: mean((d) => d.accuracy),
+        };
+        if (bt) deck.gekisouScore = Math.round(mean((d) => d.gekisouScore));
+        if (gkSup) deck.gekisouSupportScore = Math.round(mean((d) => d.gekisouSupportScore));
+        perSong.sort((a, b2) => b2.score - a.score || b2.power - a.power);
+        return { deck, perSong };
+      };
+      const built = found.map(build);
+      return {
+        results: built.map((x) => x.deck),
+        songs: input.compareSongs && built.length ? built[0].perSong : [],
+        perSong: built.map((x) => x.perSong),
+        random: true,
+        rate,
+        gekisou: bt ? { rank: bt.rank, justRate: bt.justRate } : null,
+        payoff: pay,
+        ctx,
+        stats: { sets: nSets, evaluated, groups: nG, songs: nS, ms: Date.now() - t0 },
+      };
+    }
 
     // A public room plays a song drawn at random (直接開始, or a draw among the players' picks): the deck is set
     // before the song is known, so decks are ranked by the mean payoff over the songs, each played on its best allowed
@@ -1781,6 +2299,7 @@
       });
       const nSongs = songList.length;
       const sk = skillRates(chartList);
+      const allIdx = Int32Array.from(chartList, (_, i) => i);
       const pick = (a, so) => (a ? Float64Array.from(so.idx, (i) => a[i]) : null);
       const tablesOf = (skill, optimistic) => songList.map((so) => rankTable(so.list, pick(skill, so), optimistic));
       const boundT = tablesOf(sk.anySkill ? sk.maxSkill : null, stochastic);
@@ -1854,9 +2373,12 @@
         const pt = bPt[bk];
         const it = bIt[bk];
         const skill = sk.anySkill ? sk.setSkill(vs) : null;
-        const bndT = skill ? tablesOf(skill, stochastic) : boundT;
-        const meanT = !stochastic ? bndT : skill ? tablesOf(skill, false) : meanNoSkill || (meanNoSkill = tablesOf(null, false));
-        if (skill && th > -Infinity) {
+        // With Gekisou support skills, the bound adds each member's best pairing and every snap assignment plays tables
+        // of its own (as pairTable).
+        const bound = pairPts ? sk.setBound(vs) : skill;
+        const bndT = bound ? tablesOf(bound, stochastic) : boundT;
+        const meanT = pairPts ? null : !stochastic ? bndT : skill ? tablesOf(skill, false) : meanNoSkill || (meanNoSkill = tablesOf(null, false));
+        if (bound && th > -Infinity) {
           const vals = values(pt + maxSnapPoint, it + maxSnapItem);
           const pb = gl.map((_, g) => powBound(g, s));
           let ub = 0;
@@ -1887,20 +2409,27 @@
         const kept = leads.filter((a, i) => !leads.some((b, j) => j !== i && geq(b, a) && (j < i || !geq(a, b))));
         const G = vs.map((v) => Gm.get(v));
         let best = null;
-        for (const st of snapStates(G, snapPoint, snapItem, snaps.length)) {
+        for (const st of snapStates(G, snapPoint, snapItem, snaps.length, pairPts ? supportMeans(vs, allIdx) : null)) {
           const pb = pt + st.pt;
           const ib = it + st.it;
           const vals = stochastic ? null : values(pb, ib);
+          const g = st.power;
+          let T = meanT;
+          if (pairPts) {
+            const x = pairSum(vs, st.pick, allIdx);
+            if (skill) for (let c = 0; c < x.length; c++) x[c] += skill[c];
+            T = tablesOf(x, false);
+          }
           for (const ld of kept) {
             let sum = 0;
             for (let k = 0; k < nSongs; k++) {
-              const p = ld.f[songList[k].g] + st.power;
-              sum += vals ? vals[meanT[k].rankFor(p)] : choose(meanT[k], p, pb, ib).sc;
+              const p = ld.f[songList[k].g] + g;
+              sum += vals ? vals[T[k].rankFor(p)] : choose(T[k], p, pb, ib).sc;
             }
-            if (!best || sum > best.sum || (sum === best.sum && st.power > best.st.power)) best = { sum, st, ld, pb, ib };
+            if (!best || sum > best.sum || (sum === best.sum && g > best.g)) best = { sum, st, g, ld, pb, ib, T };
           }
         }
-        return { s, vs, best, meanT };
+        return { s, vs, best, meanT: best.T };
       }
 
       const found = [];
@@ -1950,7 +2479,7 @@
         let items = 0;
         let cp = 0;
         const perSong = songList.map((so, k) => {
-          const power = best.ld.f[so.g] + best.st.power;
+          const power = best.ld.f[so.g] + best.g;
           const v = choose(meanT[k], power, best.pb, best.ib);
           if (v.dist) for (const [rk, p] of v.dist) dist.set(rk, (dist.get(rk) || 0) + p / nSongs);
           else dist.set(v.rank, (dist.get(v.rank) || 0) + 1 / nSongs);
@@ -1994,6 +2523,11 @@
           baseScore: Math.round(mean((d) => d.baseScore)),
         };
         if (bt) deck.gekisouScore = Math.round(mean((d) => d.gekisouScore));
+        if (gkSup) deck.gekisouSupportScore = Math.round(mean((d) => d.gekisouSupportScore));
+        if (roughSnaps) {
+          deck.snapScore = Math.round(mean((d) => d.snapScore || 0));
+          deck.snapRough = true;
+        }
         perSong.sort((a, b) => b.score - a.score || b.power - a.power);
         return { deck, perSong };
       };
@@ -2001,6 +2535,7 @@
       return {
         results: built.map((x) => x.deck),
         songs: input.compareSongs && built.length ? built[0].perSong : [],
+        perSong: built.map((x) => x.perSong),
         random: true,
         rate,
         gekisou: bt ? { rank: bt.rank, justRate: bt.justRate } : null,
@@ -2016,11 +2551,18 @@
       const music = group.music;
       const gc = group.charts;
       const { anySkill, maxSkill, setSkill, setBound, snapRates } = skillRates(gc);
-      // With snap skill rates the group has one chart.
-      const Xm = snapRates ? snapRates(gc[0]) : null;
+      // The score objective with pair rates plays one chart per group: a pairing's rate is one number. Points with
+      // Gekisou support skills bound a set by each member's best pairing and give each snap assignment a table of its own
+      // (`px`, see pairTable).
+      const Xm = snapRates && scoreMode ? (g) => snapRates(gc[0], g) : null;
+      const pairPoints = pairPts;
       const rt = rankTable(gc, anySkill ? maxSkill : null, stochastic);
-      const tables = (skill) =>
-        stochastic ? { bound: rankTable(gc, skill, true), mean: rankTable(gc, skill, false) } : { bound: rankTable(gc, skill), mean: null };
+      const gcIdx = Int32Array.from(gc, (c) => chartIdx.get(c));
+      const tables = (vs) => {
+        const skill = anySkill ? setSkill(vs) : null;
+        if (pairPoints) return { bound: rankTable(gc, setBound(vs), stochastic), mean: null, px: pairsOn(gc, gcIdx, skill) };
+        return stochastic ? { bound: rankTable(gc, skill, true), mean: rankTable(gc, skill, false) } : { bound: rankTable(gc, skill), mean: null };
+      };
       const fNo = Int32Array.from(allCand, (v) => slotF(m, v, [0, 0, 0], music, ctx));
 
       // Exact best leader F of set s (cached in bfF/bfL): simple leaders from LT, others exactly.
@@ -2096,9 +2638,9 @@
       walk(rt, bMax, powBound, ubOf, () => (groupFound.length >= topK ? kth : -Infinity), (s) => {
         const so = setOf(s);
         const bf = bestF(s);
-        const t = anySkill || stochastic ? tables(anySkill ? setSkill(so.vs) : null) : { bound: rt, mean: null };
+        const t = anySkill || stochastic ? tables(so.vs) : { bound: rt, mean: null };
         if (!scoreMode && anySkill && groupFound.length >= topK && upperBound(so, bf, t.bound) < kth) return;
-        groupFound.push(evaluate(so, bf, t.mean || t.bound, music, Xm));
+        groupFound.push(evaluate(so, bf, t.mean || t.bound, music, Xm, t.px));
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
         if (groupFound.length > topK) groupFound.length = topK;
         if (groupFound.length >= topK) kth = groupFound[topK - 1].score;
@@ -2119,6 +2661,7 @@
           const srt = rankTable(list, anySkill ? pick(maxSkill) : null, stochastic);
           const songTables = (vs) => {
             const sk = anySkill ? pick(setSkill(vs)) : null;
+            if (pairPoints) return { bound: rankTable(list, pick(setBound(vs)), stochastic), mean: null, px: pairsOn(list, Int32Array.from(idx, (i) => gcIdx[i]), sk) };
             if (stochastic) return { bound: rankTable(list, sk, true), mean: rankTable(list, sk, false) };
             const b = anySkill ? rankTable(list, sk) : srt;
             return { bound: b, mean: b };
@@ -2129,7 +2672,7 @@
             const bf = bestF(s);
             const ti = songTables(so.vs);
             if (!scoreMode && best && (anySkill || stochastic) && upperBound(so, bf, ti.bound) < best.score) return;
-            const d = evaluate(so, bf, ti.mean, music, Xm);
+            const d = evaluate(so, bf, ti.mean || ti.bound, music, Xm, ti.px);
             if (!best || d.score > best.score || (d.score === best.score && d.power > best.power)) best = d;
           });
           songs.push(best);
@@ -2221,30 +2764,35 @@
    * Gekisou-on chart data from music-data.json, as nnnotes measured it (theoretical best play: Just inside Just-count
    * ranges, Perfect elsewhere; rank 1 in every range; luck ranges on the first published seeds):
    * {power, kinds, shapes: "gekisouSkillId:level" -> aptitude shape of member Gekisou skills (measured at level 5),
+   *  supportShapes: "gekisouSupportSkillId:level" -> aptitude shape of snaps' Gekisou support skills (level 5),
    *  byScore: scoreId -> {seeds: [{seed, score, scorePerfect, ranges: [[rangeScore, rangeScorePerfect, rankBonus]],
-   *  weights, rangeWeights}], percents: rank bonus % per range at ranks 1..5,
-   *  apt: shape -> {tail, tailPerfect, ranges: [[rangeScore, rangeScorePerfect]]} (seed means of the increments)}}.
+   *  weights, rangeWeights}], percents: rank bonus % per range at ranks 1..5, missions (the song's range missions: 1 COMBO,
+   *  2 LUCK, 3 JUST), luck (whether a range is a LUCK one, whose lottery draws from the live's seed), apt: shape -> {tail, tailPerfect, ranges: [[rangeScore, rangeScorePerfect]]}
+   *  (seed means of the increments), aptSupport: "shape:match" -> the same for a support shape, paired with a member
+   *  that is (1) or is not (0) a target of its member condition (5000), justRanges: per range [Just notes, notes] of the
+   *  Just play (0 Just notes outside the Just-count ranges)}}.
    * Plain data (structured-cloneable).
    */
   function battleFromMusicData(md) {
     const dk = md && md.deck;
-    const out = { power: (dk && dk.model && dk.model.power) || 0, kinds: (dk && dk.kinds) || [], shapes: new Map(), byScore: new Map() };
+    const out = {
+      power: (dk && dk.model && dk.model.power) || 0, kinds: (dk && dk.kinds) || [], shapes: new Map(), supportShapes: new Map(), byScore: new Map(),
+    };
     if (!out.power) return out;
     for (const sh of (dk.gekisouAptitude && dk.gekisouAptitude.shapes) || []) {
-      if (sh.source === "member") for (const s of sh.skills) out.shapes.set(s.id + ":" + s.level, sh.id);
+      const to = sh.source === "member" ? out.shapes : sh.source === "support" ? out.supportShapes : null;
+      if (to) for (const s of sh.skills) to.set(s.id + ":" + s.level, sh.id);
     }
+    const inc = (v) => ({ tail: v.tail[0], tailPerfect: v.tailPerfect[0], ranges: v.ranges.map((r) => [r.rangeScore[0], r.rangeScorePerfect[0]]) });
     for (const s of md.songs || []) {
       for (const c of s.charts || []) {
         const d = c.deck;
         if (!d || d.unplayable || !d.seeds || !d.seeds.length || !d.ranges || d.ranges.length !== 3) continue;
         const apt = new Map();
+        const aptSupport = new Map();
         for (const v of (d.gekisouAptitude && d.gekisouAptitude.variants) || []) {
-          if (v.bandMatch !== null && v.bandMatch !== undefined) continue; // support shapes: the simulation plays them
-          apt.set(v.shape, {
-            tail: v.tail[0],
-            tailPerfect: v.tailPerfect[0],
-            ranges: v.ranges.map((r) => [r.rangeScore[0], r.rangeScorePerfect[0]]),
-          });
+          if (v.bandMatch === null || v.bandMatch === undefined) apt.set(v.shape, inc(v));
+          else aptSupport.set(v.shape + ":" + (v.bandMatch ? 1 : 0), inc(v));
         }
         out.byScore.set(c.scoreId, {
           seeds: d.seeds.map((x) => ({
@@ -2256,7 +2804,11 @@
             rangeWeights: x.rangeWeights,
           })),
           percents: d.ranges.map((r) => r.rankBonusPercents),
+          missions: (s.gekisouMissions || []).slice(),
+          luck: (s.gekisouMissions || []).includes(2),
           apt,
+          aptSupport,
+          justRanges: d.seeds[0].ranges.map((r) => [r.justCount || 0, r.maxCombo || 0]),
         });
       }
     }
@@ -2268,7 +2820,12 @@
    * the Just-count ranges' Just notes judged Just, the rest Perfect), and the live skill weights at that rank
    * (music-data `ranks`: the rank bonus changes by (p(r) - p(1)) / 100 of each range's score). The Just rate
    * interpolates linearly between the Perfect and the Just play, which is approximate; skill weights were measured on
-   * the Just play only. `gain(scoreId, shape)` is a member Gekisou skill's measured increment per unit of power.
+   * the Just play, so each range's part of them (rangeWeights) is scaled by the range's score at the Just rate over the
+   * Just play's. `apt` (scoreId -> shape -> {tail, ranges}) holds the member Gekisou skills' measured increments
+   * per unit of power, `aptSupport` (scoreId -> "shape:match" -> increment) the snaps' Gekisou support skills'.
+   * For the support skills that add up per Just (gekisouSupportJustStack), `aptSupportJust` (scoreId -> "shape:match" ->
+   * {tail, ranges}) keeps the Just play's increments at the rank and `justRanges` (scoreId -> [[Just notes, notes, range
+   * score at the Just rate over the Just play's]]) what scales them.
    */
   function battleRates(battle, rank, justRate) {
     const r = Math.min(5, Math.max(1, Math.round(rank || 1)));
@@ -2278,10 +2835,23 @@
     const perPower = new Map();
     const weights = new Map();
     const apt = new Map();
+    const aptSupport = new Map();
+    const aptSupportJust = new Map();
+    const justRanges = new Map();
     for (const [sid, b] of battle.byScore) {
       const p = b.percents.map((row) => [row[0], row[r - 1]]);
       let base = 0;
       const w = new Float64Array(nk);
+      // Each range's score at Just rate j over the Just play's (seed means): a Just note scores more than a Perfect one.
+      const rs = [0, 0, 0];
+      const rsP = [0, 0, 0];
+      for (const s of b.seeds) {
+        s.ranges.forEach(([x, xP], i) => {
+          rs[i] += x;
+          rsP[i] += xP;
+        });
+      }
+      const js = rs.map((x, i) => (x > 0 ? (rsP[i] + j * (x - rsP[i])) / x : 1));
       for (const s of b.seeds) {
         let sc = s.score;
         let sp = s.scorePerfect;
@@ -2295,23 +2865,32 @@
           const rw = s.rangeWeights && s.rangeWeights[q];
           for (let k = 0; k < 5; k++) {
             w[q] += row[k] || 0;
-            if (rw && rw[k]) for (let i = 0; i < 3; i++) w[q] += ((p[i][1] - p[i][0]) / 100) * (rw[k][i] || 0);
+            if (rw && rw[k]) for (let i = 0; i < 3; i++) w[q] += ((p[i][1] - p[i][0]) / 100 - (1 + p[i][1] / 100) * (1 - js[i])) * (rw[k][i] || 0);
           }
         });
       }
       perPower.set(sid, base / b.seeds.length / P);
       for (let q = 0; q < nk; q++) w[q] /= 5 * b.seeds.length;
       weights.set(sid, w);
+      const at = (a) => ({
+        tail: (a.tailPerfect + j * (a.tail - a.tailPerfect)) / P,
+        ranges: a.ranges.map(([rs, rsP], i) => ((rsP + j * (rs - rsP)) * (1 + p[i][1] / 100)) / P),
+      });
       const g = new Map();
-      for (const [shape, a] of b.apt) {
-        g.set(shape, {
-          tail: (a.tailPerfect + j * (a.tail - a.tailPerfect)) / P,
-          ranges: a.ranges.map(([rs, rsP], i) => ((rsP + j * (rs - rsP)) * (1 + p[i][1] / 100)) / P),
-        });
-      }
+      for (const [shape, a] of b.apt) g.set(shape, at(a));
       apt.set(sid, g);
+      const gs = new Map();
+      const gj = new Map();
+      for (const [key, a] of b.aptSupport || []) {
+        const x = at(a);
+        gs.set(key, x.tail + x.ranges.reduce((s, y) => s + y, 0));
+        gj.set(key, { tail: a.tail / P, ranges: a.ranges.map(([y], i) => (y * (1 + p[i][1] / 100)) / P) });
+      }
+      aptSupport.set(sid, gs);
+      aptSupportJust.set(sid, gj);
+      if (b.justRanges) justRanges.set(sid, b.justRanges.map(([J, n], i) => [J, n, js[i]]));
     }
-    return { rank: r, justRate: j, perPower, weights, apt };
+    return { rank: r, justRate: j, perPower, weights, apt, aptSupport, aptSupportJust, justRanges, memo: new Map() };
   }
 
   /**
@@ -2330,12 +2909,319 @@
     return factor * (g.tail + g.ranges.reduce((a, x) => a + x, 0));
   }
 
+  /**
+   * Whether member `v` is a target of the member condition (5000) of Gekisou support skill `id` at `level`: the first
+   * one among its effect rows, as music-data's support shapes were measured (bandMatch). false without one.
+   */
+  function gekisouSupportMatch(m, v, id, level) {
+    for (const e of m.gekisouSupportSkillEffects.get(id + ":" + level) || []) {
+      for (const g of [e._skillTriggerConditionGroup, e._skillConditionGroup, e._skillReleaseConditionGroup]) {
+        for (const cs of g > 0 ? m.conditionSets.get(g) || [] : []) {
+          for (const cid of cs._conditionIds) {
+            const c = m.skillConditions.get(cid);
+            if (c && c._conditionType === 5000) return matchesAny(v, targetsOf(m, c._conditionTargetIDs));
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  // Score-up effects whose gain is proportional to the effect value (2001 with a cap in the same proportion).
+  const LINEAR_SUPPORT_EFFECTS = new Set([2000, 2001]);
+
+  /**
+   * The gain of Gekisou support skill `id` at `level` over its top level, when the two differ only in values and caps
+   * that every effect row scales by one ratio, all of them score-ups (LUCKY RUSH 分數UP, the COMBO range's cumulative
+   * score-up); else null, for Simulate.gekisouSupportLevelFactors to measure.
+   */
+  function gekisouSupportLevelRatio(m, id, level) {
+    const top = m.gekisouSupportSkillMaxLevel.get(id) || 1;
+    const a = m.gekisouSupportSkillEffects.get(id + ":" + level) || [];
+    const b = m.gekisouSupportSkillEffects.get(id + ":" + top) || [];
+    if (!a.length || a.length !== b.length) return null;
+    const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+    let ratio = null;
+    for (let i = 0; i < a.length; i++) {
+      const { _id: i1, _level: l1, _effectValue: v1, _maxEffectValue: c1, ...ra } = a[i];
+      const { _id: i2, _level: l2, _effectValue: v2, _maxEffectValue: c2, ...rb } = b[i];
+      if (!same(ra, rb) || !LINEAR_SUPPORT_EFFECTS.has(ra._skillEffectType) || !(v2 > 0)) return null;
+      const r = v1 / v2;
+      if ((ratio !== null && Math.abs(r - ratio) > 1e-9) || (c1 || c2 ? !(c2 > 0) || Math.abs(c1 / c2 - r) > 1e-9 : false)) return null;
+      ratio = r;
+    }
+    return ratio;
+  }
+
+  /**
+   * A Gekisou support skill that adds a score-up per Just up to a cap (the Just-count range's cumulative score-up): the
+   * effect row of `id` at `level` for a member that is (`match` 1) or is not a target of its member condition, as
+   * {value, cap, per (Justs per step), steps (most steps)}; null for any other skill.
+   */
+  function gekisouSupportJustStack(m, id, level, match) {
+    const rows = m.gekisouSupportSkillEffects.get(id + ":" + level) || [];
+    let out = null;
+    for (const e of rows) {
+      const cum = m.cumulative.get(e._skillCumulativeConditionID);
+      const perJust = cum && cum._skillCumulativeConditionType === 1000 &&
+        (cum._conditionTargetIDs || []).some((t) => m.skillTargets.get(t) && m.skillTargets.get(t)._judgement === 6);
+      if (e._skillEffectType !== 2001 || !perJust || !(e._maxEffectValue > 0)) return null;
+      let positive = null; // the row's member condition: whether it asks for a target (true) or a non-target (false)
+      for (const cs of m.conditionSets.get(e._skillConditionGroup) || []) {
+        for (const cid of cs._conditionIds) {
+          const c = m.skillConditions.get(cid);
+          if (c && c._conditionType === 5000) positive = !!c._isPositive;
+        }
+      }
+      if (positive === null || positive === !!match) {
+        out = { value: e._effectValue, cap: e._maxEffectValue, per: (cum._conditionValues && cum._conditionValues[0]) || 1, steps: cum._maxCumulativeCount || Infinity };
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The mean score-up (in 1/10000) over a range of `n` notes, `J` of them Just notes in the Just play spread evenly, at
+   * Just rate `j` (the simulation judges every 1/j-th Just note Just, as Simulate.gekisouRequest), of a stack `st`
+   * (gekisouSupportJustStack) counting the Justs judged so far, the current note's included.
+   */
+  function justStackShare(J, n, j, st) {
+    if (!(J > 0) || !(n > 0)) return 0;
+    let sum = 0;
+    let k = 0;
+    let justs = 0;
+    for (let i = 1; i <= n; i++) {
+      if (Math.floor((i * J) / n) > Math.floor(((i - 1) * J) / n)) {
+        k++;
+        if (Math.floor(k * j) > Math.floor((k - 1) * j)) justs++;
+      }
+      sum += Math.min(st.cap, st.value * Math.min(st.steps, Math.floor(justs / st.per)));
+    }
+    return sum / n;
+  }
+
+  /**
+   * What the Gekisou support skills of snap `s` add paired with member `v` on chart `scoreId`, per unit of power, as
+   * [[mission, gain, kind (gekisouSupportKind: what other members' Gekisou skills raise), match]] (one per skill):
+   * nnnotes' measured increment of the skill's shape (at the top level, beside a
+   * Gekisou skill that does nothing) for whether `v` meets its member condition, times the level's factor below the top
+   * level: gekisouSupportLevelRatio, else `levels` ("skillId:level:match" -> factor, Simulate.gekisouSupportLevelFactors;
+   * 0 without one). A score-up per Just up to a cap (gekisouSupportJustStack) depends on the Just rate and the cap, not
+   * in proportion: each range's increment of the Just play is scaled by the modelled stack (justStackShare) at the Just
+   * rate and level over the Just play's at the top level, and by the range's score (Just notes score more); this is
+   * within a few % of the simulation (13% low at worst, at Just rate 20%). Nothing when the member has no Gekisou
+   * skill: the client builds support skills only beside one. Pairings are added up, which is approximate: the
+   * simulation plays them together with the members' Gekisou skills (a member's LUCK gauge skill brings more of the
+   * rushes that LUCKY RUSH 分數UP acts in, a COMBO count-up skill stacks the COMBO range's score-up sooner: the search
+   * adds luckGaugeBoost's and comboCountBoost's share).
+   */
+  function gekisouSupportTerms(m, battle, bt, v, s, scoreId, levels) {
+    const out = [];
+    const g = v.gekisouSkillId && bt.aptSupport && bt.aptSupport.get(scoreId);
+    if (!g) return out;
+    for (const [id, level] of s.gekisouSupportSkills || []) {
+      const top = m.gekisouSupportSkillMaxLevel.get(id) || 1;
+      const shape = battle.supportShapes.get(id + ":" + top);
+      const row = m.gekisouSupportSkills.get(id);
+      if (shape === undefined || !row) continue;
+      const match = gekisouSupportMatch(m, v, id, top) ? 1 : 0;
+      const stack = gekisouSupportJustStack(m, id, Math.min(level, top), match);
+      const gj = stack && bt.aptSupportJust && bt.aptSupportJust.get(scoreId);
+      if (gj) {
+        const a = gj.get(shape + ":" + match);
+        const jr = bt.justRanges.get(scoreId);
+        if (!a || !jr) continue;
+        const k = scoreId + "|" + id + ":" + level + ":" + match;
+        if (!bt.memo.has(k)) {
+          const st1 = gekisouSupportJustStack(m, id, top, match);
+          let x = 0;
+          let x1 = 0;
+          a.ranges.forEach((y, i) => {
+            const [J, n, sj] = jr[i];
+            const f1 = st1 ? justStackShare(J, n, 1, st1) : 0;
+            x1 += y;
+            if (f1 > 0) x += (y * sj * justStackShare(J, n, bt.justRate, stack)) / f1;
+          });
+          bt.memo.set(k, x1 > 0 ? x + (a.tail * x) / x1 : 0);
+        }
+        const gain = bt.memo.get(k);
+        if (gain) out.push([row._gekisouMissionType, gain, null, match]);
+        continue;
+      }
+      const factor = level >= top ? 1 : gekisouSupportLevelRatio(m, id, level) ?? (levels && levels.get(id + ":" + level + ":" + match)) ?? 0;
+      const gain = g.get(shape + ":" + match);
+      if (factor && gain) out.push([row._gekisouMissionType, factor * gain, gekisouSupportKind(m, id), match]);
+    }
+    return out;
+  }
+
+  /** The sum of gekisouSupportTerms. */
+  function gekisouSupportRate(m, battle, bt, v, s, scoreId, levels) {
+    return gekisouSupportTerms(m, battle, bt, v, s, scoreId, levels).reduce((a, [, x]) => a + x, 0);
+  }
+
+  // A member's LUCK gauge Gekisou skill brings more lucky rushes, and every LUCKY RUSH 分數UP of the deck (whoever holds
+  // it) gains in proportion. Measured 2026-10-07 on every chart with a LUCK range (32 seeds, rank 3, five rush snaps on
+  // members whose own Gekisou skill does nothing, with and without one gauge member): gauge accumulation up (11001) adds
+  // 17% to the rush snaps' gain on all-LUCK charts (14–20% by skill, ±7 points chart to chart) and 32% on charts with one
+  // LUCK range, at any level (Lv1 acts 2 s at the range's start, but an early rush chains); the LIFE version (11003) acts
+  // with a chance (condition 4011, at full LIFE) and adds in proportion to it, 50% ≈ 11001. A second gauge member adds
+  // little, so a deck takes its strongest. Per-chart values were too noisy to use (±5 points with 64 seeds).
+  const LUCK_GAUGE_BOOST = { allLuck: 0.17, mixed: 0.32 };
+  const LUCK_GAUGE_CHANCE = 0.5;
+
+  /**
+   * The strength of the LUCK gauge Gekisou skill `id` at `level` (1 = gauge accumulation up, 11001; the LIFE version,
+   * 11003, its chance at full LIFE over LUCK_GAUGE_CHANCE), or 0 for any other skill.
+   */
+  function luckGaugeOf(m, id, level) {
+    let out = 0;
+    for (const e of (id && m.gekisouSkillEffects.get(id + ":" + level)) || []) {
+      if (e._skillEffectType === 11001) out = Math.max(out, 1);
+      if (e._skillEffectType !== 11003) continue;
+      let chance = null;
+      let lifeOk = true;
+      for (const cs of m.conditionSets.get(e._skillConditionGroup) || []) {
+        for (const cid of cs._conditionIds) {
+          const c = m.skillConditions.get(cid);
+          if (!c) continue;
+          // LIFE conditions (2000–2004) hold at full LIFE when positive (an all-Perfect play keeps it full).
+          if (c._conditionType >= 2000 && c._conditionType <= 2004 && !c._isPositive) lifeOk = false;
+          if (c._conditionType === 4011) chance = ((c._conditionValues && c._conditionValues[0]) || 0) / 100;
+        }
+      }
+      if (lifeOk) out = Math.max(out, chance === null ? 1 : chance / LUCK_GAUGE_CHANCE);
+    }
+    return out;
+  }
+
+  /**
+   * The share a deck's LUCK gauge (its members' strongest luckGauge) adds to its LUCKY RUSH 分數UP gains on chart
+   * `scoreId` (see LUCK_GAUGE_BOOST); 0 on a chart without a LUCK range.
+   */
+  function luckGaugeBoost(battle, gauge, scoreId) {
+    const b = gauge > 0 && battle && battle.byScore.get(scoreId);
+    if (!b || !b.luck) return 0;
+    const allLuck = !!b.missions && b.missions.length > 0 && b.missions.every((x) => x === 2);
+    return gauge * (allLuck ? LUCK_GAUGE_BOOST.allLuck : LUCK_GAUGE_BOOST.mixed);
+  }
+
+  /** A song's Gekisou range type from its range missions: 1 all COMBO, 2 all LUCK, 3 all JUST, 0 mixed; null without. */
+  function gekisouSongType(missions) {
+    if (!missions || !missions.length) return null;
+    return missions.every((x) => x === missions[0]) ? missions[0] : 0;
+  }
+
+  /**
+   * The songs a public room can draw (input as for search with `multi` and `battle`: the allowed charts with Gekisou
+   * data) by Gekisou range type, for decks saved one per type: [{type (gekisouSongType), musicIds}], COMBO, LUCK, JUST,
+   * then mixed. The types come from music-data, so a new song falls in its group by itself.
+   */
+  function gekisouSongGroups(input) {
+    const { chartList, battle } = liveSetup(input);
+    const byType = new Map();
+    for (const c of chartList) {
+      const b = battle && battle.byScore.get(c.scoreId);
+      const t = b ? gekisouSongType(b.missions) : null;
+      if (t === null) continue;
+      if (!byType.has(t)) byType.set(t, new Set());
+      byType.get(t).add(c.musicId);
+    }
+    return [1, 2, 3, 0].filter((t) => byType.has(t)).map((t) => ({ type: t, musicIds: [...byType.get(t)] }));
+  }
+
+  /**
+   * The expected payoff of a multiplayer normal live (input as for search: master, event, boosts, objective, cpValue,
+   * accuracy, multi) on `chart` (a charts() entry) when the player's all-Perfect score is `score` and the deck's
+   * bonuses are pb/ib: {points, items, cp, sc (what the search ranks by), rankDist: [[rank, p]]}. The play keeps a share
+   * of the score as playShares; the room's rank adds multi.othersScore (E counts as D, as in the search).
+   */
+  function roomPayoff(input, chart, score, pb, ib) {
+    const m = input.master;
+    const multi = input.multi;
+    const pay = payoff(m, input.event, "normal");
+    const rate = boostRate(m, "normal", input.boosts || 0);
+    const W = input.objective === "items" ? { point: 1, item: 1e6 } : { point: 1e6, item: 1 };
+    const th = chart.battle
+      .map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
+      .sort((a, b) => a[1] - b[1]);
+    const lowest = Math.min(...th.map((x) => x[0]));
+    const dist = new Map();
+    for (const [x, p] of playShares(m, chart.scoreId, input.accuracy || null)) {
+      const r = scoreRankOf(th, score * x) || lowest;
+      dist.set(r, (dist.get(r) || 0) + p);
+    }
+    const out = { points: 0, items: 0, cp: 0, sc: 0, rankDist: [...dist].sort((a, b) => b[0] - a[0]) };
+    for (const [r, p] of dist) {
+      const points = eventPoints(pb, rate, pay.points.get(r) || 0);
+      const items = eventItems(pay.items.get(r) || 0, ib, rate);
+      const cp = (pay.cp.get(r) || 0) * rate;
+      out.points += p * points;
+      out.items += p * items;
+      out.cp += p * cp;
+      out.sc += p * ((points + cp * (input.cpValue || 0)) * W.point + items * W.item);
+    }
+    return out;
+  }
+
+  /**
+   * What raises Gekisou support skill `id`'s gain beyond music-data's (measured beside a member whose own Gekisou skill
+   * does nothing): "rush" for a LUCKY RUSH 分數UP (LUCK mission, score-ups only; a member's LUCK gauge skill), "combo"
+   * for a score-up stacking per Gekisou combo (COMBO mission, cumulative condition 7001; a member's COMBO count-up
+   * skill), else null.
+   */
+  function gekisouSupportKind(m, id) {
+    const row = m.gekisouSupportSkills.get(id);
+    const top = m.gekisouSupportSkillMaxLevel.get(id) || 1;
+    const rows = m.gekisouSupportSkillEffects.get(id + ":" + top) || [];
+    if (!row || !rows.length) return null;
+    if (row._gekisouMissionType === 2 && rows.every((e) => e._skillEffectType === 2000)) return "rush";
+    const perCombo = (e) => {
+      const cum = m.cumulative.get(e._skillCumulativeConditionID);
+      return e._skillEffectType === 2001 && !!cum && cum._skillCumulativeConditionType === 7001;
+    };
+    if (row._gekisouMissionType === 1 && rows.every(perCombo)) return "combo";
+    return null;
+  }
+
+  /**
+   * A member's COMBO count-up Gekisou skill (effect 12000: more Gekisou combo per note while it acts) as
+   * "skillId:level", or null. The Gekisou combo is the player's, so it stacks every COMBO-stacking support skill of the
+   * deck (gekisouSupportKind "combo") sooner: by 30–190% of their gain (measured 2026-10-07, by skill, level and chart;
+   * Simulate.comboBoosts measures it per chart).
+   */
+  function comboCountOf(m, id, level) {
+    for (const e of (id && m.gekisouSkillEffects.get(id + ":" + level)) || []) if (e._skillEffectType === 12000) return id + ":" + level;
+    return null;
+  }
+
+  /**
+   * The share the COMBO count-up skills `keys` of a deck add to its COMBO-stacking support gains on a chart, for a
+   * member that does (`match` 1) or does not meet the support skill's member condition: `cb` (Simulate.comboBoosts) =
+   * {b: Map(key -> [share alone by match]), s: [share at saturation by match]}. The Gekisou combo adds up over the
+   * members, but the stacks reach their cap, so the shares combine as s * (1 - prod(1 - b / s)) (within 6% of the
+   * simulation on (1 + share) on the charts checked; a count-up triggered by the combo itself, 12 and 13, gains more
+   * beside another).
+   */
+  function comboCountBoost(cb, keys, match) {
+    const s = cb.s[match];
+    if (!(s > 0) || !keys.length) return 0;
+    let p = 1;
+    for (const k of keys) {
+      const b = cb.b.get(k);
+      if (b) p *= Math.max(0, 1 - Math.min(s, Math.max(0, b[match])) / s);
+    }
+    return s * (1 - p);
+  }
+
   const api = {
     TABLES, RANK_NAMES, buildMaster, memberView, snapView, memberLimits, snapLimit, makeContext, deckPower,
     leaderBonuses, cardEventBonus, eventEffects, describeEventBonus, payoff, boostRate, eventPoints, eventItems,
     charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
-    battleFromMusicData, battleRates, gekisouSkillRate, snapSkillKey, scoreScope, roughSnapRate,
+    battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
+    gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, scoreScope, roughSnapRate,
+    luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, gekisouSongType, gekisouSongGroups, roomPayoff,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Engine = api;
