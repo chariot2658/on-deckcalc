@@ -154,6 +154,7 @@ node test/fetch-replay.js  # 下載模擬用的 WASM 引擎與譜面資料到 ..
 node test/skills.test.js   # 演出技能估計與整場模擬 vs 結算畫面
 node test/gekisou.test.js  # 多人激奏：開激奏的分數、名次、JUST 率、激奏技能、量條與 COMBO 激奏數的交互作用 vs 整場模擬，公開房（一隊打全部、預存隊伍的分組）vs 暴力搜尋
 node test/score.test.js    # 最高分數：快照技能的量法，最佳隊伍 vs ournotes-deck 的精確搜尋結果
+node test/coverage.test.js # 四個區服的每張卡的技能都有算到（新卡用了新技能時會失敗）
 ```
 
 檔案：`engine.js`（計算核心，瀏覽器與 Node 共用）、`data.js`（下載與快取）、`worker.js`（背景搜尋與模擬）、

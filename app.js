@@ -845,6 +845,7 @@
       .join("");
     const hasSongs = out.songs && out.songs.length > 0;
     const note = out.input.objective === "score" ? scoreNote(out, hasSongs) : null;
+    const gaps = note ? "" : gapNote(out);
     el.innerHTML = `<div class="panel">
         <h2>結果</h2>
         ${note || `<p class="note">預估分數＝全 Perfect 的計分資料加上演出技能和快照技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折。
@@ -871,10 +872,44 @@
           out.input.perMinute
             ? `<br>選歌依「每分鐘收益」：每支隊伍都改選每分鐘（歌曲長度＋每場額外 ${fmt(out.input.perMinute.overhead)} 秒）賺最多的歌和評級，所以可能故意選短歌、拿低一級的評級。LB 有限、會用完的話，請改回「每場收益最高」。`
             : ""
-        }${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>`}
+        }${gaps ? "<br>" + gaps + "<br>" : ""}${hasSongs ? "各首歌的比較在下方「歌曲比較」。" : ""}搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。</p>`}
       </div>${cards || '<div class="panel">沒有結果。</div>'}${hasSongs ? `<div class="panel" id="songs"></div><div id="song-deck"></div>` : ""}`;
     fillSims(el, decks, out);
     if (hasSongs) renderSongs(out);
+  }
+
+  // Owned cards with skills this search leaves out (Engine.skillGaps), as a warning line, or "". Every card released
+  // so far is covered; this is for new ones.
+  const GAP_TEXT = {
+    "leader:unknown": () => "隊長技能有新的效果或條件，綜合力沒算到",
+    "live:unmeasured": () => "演出技能有 music-data 沒量過的效果，沒算",
+    "gekisou:unmeasured": () => "激奏技能 music-data 還沒量，算 0",
+    "snap:rough": (g) => `快照技能的加分效果（類型 ${g.effectType}）活動點數模式的粗估沒算（「最高分數」有模擬）`,
+    "snap:never": () => "快照技能的發動條件模擬器不支援，算 0",
+    "snap:unknown": (g) => `快照技能有新的效果類型 ${g.effectType}，沒算`,
+    "gekisouSupport:unmeasured": () => "快照的激奏技能 music-data 還沒量，算 0",
+  };
+  function gapNote(out) {
+    const m = state.master;
+    const score = out.input.objective === "score";
+    const multi = !!out.input.multi;
+    const data = { skillWeights: state.skillWeights, battle: state.battle };
+    const items = [];
+    const scan = (kind, ids) => {
+      for (const id of ids) {
+        const gaps = Engine.skillGaps(m, kind, Number(id), data).filter(
+          (g) => !(score && g.why === "rough") && (multi || (g.part !== "gekisou" && g.part !== "gekisouSupport")),
+        );
+        if (!gaps.length) continue;
+        const c = kind === "member" ? m.memberCards.get(Number(id)) : m.snaps.get(Number(id));
+        const title = kind === "member" ? memberTitle(c) : snapTitle(c);
+        const why = [...new Set(gaps.map((g) => GAP_TEXT[g.part + ":" + g.why](g)))].join("、");
+        items.push(`${esc(cardName(c))}「${esc(title)}」：${esc(why)}`);
+      }
+    };
+    scan("member", Object.keys(state.roster.members));
+    scan("snap", Object.keys(state.roster.snaps));
+    return items.length ? `<span class="warn">有卡片的技能沒計入計算，用到這些卡的隊伍預估可能偏低：${items.join("；")}。</span>` : "";
   }
 
   // The explanation above the score objective's results.
@@ -902,6 +937,8 @@
     if (out.measuredSongs && out.songs.some((d) => d.approx)) {
       parts.push(`從全部歌曲找：先不含快照技能估每首歌，只精算最好的 ${out.measuredSongs.length} 首；「歌曲比較」裡標「粗估」的歌沒算快照技能（約少 5%），想精算請在上方「歌曲」選那首歌。`);
     }
+    const gaps = gapNote(out);
+    if (gaps) parts.push(gaps);
     if (hasSongs) parts.push(challenge ? "各首挑戰曲的最佳隊伍在下方「歌曲比較」。" : "各首歌的最高分在下方「歌曲比較」。");
     parts.push(`搜尋了 ${fmt(out.stats ? out.stats.sets : 0)} 種成員組合，耗時 ${out.stats ? out.stats.ms : "?"} ms。`);
     return `<p class="note">${parts.join("<br>")}</p>`;
@@ -1040,6 +1077,8 @@
     ];
     if (score && !out.snapSkills) notes.push(`<span class="warn">這次沒能模擬快照技能${out.snapError ? `（${esc(out.snapError)}）` : ""}，搜尋的估計沒算快照技能。</span>`);
     if (!out.simulated) notes.push(`<span class="warn">沒有模擬資料，以下是搜尋的估計值，沒有用模擬比較候選。</span>`);
+    const gaps = gapNote(out);
+    if (gaps) notes.push(gaps);
     const summary = songs.length
       ? `<p><b>全部 ${songs.length} 首歌的平均${out.simulated ? "（模擬" : "（估計"}${savedWhat(out) ? "，" + savedWhat(out) : ""}）</b>：一隊打全部 ${fmt(Math.round(vAll))}${u}
         → <b>${groups.length} 組預存 ${fmt(Math.round(vSaved))}${u}（${gapPct(vAll, vSaved)}）</b>
