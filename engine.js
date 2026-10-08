@@ -924,6 +924,103 @@
   }
 
   // ---------------------------------------------------------------------------------------------------------------
+  // Skill coverage
+  //
+  // Every card's skills in every region are covered (test/coverage.test.js). A new card may bring a skill the model
+  // leaves out; skillGaps finds it, so that the UI says so instead of scoring the card low without a word.
+
+  // What leaderBonuses reads: effect types (accumulate), formation condition types (formationCondition) and cumulative
+  // count types (cumulativeCount).
+  const LEADER_EFFECTS = new Set([1000, 1001, 1002, 1003, 1500, 1501, 1502, 1503]);
+  const LEADER_CONDITIONS = new Set([0, 3000, 3001, 4012]);
+  const LEADER_CUMULATIVE = new Set([3000, 3001, 3002, 3003, 3004, 3005]);
+  // Effect types that cannot change the score of an all-Perfect play (heal, guard, Great to Perfect).
+  const NO_SCORE_EFFECTS = new Set([3001, 3003, 12006]);
+  // Condition types the simulation holds false in every live (ournotes-deck conditions.rs).
+  const NEVER_CONDITIONS = new Set([8000]);
+
+  /**
+   * The skills of master card `id` (`kind` "member" or "snap"), at every level, that the calculator leaves out, as
+   * [{part, skillId, effectType, why}]: part "leader" (why "unknown": an effect, condition or cumulative type power
+   * does not read), "live" (a live skill row of no music-data kind: "unmeasured"), "gekisou" (a Gekisou skill
+   * music-data has not measured: "unmeasured"), "snap" (a snap skill row: "rough", a score-up the points search's
+   * estimate (roughSnapRate, 15000 only) leaves out but the score objective measures; "never", a condition the
+   * simulation holds false; "unknown", an effect type of no known kind) and "gekisouSupport" (a Gekisou support skill
+   * music-data has not measured: "unmeasured"). `data` {skillWeights, battle}: the parts they cover are skipped
+   * without them.
+   */
+  function skillGaps(m, kind, id, data = {}) {
+    const out = [];
+    const seen = new Set();
+    const add = (part, skillId, effectType, why) => {
+      const k = [part, skillId, effectType, why].join(":");
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push({ part, skillId, effectType, why });
+      }
+    };
+    const rowsOf = (map, skillId) => {
+      const rows = [];
+      if (skillId) for (const [k, rs] of map) if (k.slice(0, k.indexOf(":")) === String(skillId)) rows.push(...rs);
+      return rows;
+    };
+    const conditionTypes = (groups) => {
+      const types = [];
+      for (const g of groups) {
+        for (const cs of g > 0 ? m.conditionSets.get(g) || [] : []) {
+          for (const cid of cs._conditionIds) {
+            const c = m.skillConditions.get(cid);
+            if (c) types.push(c._conditionType);
+          }
+        }
+      }
+      return types;
+    };
+    const { skillWeights, battle } = data;
+    if (kind === "member") {
+      const c = m.memberCards.get(id);
+      if (!c) return out;
+      for (const e of rowsOf(m.leaderEffects, c._leaderSkillID)) {
+        const cum = e._skillCumulativeConditionID > 0 ? m.cumulative.get(e._skillCumulativeConditionID) : null;
+        if (
+          !LEADER_EFFECTS.has(e._skillEffectType) ||
+          conditionTypes([e._skillConditionGroup]).some((t) => !LEADER_CONDITIONS.has(t)) ||
+          ((e._skillEffectType & ~3) === 1500 && (!cum || !LEADER_CUMULATIVE.has(cum._skillCumulativeConditionType)))
+        ) add("leader", c._leaderSkillID, e._skillEffectType, "unknown");
+      }
+      if (skillWeights && skillWeights.kinds.length) {
+        for (const e of rowsOf(m.liveSkillEffects, c._liveSkillID)) {
+          if (!NO_SCORE_EFFECTS.has(e._skillEffectType) && !skillKindOf(skillWeights.kinds, e)) add("live", c._liveSkillID, e._skillEffectType, "unmeasured");
+        }
+      }
+      if (c._gekisouSkillID && battle && battle.power) {
+        const top = m.gekisouSkillMaxLevel.get(c._gekisouSkillID) || 1;
+        if (!battle.shapes.has(c._gekisouSkillID + ":" + top)) add("gekisou", c._gekisouSkillID, null, "unmeasured");
+      }
+      return out;
+    }
+    const s = m.snaps.get(id);
+    if (!s) return out;
+    for (const skillId of [s._supportSkillId01, s._supportSkillId02]) {
+      for (const e of rowsOf(m.supportSkillEffects, skillId)) {
+        const t = e._skillEffectType;
+        if (NO_SCORE_EFFECTS.has(t)) continue;
+        if (!SNAP_SCORE_EFFECTS.has(t)) add("snap", skillId, t, "unknown");
+        else if (conditionTypes([e._skillTriggerConditionGroup, e._skillConditionGroup]).some((x) => NEVER_CONDITIONS.has(x))) add("snap", skillId, t, "never");
+        else if (t !== 15000) add("snap", skillId, t, "rough");
+      }
+    }
+    if (battle && battle.power) {
+      for (const skillId of [s._gekisouSupportSkillId01, s._gekisouSupportSkillId02]) {
+        if (!skillId) continue;
+        const top = m.gekisouSupportSkillMaxLevel.get(skillId) || 1;
+        if (!battle.supportShapes.has(skillId + ":" + top)) add("gekisouSupport", skillId, null, "unmeasured");
+      }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
   // Play accuracy
 
   /**
@@ -3491,7 +3588,7 @@
     charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
     battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
-    gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, snapSkillClass, scoreScope, roughSnapRate,
+    gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, snapSkillClass, skillGaps, scoreScope, roughSnapRate,
     luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, gekisouSongType, gekisouSongGroups, roomPayoff,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
