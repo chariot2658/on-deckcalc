@@ -51,7 +51,7 @@ const REF = [
     if (!rates.has(ref.scoreId)) rates.set(ref.scoreId, new Map());
     const have = rates.get(ref.scoreId);
     const t0 = Date.now();
-    const todo = scope.pairs.filter((p) => !have.has(p.key));
+    const todo = scope.pairs.filter((p) => p.keys.some((k) => !have.has(k)));
     for (const [k, v] of S.snapSkillRates(session, m, ref.scoreId, todo, null)) have.set(k, v);
     const t1 = Date.now();
     const out = E.search({ ...input, snapSkill: { byScore: new Map([[ref.scoreId, have]]) } });
@@ -98,5 +98,36 @@ const REF = [
   }
   assert.ok(checked >= 3);
   console.log(`${checked} pairing keys: same rate for another pairing of the key, five copies = mean over positions`);
+
+  // Pairing classes (snapSkillClass), every card owned: each key measured alone scores as its class's one measurement,
+  // solo and with Gekisou.
+  {
+    const allMembers = m.t.MasterMemberCard.map((c) => {
+      const L = E.memberLimits(m, c);
+      return { id: c._id, level: L.limit(L.maxAwake), awake: L.maxAwake, rank: 1, skillLevel: m.liveSkillMaxLevel.get(c._liveSkillID) || 1, gekisouSkillLevel: 5 };
+    });
+    const allSnaps = m.t.MasterSupportCard.map((s) => ({ id: s._id, level: E.snapLimit(m, s, 5), rank: 5 }));
+    const input = {
+      master: m, mode: "normal", objective: "score", members: allMembers, snaps: allSnaps, player: roster.player, perPowerByScore: perPower,
+      skillWeights: sw, maxLevel: 40, difficulties: ["expert"], musicIds: [100109], now,
+    };
+    const scope = E.scoreScope(input);
+    const perKey = new Map();
+    for (const o of allMembers) {
+      const v = E.memberView(m, o, roster.player);
+      for (const so of allSnaps) {
+        const k = E.snapSkillKey(m, v, E.snapView(m, so));
+        if (k && !perKey.has(k)) perKey.set(k, { key: k, memberKey: k.slice(0, k.indexOf("|")), member: o, snap: so });
+      }
+    }
+    assert.strictEqual(scope.pairs.reduce((a, p) => a + p.keys.length, 0), perKey.size);
+    const battle = E.battleFromMusicData(md);
+    const gk = { ranks: [3, 3, 3], justRate: 0.1, justTypes: m.justTypes, seeds: [battle.byScore.get(sid).seeds[0].seed] };
+    for (const g of [null, gk]) {
+      const byClass = S.snapSkillRates(session, m, sid, scope.pairs, g);
+      for (const [k, r] of S.snapSkillRates(session, m, sid, [...perKey.values()], g)) assert.strictEqual(byClass.get(k), r, `class of ${k}`);
+    }
+    console.log(`every card: ${perKey.size} pairing keys in ${scope.pairs.length} classes, each key alone = its class (solo and Gekisou)`);
+  }
   console.log("ok");
 })();

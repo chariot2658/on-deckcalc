@@ -36,7 +36,9 @@
     multiOthersAvg: 5000000,
     multiGekisouRank: 3, // assumed rank in every Gekisou range
     multiJustRate: 50, // %, of the Just-count ranges' notes
-    multiSong: "random", // "random": public room (song drawn at random), "pick": private room choosing the song
+    // A public room draws its song: "saved" (a deck saved per Gekisou range type, switched to after the draw) or "random"
+    // (one deck for every song); "pick": a private room choosing its song.
+    multiSong: "saved",
     scoreSong: 0, // objective "score": the song to play (live music id), 0 = every song (challenge: every challenge song)
   };
 
@@ -268,7 +270,7 @@
           const p = pending.get(d.id);
           if (!p) return;
           if (d.type === "progress") {
-            if (p.onProgress) p.onProgress(d.done, d.total);
+            if (p.onProgress) p.onProgress(d.done, d.total, d.stage);
             return;
           }
           pending.delete(d.id);
@@ -297,6 +299,13 @@
     }
     await state.workerReady;
     return workerCall({ type: "search", eventId, input, now }, onProgress);
+  }
+
+  // Saved decks for a public room (worker only: they are ranked by the simulation).
+  async function runSaved(input, eventId, onProgress) {
+    if (!state.worker) throw new Error("預存隊伍要在背景執行緒（Web Worker）計算，這個瀏覽器無法使用");
+    await state.workerReady;
+    return workerCall({ type: "saved", eventId, input, now: Date.now() }, onProgress);
   }
 
   // The simulated order scores of decks (worker only), cached per deck and chart. `gekisou` ({rank, justRate}, from a
@@ -431,6 +440,7 @@
       .join("");
     const challengeSongs = state.master.t.MasterChallengeMusic.filter((r) => r._eventId === ev._id).map((r) => musicTitle(r._liveMusicId));
     const randomSong = randomSongOf(s);
+    const saved = savedOf(s);
     const score = s.objective === "score";
     const diffChips = Object.keys(DIFF_NAMES)
       .map((d) => `<label><input type="checkbox" name="diff" value="${d}" ${s.difficulties.includes(d) ? "checked" : ""}>${DIFF_NAMES[d]}</label>`)
@@ -463,7 +473,7 @@
               <label title="不看活動點數和道具，只找分數最高的隊伍（衝分數、排行榜用）"><input type="radio" name="objective" value="score" ${score ? "checked" : ""}>最高分數</label>
             </div>
           </div>
-          <label class="field" ${score ? "" : "hidden"} title="${s.mode === "challenge" ? "挑戰 Live 每首挑戰曲各有分數排行榜（記錄各難度中最高的一次）" : "不選就從全部歌曲裡找分數最高的"}"><span>歌曲</span>
+          <label class="field" ${score && !saved ? "" : "hidden"} title="${s.mode === "challenge" ? "挑戰 Live 每首挑戰曲各有分數排行榜（記錄各難度中最高的一次）" : "不選就從全部歌曲裡找分數最高的"}"><span>歌曲</span>
             <select id="scoreSong">${scoreSongOptions(s, ev)}</select></label>
           <label class="field" ${s.mode === "normal" && !score ? "" : "hidden"}><span>加成道具（LB）用量</span>
             <input type="number" id="boosts" min="0" max="10" value="${s.boosts}"></label>
@@ -481,9 +491,10 @@
             <select id="multiGekisouRank">${range(1, 5).map((r) => `<option value="${r}" ${r === s.multiGekisouRank ? "selected" : ""}>第 ${r} 名</option>`).join("")}</select></label>
           <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="JUST 激奏區間裡打出 JUST 的比例（其餘當 PERFECT）。JUST 一個音符算 230%，PERFECT 算 100%"><span>JUST 區間的 JUST 率（%）</span>
             <input type="number" id="multiJustRate" min="0" max="100" step="5" value="${s.multiJustRate}" style="width:80px"></label>
-          <div class="field" ${s.mode === "normal" && s.multi && !score ? "" : "hidden"} title="公開自由對戰的歌是抽出來的（自己選的歌也只是加入抽選），隊伍依所有歌的平均收益排名；私人房可以指定歌曲，就和單人一樣選最划算的歌"><span>激奏的歌</span>
+          <div class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="公開自由對戰的歌是抽出來的（自己選的歌也只是加入抽選），但抽完歌後約 10 秒內還能換成存好的編組：預存隊伍依激奏區間的種類各找一隊。一隊打全部＝不換隊，依所有歌的平均排名。私人房可以指定歌曲，就和單人一樣選最好的歌"><span>激奏的歌</span>
             <div class="chips">
-              <label><input type="radio" name="multiSong" value="random" ${s.multiSong !== "pick" ? "checked" : ""}>隨機（公開房）</label>
+              <label><input type="radio" name="multiSong" value="saved" ${saved ? "checked" : ""}>預存隊伍（公開房）</label>
+              ${score ? "" : `<label><input type="radio" name="multiSong" value="random" ${randomSong ? "checked" : ""}>一隊打全部（公開房）</label>`}
               <label><input type="radio" name="multiSong" value="pick" ${s.multiSong === "pick" ? "checked" : ""}>自己選（私人房）</label>
             </div>
           </div>
@@ -495,17 +506,17 @@
           <label class="field" title="斷 combo 的只有 MISS 和 BAD（GOOD 不會斷）。斷在曲子中段最傷，可能少 6~7% 分數"><span>每場斷 combo 次數（MISS＋BAD）</span>
             <input type="number" id="comboBreaks" min="0" max="20" step="0.5" value="${s.comboBreaks}" style="width:80px"></label>
           <div class="field"><span>難度</span><div class="chips">${diffChips}</div></div>
-          <div class="field" ${randomSong || score ? "hidden" : ""}><span>選歌</span>
+          <div class="field" ${randomSong || saved || score ? "hidden" : ""}><span>選歌</span>
             <div class="chips">
               <label><input type="radio" name="songPick" value="live" ${s.songPick !== "minute" ? "checked" : ""}>每場收益最高</label>
               <label><input type="radio" name="songPick" value="minute" ${s.songPick === "minute" ? "checked" : ""}>每分鐘收益最高</label>
             </div>
           </div>
-          <label class="field" ${s.songPick === "minute" && !randomSong && !score ? "" : "hidden"}><span>每場額外時間（載入＋結算，秒）</span>
+          <label class="field" ${s.songPick === "minute" && !randomSong && !saved && !score ? "" : "hidden"}><span>每場額外時間（載入＋結算，秒）</span>
             <input type="number" id="pickOverhead" min="0" max="300" value="${s.songOverhead}" style="width:80px"></label>
         </div>
         <div class="row" style="margin-top:12px">
-          <button id="run" ${ownedM < 5 ? "disabled" : ""}>計算最佳配隊</button>
+          <button id="run" ${ownedM < 5 ? "disabled" : ""}>${saved ? "計算預存隊伍" : "計算最佳配隊"}</button>
           <span class="muted small">已登錄 成員卡 ${ownedM} 張 · 快照 ${ownedS} 張${ownedM < 5 ? " — 請先到「成員卡」分頁登錄至少 5 位角色" : ""}</span>
         </div>
       </div>
@@ -593,9 +604,16 @@
     if (state.lastResults && state.lastResults.eventId === ev._id) renderResults(state.lastResults);
   }
 
-  // A public multiplayer room draws its song: no song choice (see Engine.search multi.pickSong). The score objective
-  // plays the chosen song.
-  const randomSongOf = (s) => s.mode === "normal" && s.multi && s.multiSong !== "pick" && s.objective !== "score";
+  // A multiplayer live's song: a public room draws it ("saved": a saved deck per Gekisou range type, see the worker's
+  // savedDecks; "random": one deck for every song, Engine.search multi without pickSong), a private room picks it. The
+  // score objective has no one-deck mode. null for other lives.
+  const multiSongOf = (s) => {
+    if (s.mode !== "normal" || !s.multi) return null;
+    if (s.multiSong === "pick") return "pick";
+    return s.multiSong === "random" && s.objective !== "score" ? "random" : "saved";
+  };
+  const randomSongOf = (s) => multiSongOf(s) === "random";
+  const savedOf = (s) => multiSongOf(s) === "saved";
 
   // The score objective's song list: a challenge live's songs (each has its own score ranking), or every song released.
   function scoreSongOptions(s, ev) {
@@ -618,8 +636,9 @@
     btn.disabled = true;
     btn.textContent = "計算中…";
     const score = s.objective === "score";
+    const saved = savedOf(s);
     const challengeSongs = state.master.t.MasterChallengeMusic.filter((r) => r._eventId === ev._id).map((r) => r._liveMusicId);
-    const scoreSong = score && s.scoreSong && (s.mode !== "challenge" || challengeSongs.includes(s.scoreSong)) ? s.scoreSong : 0;
+    const scoreSong = score && !saved && s.scoreSong && (s.mode !== "challenge" || challengeSongs.includes(s.scoreSong)) ? s.scoreSong : 0;
     const input = {
       mode: s.mode,
       members: Object.entries(state.roster.members).map(([id, o]) => ({
@@ -638,14 +657,16 @@
       multi: s.mode === "normal" && s.multi
         ? {
           players: s.multiPlayers, othersScore: score ? 0 : s.multiOthersAvg * (s.multiPlayers - 1), gekisouRank: s.multiGekisouRank,
-          justRate: s.multiJustRate / 100, pickSong: score || s.multiSong === "pick",
+          justRate: s.multiJustRate / 100, pickSong: multiSongOf(s) === "pick",
         }
         : null,
-      perMinute: s.songPick === "minute" && !randomSongOf(s) && !score ? { overhead: s.songOverhead } : null,
+      perMinute: s.songPick === "minute" && !randomSongOf(s) && !saved && !score ? { overhead: s.songOverhead } : null,
     };
-    // The score objective first measures the snap skills on the replay (worker progress messages).
-    const progress = (done, total) => {
-      if (btn.isConnected) btn.textContent = `模擬快照技能… ${Math.floor((done / total) * 100)}%`;
+    // The worker measures on the replay first (progress messages by stage): COMBO count-up shares and, for the score
+    // objective, snap skills; saved decks then search and simulate.
+    const STAGES = { combo: "量 COMBO 激奏數加成", rates: "模擬快照技能", search: "搜尋預存隊伍", simulate: "模擬預存隊伍" };
+    const progress = (done, total, stage) => {
+      if (btn.isConnected) btn.textContent = `${STAGES[stage] || STAGES.rates}… ${Math.floor((done / Math.max(1, total)) * 100)}%`;
     };
     try {
       // Normal lives also earn CP (by rank only). Value it at what the best challenge deck turns it into, so the
@@ -659,8 +680,9 @@
           input.cpValue = cpPlan.value;
         }
       }
-      const out = await runSearch(input, ev._id, progress);
+      const out = saved ? { ...(await runSaved(input, ev._id, progress)), saved: true } : await runSearch(input, ev._id, progress);
       songView.selected = null;
+      savedView.selected = null;
       state.lastResults = { ...out, eventId: ev._id, mode: s.mode, input, cpPlan };
       renderResults(state.lastResults);
     } catch (e) {
@@ -668,18 +690,16 @@
       $("#results").innerHTML = `<div class="panel warn">計算失敗：${esc(e.message)}</div>`;
     } finally {
       btn.disabled = false;
-      btn.textContent = "計算最佳配隊";
+      btn.textContent = saved ? "計算預存隊伍" : "計算最佳配隊";
     }
   }
 
-  // One deck: rank, payoff, song and the five slots. `label` heads the summary line; `key` finds the deck again for
-  // the simulation line.
-  function deckCard(d, label, key, unit, out) {
+  // One deck's slots: each member (the leader in slot 2) and its snap, with their event bonuses outside the score
+  // objective.
+  function slotsHtml(d, scoreMode) {
     const s = state.settings;
     const m = state.master;
-    const multi = out.input.multi;
-    const scoreMode = out.input.objective === "score";
-    const slots = d.members
+    return d.members
       .map((v, k) => {
         const c = m.memberCards.get(v.id);
         const sn = d.snaps[k];
@@ -697,6 +717,14 @@
         </div>`;
       })
       .join("");
+  }
+
+  // One deck: rank, payoff, song and the five slots. `label` heads the summary line; `key` finds the deck again for
+  // the simulation line.
+  function deckCard(d, label, key, unit, out) {
+    const multi = out.input.multi;
+    const scoreMode = out.input.objective === "score";
+    const slots = slotsHtml(d, scoreMode);
     // A multiplayer score search ranks by the simulated score (d.sim): the search only estimates the Gekisou part.
     const shown = d.sim ? Math.round(d.sim.mean * d.accuracy) : d.estScore;
     const head = scoreMode
@@ -763,16 +791,19 @@
       <div class="small muted">各首歌的評級、模擬分數在下方「歌曲比較」</div>`;
   }
 
-  // What the skills add to the estimated score: live skills, snap skills (score objective), and with Gekisou the
-  // members' Gekisou skills. `bare`: without the parentheses, after the no-skill score.
+  // What the skills add to the estimated score: live skills, snap skills (measured in the score objective, a rough
+  // estimate of the live skill extension in points), and with Gekisou the members' Gekisou skills and the snaps'
+  // Gekisou support skills. `bare`: without the parentheses, after the no-skill score.
   function skillParts(d, bare) {
     const gk = d.gekisouScore || 0;
+    const gkSnap = d.gekisouSupportScore || 0;
     const snap = d.snapScore || 0;
-    const live = d.baseScore ? d.estScore - d.baseScore - gk - snap : 0;
+    const live = d.baseScore ? d.estScore - d.baseScore - gk - gkSnap - snap : 0;
     const parts = [];
     if (live > 0) parts.push(`演出技能 +${fmt(live)}`);
-    if (snap > 0) parts.push(`快照技能 +${fmt(snap)}`);
+    if (snap > 0) parts.push(`快照技能${d.snapRough ? "（粗估）" : ""} +${fmt(snap)}`);
     if (gk > 0) parts.push(`激奏技能 +${fmt(gk)}`);
+    if (gkSnap > 0) parts.push(`快照激奏技能 +${fmt(gkSnap)}`);
     if (bare) return [`無技能 ${fmt(d.baseScore)}`].concat(parts).join("，");
     return parts.length ? `（${parts.join("，")}）` : "";
   }
@@ -794,6 +825,7 @@
   function renderResults(out) {
     const el = $("#results");
     if (!el) return;
+    if (out.saved && !out.error) return renderSaved(out);
     if (out.error === "no-charts") {
       el.innerHTML = `<div class="panel warn">沒有符合條件的譜面（或譜面缺少計分資料）。請放寬等級或難度。</div>`;
       return;
@@ -815,18 +847,19 @@
     const note = out.input.objective === "score" ? scoreNote(out, hasSongs) : null;
     el.innerHTML = `<div class="panel">
         <h2>結果</h2>
-        ${note || `<p class="note">預估分數＝全 Perfect 的計分資料加上演出技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折。
+        ${note || `<p class="note">預估分數＝全 Perfect 的計分資料加上演出技能和快照技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折。
+        這裡的快照技能是粗估：快照延長演出技能的秒數 ÷ 5 秒 × 那位成員的演出技能加分，和整場模擬差約 ±15%（換成總分在 1% 以內）。
         有斷 combo 時分數會隨斷的位置變動（斷在中段最傷），排名改用各評級機率加權的期望收益，餘裕太小、可能掉級的隊伍會排在後面。
-        「模擬分數」再加上快照技能：用 ournotes-deck 的整場模擬算出 120 種發動順序的分數，評級機率同時考慮發動順序和斷 combo 的位置。
+        「模擬分數」用 ournotes-deck 的整場模擬算出 120 種發動順序的分數（快照技能逐格計算），評級機率同時考慮發動順序和斷 combo 的位置。
         餘裕小於 3% 的隊伍，實際可能差一級。${
           out.input.multi
             ? `<br>多人（激奏）：活動點數、道具和 CP 看的是<b>房間評級</b>（結算畫面右上角的大徽章），不是自己分數的評級。房間評級＝全房總分對照該曲的多人門檻（依人數調整）；這裡用「自己的預估分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(state.settings.multiOthersAvg)}」估算。其他玩家的分數通常佔大部分，所以加成高的隊伍比綜合力高的隊伍划算。${
                 out.random
-                  ? `公開房的歌是抽出來的（直接開始隨機，自己選歌也要和其他人選的歌一起抽），所以隊伍依<b>所有 ${fmt((out.stats && out.stats.songs) || 0)} 首歌的平均收益</b>排名，每首歌都打允許的難度裡收益最好的譜面；綜合力是激奏編成畫面顯示的（還沒選歌，不含歌曲加成）。第 1 名的隊伍在各首歌的評級在下方「歌曲比較」。私人房可以指定歌曲，請把「激奏的歌」改成「自己選」。`
-                  : `這裡假設是<b>私人房，自己指定歌曲</b>，所以和單人一樣挑最划算的歌；公開房的歌是抽出來的，請把「激奏的歌」改成「隨機」。`
+                  ? `公開房的歌是抽出來的（直接開始隨機，自己選歌也要和其他人選的歌一起抽），所以隊伍依<b>所有 ${fmt((out.stats && out.stats.songs) || 0)} 首歌的平均收益</b>排名，每首歌都打允許的難度裡收益最好的譜面；綜合力是激奏編成畫面顯示的（還沒選歌，不含歌曲加成）。第 1 名的隊伍在各首歌的評級在下方「歌曲比較」。抽完歌後約 10 秒內還能換成存好的編組，「激奏的歌」選「預存隊伍」可以依激奏區間的種類各算一隊；私人房可以指定歌曲，請改成「自己選」。`
+                  : `這裡假設是<b>私人房，自己指定歌曲</b>，所以和單人一樣挑最划算的歌；公開房的歌是抽出來的，請把「激奏的歌」改成「預存隊伍」或「一隊打全部」。`
               }${
                 out.gekisou
-                  ? `<br>自己的分數用<b>開激奏</b>的分數：JUST 區間打出 JUST（JUST 率 ${Math.round(out.gekisou.justRate * 100)}%）、每段激奏結束時依名次加成（三段都假設第 ${out.gekisou.rank} 名），再加上成員卡的激奏技能。結算畫面大字的 SCORE 是不含激奏的分數（存成最高分），比這裡低很多。激奏技能在搜尋裡是估計值（各技能分開量再相加，未滿級的依模擬換算）；「模擬分數」逐格模擬，包含成員的激奏技能和快照的激奏技能。`
+                  ? `<br>自己的分數用<b>開激奏</b>的分數：JUST 區間打出 JUST（JUST 率 ${Math.round(out.gekisou.justRate * 100)}%）、每段激奏結束時依名次加成（三段都假設第 ${out.gekisou.rank} 名），再加上成員卡的激奏技能和快照的激奏技能。結算畫面大字的 SCORE 是不含激奏的分數（存成最高分），比這裡低很多。激奏技能在搜尋裡是估計值：各技能分開量再相加，未滿級的依模擬換算，JUST 區間「每個 JUST 累積加分」的快照依 JUST 率和上限換算；成員的 LUCK 量條技能讓 RUSH 變多、快照的 RUSH 加分跟著變多（用平均比例，單首歌可能差幾 %），COMBO 激奏數 UP 讓快照的 COMBO 累積加分疊得更快（逐首模擬量）。「模擬分數」逐格模擬，包含成員的激奏技能和快照的激奏技能。`
                   : ""
               }`
             : ""
@@ -957,6 +990,179 @@
   // --- song comparison ---
 
   const songView = { showAll: false, selected: null };
+  const savedView = { q: "", sort: "type", selected: null };
+
+  // --- saved decks (public rooms) ---
+
+  // Gekisou range types (Engine.gekisouSongType) and missions.
+  const GEKISOU_TYPES = { 1: { name: "全 COMBO", badge: "C" }, 2: { name: "全 LUCK", badge: "L" }, 3: { name: "全 JUST", badge: "J" }, 0: { name: "混合", badge: "混" } };
+  const MISSION_SHORT = { 1: "COMBO", 2: "LUCK", 3: "JUST" };
+  const missionsOf = (d) => {
+    const b = d && d.chart && state.battle && state.battle.byScore.get(d.chart.scoreId);
+    return b && b.missions ? b.missions.map((x) => MISSION_SHORT[x] || "?").join("・") : "—";
+  };
+
+  // A simulated payoff (the worker's simPay) as the number compared: the score (with the play accuracy), or points
+  // (CP converted at the challenge deck's rate) or items.
+  function savedValue(v, out) {
+    if (!v) return null;
+    if (out.input.objective === "score") return v.value;
+    if (out.input.objective === "items") return v.items;
+    return v.points + (v.cp || 0) * (out.input.cpValue || 0);
+  }
+  const savedUnit = (out) => (out.input.objective === "score" ? "" : out.input.objective === "items" ? " 道具" : " pt");
+  // The compared number's name in a header: points include the CP at the challenge deck's rate.
+  const savedWhat = (out) =>
+    out.input.objective === "score" ? "" : out.input.objective === "items" ? "道具" : out.input.cpValue ? "pt，含 CP 換算" : "pt";
+  const gapPct = (a, b) => (a > 0 ? `${b >= a ? "+" : ""}${((b / a - 1) * 100).toFixed(1)}%` : "—");
+
+  function renderSaved(out) {
+    const el = $("#results");
+    const s = state.settings;
+    const score = out.input.objective === "score";
+    const u = savedUnit(out);
+    const groups = out.groups || [];
+    const songs = out.songs || [];
+    const mean = (f) => {
+      const xs = songs.map(f).filter((x) => x !== null && x !== undefined);
+      return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+    };
+    const vSaved = mean((x) => savedValue(x.saved.simPay, out));
+    const vBest = mean((x) => savedValue(x.best ? x.best.simPay : x.saved.simPay, out));
+    const vAll = mean((x) => savedValue(x.all, out));
+    const big = songs.filter((x) => x.best && savedValue(x.best.simPay, out) > 1.03 * savedValue(x.saved.simPay, out)).length;
+    const gk = out.gekisou;
+    const notes = [
+      `公開房的歌是抽出來的，但抽完歌後大約有 10 秒可以換隊：來得及換成存好的編組，來不及重排卡片。遊戲可以存 50 組編組，同一張卡可以放在好幾組，所以這裡依<b>激奏三段的種類</b>把歌分成 ${groups.length} 組（全 COMBO、全 LUCK、全 JUST、混合），每組各找一隊。抽到歌時看三段激奏的種類，換成那組的隊伍。`,
+      `每組先用搜尋找出該組歌曲平均最好的幾隊（估計值在第 1 名 5% 以內，最多 8 隊），再逐首用 ournotes-deck 的整場模擬比較，取平均最高的：每首歌模擬 ${out.runs ? out.runs.rank : 5} 局，每局換出場順序（5 局剛好每人每個位置各一次）；有 LUCK 區間的歌每局換抽選的種子，所有隊伍用同一批種子，所以兩隊的差距只差約 0.3%（單一隊伍每局差約 10%）。顯示的分數在 LUCK 歌用 ${out.runs ? out.runs.show : 10} 局（單首約 ±3%）。`,
+      `激奏${score ? "分數" : ""}的條件：每段第 ${gk ? gk.rank : s.multiGekisouRank} 名、JUST 率 ${Math.round((gk ? gk.justRate : s.multiJustRate / 100) * 100)}%${score ? `，依你的準度（Perfect 率 ${s.perfectRate}%、斷 combo ${s.comboBreaks} 次）打折` : `；收益看房間評級（自己的模擬分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(s.multiOthersAvg)}），依你的準度算各評級的機率`}。`,
+      `搜尋的估計已包含兩種成員激奏技能和快照激奏技能的交互作用：成員的 LUCK 量條技能讓 RUSH 變多，快照的 LUCKY RUSH 分數 UP 跟著多（全 LUCK 歌約 +17%、混合歌約 +32%）；成員的 COMBO 激奏數 UP 讓快照的激奏 COMBO 分數 UP 更快疊滿（依譜面逐首模擬量，可達 +30%～+190%）。`,
+    ];
+    if (score && !out.snapSkills) notes.push(`<span class="warn">這次沒能模擬快照技能${out.snapError ? `（${esc(out.snapError)}）` : ""}，搜尋的估計沒算快照技能。</span>`);
+    if (!out.simulated) notes.push(`<span class="warn">沒有模擬資料，以下是搜尋的估計值，沒有用模擬比較候選。</span>`);
+    const summary = songs.length
+      ? `<p><b>全部 ${songs.length} 首歌的平均${out.simulated ? "（模擬" : "（估計"}${savedWhat(out) ? "，" + savedWhat(out) : ""}）</b>：一隊打全部 ${fmt(Math.round(vAll))}${u}
+        → <b>${groups.length} 組預存 ${fmt(Math.round(vSaved))}${u}（${gapPct(vAll, vSaved)}）</b>
+        → 每首都換成該歌的最佳隊 ${fmt(Math.round(vBest))}${u}（${gapPct(vAll, vBest)}）。
+        ${big ? `有 ${big} 首歌換成該歌的最佳隊能多 3% 以上（下表標橘色），常抽到的話可以多存一隊。` : "每首歌用預存隊和用該歌最佳隊都差不到 3%，4 隊就夠了。"}</p>`
+      : "";
+    el.innerHTML = `<div class="panel">
+        <h2>預存隊伍（公開房）</h2>
+        <p class="note">${notes.join("<br>")}</p>
+        ${summary}
+        <p class="note muted">耗時 ${out.stats ? Math.round(out.stats.ms / 1000) : "?"} 秒（模擬 ${fmt((out.stats && out.stats.runs) || 0)} 局）。量過的資料會保留到重新整理頁面，改設定再算會快很多。</p>
+      </div>
+      ${groups.map((g) => savedCard(g, out)).join("")}
+      <div class="panel" id="saved-songs"></div><div id="saved-deck"></div>`;
+    renderSavedSongs(out);
+  }
+
+  // The deck saved for one Gekisou range type.
+  function savedCard(g, out) {
+    const t = GEKISOU_TYPES[g.type] || { name: String(g.type), badge: "?" };
+    const titles = g.musicIds.map(musicTitle).sort((a, b) => a.localeCompare(b));
+    if (!g.deck) return `<div class="panel warn">「${esc(t.name)}」的歌（${g.musicIds.length} 首）：找不到隊伍。</div>`;
+    const d = g.deck;
+    const v = d.simPay || {};
+    const score = out.input.objective === "score";
+    const what = out.simulated ? "模擬" : "估計";
+    const value = score
+      ? `平均${what}激奏分數 <span class="points">${fmt(Math.round(v.value))}</span>`
+      : `<span class="points">${fmt(Math.round(v.points))} pt</span>${v.cp ? ` · <span class="cp">${fmt(Math.round(v.cp * 10) / 10)} CP</span>` : ""} · <span class="items">${fmt(Math.round(v.items))} 道具</span>`;
+    const est = score ? `搜尋估計 ${fmt(Math.round(d.estScore))}` : `搜尋估計 ${fmt(d.points)} pt · ${fmt(d.items)} 道具`;
+    return `<div class="result">
+      <div class="result-head">
+        <div class="rank-badge" title="${esc(t.name)}">${esc(t.badge)}</div>
+        <div><div class="big">「${esc(t.name)}」的歌（${g.musicIds.length} 首）用這隊</div>
+          <div class="small">${value}${score ? "（依你的準度）" : "（每場平均，" + what + "）"}；${est}</div>
+          ${!score && out.input.objective !== "items" && v.cp && out.input.cpValue ? `<div class="small">CP 換算後合計約 <b class="points">${fmt(Math.round(v.points + v.cp * out.input.cpValue))} pt</b></div>` : ""}
+          <div class="muted small">綜合力 ${fmt(d.displayPower)}（激奏編成畫面，不含歌曲加成）${score ? "" : ` · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}`} · 比較了 ${g.pool.length} 支候選</div></div>
+      </div>
+      <div class="slots">${slotsHtml(d, score)}</div>
+      <details class="small"><summary>這組的歌</summary><p>${titles.map(esc).join("、")}</p></details>
+    </div>`;
+  }
+
+  // Song lookup: the saved deck a drawn song takes, and what the song's own best deck would add.
+  function renderSavedSongs(out) {
+    const el = $("#saved-songs");
+    if (!el) return;
+    const order = [1, 2, 3, 0];
+    const q = savedView.q.trim().toLowerCase();
+    const rows = (out.songs || [])
+      .map((x) => {
+        const sv = savedValue(x.saved.simPay, out);
+        const bv = x.best ? savedValue(x.best.simPay, out) : sv;
+        return { x, title: musicTitle(x.musicId), sv, bv, gap: sv > 0 ? bv / sv - 1 : 0 };
+      })
+      .filter((r) => !q || r.title.toLowerCase().includes(q));
+    if (savedView.sort === "gap") rows.sort((a, b) => b.gap - a.gap);
+    else rows.sort((a, b) => order.indexOf(a.x.type) - order.indexOf(b.x.type) || a.title.localeCompare(b.title));
+    const body = rows
+      .map((r) => {
+        const d = r.x.saved;
+        const t = GEKISOU_TYPES[r.x.type] || { name: "?" };
+        const rank = !(out.input.objective === "score") && d.simPay && d.simPay.rankDist
+          ? d.simPay.rankDist.filter(([, p]) => p >= 0.005).map(([rk, p]) => `${RANK_LABEL[rk] || rk}${p < 0.995 ? ` ${Math.round(p * 100)}%` : ""}`).join("、")
+          : "";
+        return `<tr class="song-row ${r.x.musicId === savedView.selected ? "sel" : ""}" data-id="${r.x.musicId}">
+          <td><b>${esc(r.title)}</b> <span class="muted small">${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</span></td>
+          <td class="small">${esc(missionsOf(d))}</td>
+          <td>${esc(t.name)}</td>
+          <td class="num"><b>${fmt(Math.round(r.sv))}</b>${rank ? `<br><span class="muted small">${esc(rank)}</span>` : ""}</td>
+          <td class="num">${fmt(Math.round(r.bv))}</td>
+          <td class="num ${r.gap > 0.03 ? "warn" : r.gap <= 0.001 ? "muted" : ""}">${r.gap > 0.001 ? "+" + (r.gap * 100).toFixed(1) + "%" : "已是最佳"}</td>
+        </tr>`;
+      })
+      .join("");
+    el.innerHTML = `<h2>抽到的歌 → 用哪一隊</h2>
+      <p class="note">每首歌用哪一組的預存隊，以及${out.simulated ? "模擬" : "估計"}的${out.input.objective === "score" ? "激奏分數（依你的準度）" : "每場收益"}。「該歌最佳隊」是只打這首歌時搜尋出來最好的隊伍；差距大的歌可以多存一隊。點一列可看兩支隊伍打這首歌的細節。</p>
+      <div class="row" style="margin-bottom:8px">
+        <label class="field"><span>搜尋歌名</span><input type="text" id="savedQ" value="${esc(savedView.q)}" placeholder="歌名" style="width:180px"></label>
+        <div class="field"><span>排序</span><div class="chips">
+          <label><input type="radio" name="savedSort" value="type" ${savedView.sort !== "gap" ? "checked" : ""}>依組別</label>
+          <label><input type="radio" name="savedSort" value="gap" ${savedView.sort === "gap" ? "checked" : ""}>依差距</label>
+        </div></div>
+      </div>
+      <div class="table-scroll"><table class="rules songs">
+        <thead><tr><th>歌曲</th><th>激奏三段</th><th>用哪一隊</th><th class="num">預存隊${savedWhat(out) ? `（${savedWhat(out)}）` : ""}</th><th class="num">該歌最佳隊</th><th class="num">差距</th></tr></thead>
+        <tbody>${body}</tbody></table></div>`;
+    const qEl = $("#savedQ");
+    qEl.oninput = (e) => {
+      savedView.q = e.target.value;
+      renderSavedSongs(out);
+      const again = $("#savedQ");
+      again.focus();
+      again.setSelectionRange(again.value.length, again.value.length);
+    };
+    el.querySelectorAll("input[name=savedSort]").forEach((r) => (r.onchange = () => ((savedView.sort = r.value), renderSavedSongs(out))));
+    el.querySelectorAll(".song-row").forEach((tr) => (tr.onclick = () => {
+      const id = Number(tr.dataset.id);
+      savedView.selected = savedView.selected === id ? null : id;
+      renderSavedSongs(out);
+    }));
+    renderSavedDeck(out);
+  }
+
+  function renderSavedDeck(out) {
+    const el = $("#saved-deck");
+    if (!el) return;
+    const x = (out.songs || []).find((r) => r.musicId === savedView.selected);
+    if (!x) {
+      el.innerHTML = "";
+      return;
+    }
+    const title = musicTitle(x.musicId);
+    const t = GEKISOU_TYPES[x.type] || { name: "?" };
+    const decks = new Map([["sv", x.saved]]);
+    let html = deckCard(x.saved, `「${t.name}」組的預存隊打 ${title}`, "sv", resultUnit(out), out);
+    if (x.best) {
+      decks.set("sb", x.best);
+      html += deckCard(x.best, `${title} 的最佳隊`, "sb", resultUnit(out), out);
+    }
+    el.innerHTML = html;
+    fillSims(el, decks, out);
+  }
   const mmss = (sec) => {
     const t = Math.round(sec);
     return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
