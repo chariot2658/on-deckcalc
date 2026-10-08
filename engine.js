@@ -298,6 +298,15 @@
     };
   }
 
+  /** A result deck for postMessage: its member and snap views back as owned cards, every other field as is. */
+  function plainDeck(d) {
+    return {
+      ...d,
+      members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel })),
+      snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)),
+    };
+  }
+
   // ---------------------------------------------------------------------------------------------------------------
   // Event bonuses
 
@@ -3583,7 +3592,7 @@
   }
 
   const api = {
-    TABLES, RANK_NAMES, buildMaster, memberView, snapView, memberLimits, snapLimit, makeContext, deckPower,
+    TABLES, RANK_NAMES, buildMaster, memberView, snapView, plainDeck,memberLimits, snapLimit, makeContext, deckPower,
     leaderBonuses, cardEventBonus, eventEffects, describeEventBonus, payoff, boostRate, eventPoints, eventItems,
     charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,

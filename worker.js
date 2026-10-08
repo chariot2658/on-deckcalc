@@ -9,41 +9,8 @@ let battle = null; // Engine.battleFromMusicData: multiplayer lives with Gekisou
 let replay = null; // {musicDataUrl, pointer}
 let session = null; // Promise of a ReplaySession, loaded on the first simulation
 
-// A deck without engine views, for postMessage.
-function slim(d) {
-  return {
-    members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel })),
-    snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)),
-    power: d.power,
-    displayPower: d.displayPower,
-    rank: d.rank,
-    rankName: d.rankName,
-    chart: d.chart,
-    needDisplayPower: d.needDisplayPower,
-    nextRankName: d.nextRankName || null,
-    nextNeedDisplayPower: d.nextNeedDisplayPower || null,
-    pointBonus: d.pointBonus,
-    itemBonus: d.itemBonus,
-    points: d.points,
-    items: d.items,
-    cp: d.cp,
-    cpPoints: d.cpPoints,
-    estScore: d.estScore,
-    baseScore: d.baseScore,
-    snapScore: d.snapScore || 0,
-    snapRough: !!d.snapRough,
-    gekisouScore: d.gekisouScore === undefined ? null : d.gekisouScore,
-    gekisouSupportScore: d.gekisouSupportScore || 0,
-    scoreRate: d.scoreRate,
-    accuracy: d.accuracy,
-    rankChance: d.rankChance === undefined ? null : d.rankChance,
-    rankDist: d.rankDist || null,
-    minutes: d.minutes || null,
-    random: !!d.random,
-    songCount: d.songCount || null,
-    sim: d.sim || null,
-  };
-}
+// Decks go back without engine views.
+const slim = Engine.plainDeck;
 
 self.onmessage = (e) => {
   const msg = e.data;

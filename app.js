@@ -294,8 +294,7 @@
     const now = Date.now();
     if (!state.worker) {
       const out = Engine.search({ ...input, master: state.master, event: state.master.events.get(eventId), perPowerByScore: state.perPower, skillWeights: state.skillWeights, battle: state.battle, lengthByScore: state.lengths, now: new Date(now) });
-      const slim = (d) => ({ ...d, members: d.members.map((v) => ({ id: v.id, level: v.level, awake: v.awake, rank: v.rank, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel })), snaps: d.snaps.map((s) => (s ? { id: s.id, level: s.level, rank: s.rank } : null)) });
-      return { error: out.error, stats: out.stats, rate: out.rate, gekisou: out.gekisou, random: !!out.random, results: out.results.map(slim), songs: (out.songs || []).map(slim) };
+      return { error: out.error, stats: out.stats, rate: out.rate, gekisou: out.gekisou, random: !!out.random, results: out.results.map(Engine.plainDeck), songs: (out.songs || []).map(Engine.plainDeck) };
     }
     await state.workerReady;
     return workerCall({ type: "search", eventId, input, now }, onProgress);
