@@ -705,13 +705,16 @@
         const sc = sn ? m.snaps.get(sn.id) : null;
         const b = cardBonus("member", v.id);
         const sb = sn ? cardBonus("snap", sn.id) : null;
+        // Clicking a card opens its tile in 成員卡/快照 (jumpToCard).
+        const mj = `data-jump="member" data-id="${v.id}" title="到「成員卡」設定這張卡"`;
+        const sj = sn ? `data-jump="snap" data-id="${sn.id}" title="到「快照」設定這張快照"` : "";
         return `<div class="slot">
           ${k === 2 ? '<span class="leader">隊長</span>' : ""}
-          <img class="m-img" loading="lazy" src="${Data.memberThumb(s.region, c._assetID)}" alt="">
-          <div class="nm">${typeDot(c._cardType)} ${esc(cardName(c))}<br><span class="muted">${esc(memberTitle(c))} · Lv${v.level}</span>
+          <img class="m-img" loading="lazy" src="${Data.memberThumb(s.region, c._assetID)}" alt="" ${mj}>
+          <div class="nm" ${mj}>${typeDot(c._cardType)} ${esc(cardName(c))}<br><span class="muted">${esc(memberTitle(c))} · Lv${v.level}</span>
           ${b.point && !scoreMode ? `<br><span class="tag-point">點數 +${pct(b.point)}</span>` : ""}</div>
-          ${sc ? `<img class="s-img" loading="lazy" src="${Data.snapThumb(s.region, sc._assetID)}" alt="">
-            <div class="nm">${typeDot(sc._cardType)} ${esc(cardName(sc))}<br><span class="muted">${esc(snapTitle(sc))} · Lv${sn.level}</span>
+          ${sc ? `<img class="s-img" loading="lazy" src="${Data.snapThumb(s.region, sc._assetID)}" alt="" ${sj}>
+            <div class="nm" ${sj}>${typeDot(sc._cardType)} ${esc(cardName(sc))}<br><span class="muted">${esc(snapTitle(sc))} · Lv${sn.level}</span>
             ${sb && sb.item && !scoreMode ? `<br><span class="tag-item">道具 +${pct(sb.item)}</span>` : ""}</div>` : `<div class="nm muted">（無快照）</div>`}
         </div>`;
       })
@@ -1514,6 +1517,32 @@
     });
   }
 
+  // From a card in a result deck to its tile in 成員卡/快照, with the level field focused. Filters hiding the tile are
+  // cleared; #jump-back returns to where the results were scrolled.
+  const jumpBack = { y: 0 };
+  function jumpToCard(kind, id) {
+    const member = kind === "member";
+    const tab = member ? "members" : "snaps";
+    const render = member ? renderMembers : renderSnaps;
+    const find = () => $(`#tab-${tab} .tile[data-id="${id}"]`);
+    render();
+    if (!find()) {
+      Object.assign(state.filters[member ? "m" : "s"], { band: "", rarity: "", owned: false, bonus: false, q: "" });
+      render();
+    }
+    jumpBack.y = window.scrollY;
+    showTab(tab);
+    $("#jump-back").hidden = false;
+    const tile = find();
+    if (!tile) return;
+    tile.scrollIntoView({ block: "center" });
+    tile.classList.remove("flash");
+    void tile.offsetWidth; // restarts the animation
+    tile.classList.add("flash");
+    const lv = $(".c-level", tile);
+    if (lv) lv.focus({ preventScroll: true });
+  }
+
   const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
 
   // --- screenshot import ---
@@ -2139,10 +2168,23 @@
   // ---------------------------------------------------------------------------------------------------------------
   // Wiring
 
+  function showTab(name) {
+    document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === "tab-" + name));
+  }
   document.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => {
-    document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("active", x === b));
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === "tab-" + b.dataset.tab));
+    $("#jump-back").hidden = true;
+    showTab(b.dataset.tab);
   }));
+  $("#tab-calc").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-jump]");
+    if (t && state.master) jumpToCard(t.dataset.jump, Number(t.dataset.id));
+  });
+  $("#jump-back").onclick = () => {
+    $("#jump-back").hidden = true;
+    showTab("calc");
+    window.scrollTo(0, jumpBack.y);
+  };
   $("#profile").onchange = (e) => switchProfile(e.target.value);
   $("#reload").onclick = () => loadAll(true);
   // Pasting a screenshot anywhere while the import tab is open reads it.
