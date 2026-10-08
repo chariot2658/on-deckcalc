@@ -125,8 +125,8 @@ async function gekisouLevels(input) {
 }
 
 // The engine input of a search or saved-deck message, with the Gekisou level factors and the COMBO count-up shares
-// measured first.
-async function engineInput(msg) {
+// measured first (on `pool`'s helpers, or helpers of its own).
+async function engineInput(msg, pool = null) {
   let levels = { levels: null, supportLevels: null };
   try {
     levels = await gekisouLevels(msg.input);
@@ -140,7 +140,7 @@ async function engineInput(msg) {
     gekisouSupportLevels: levels.supportLevels, lengthByScore: lengths, now: new Date(msg.now),
   };
   try {
-    input.comboBoost = await comboBoostOf(input, msg.id);
+    input.comboBoost = await comboBoostOf(input, msg.id, pool);
   } catch (err) {
     session = null;
     console.warn("COMBO count-up shares unavailable", err);
@@ -150,8 +150,9 @@ async function engineInput(msg) {
 
 // COMBO count-up shares (Simulate.comboBoosts) by "scoreId|rank:justRate", measured once per chart and key.
 const comboShares = new Map();
-// Engine search input `comboBoost` for a multiplayer live: {byScore, byMusic}, or null. Progress: stage "combo".
-async function comboBoostOf(input, id) {
+// Engine search input `comboBoost` for a multiplayer live: {byScore, byMusic}, or null. Progress: stage "combo". The
+// charts go to helpers (`pool`, or its own) when there are any.
+async function comboBoostOf(input, id, pool = null) {
   const multi = input.mode === "normal" && input.multi && input.multi.players >= 1 ? input.multi : null;
   if (!multi || !battle || !battle.power || !replay) return null;
   const scope = Engine.comboScope(input);
@@ -162,16 +163,37 @@ async function comboBoostOf(input, id) {
     const e = comboShares.get(sid + "|" + bt.rank + ":" + bt.justRate);
     return !e || scope.keys.some((k) => !e.b.has(k));
   });
-  const s = todo.length ? await replaySession() : null;
+  const keyOf = (sid) => sid + "|" + bt.rank + ":" + bt.justRate;
   let done = 0;
-  for (const sid of scope.scoreIds) {
-    const k = sid + "|" + bt.rank + ":" + bt.justRate;
-    if (todo.includes(sid)) {
-      comboShares.set(k, Simulate.comboBoosts(s, master, bt, sid, scope.keys, scope.support, scope.idle, comboShares.get(k)));
-      self.postMessage({ type: "progress", id, stage: "combo", done: ++done, total: todo.length });
+  const measured = new Set();
+  const finish = (sid, entry) => {
+    comboShares.set(keyOf(sid), entry);
+    measured.add(sid);
+    self.postMessage({ type: "progress", id, stage: "combo", done: ++done, total: todo.length });
+  };
+  const own = pool ? null : helperPool(todo.length);
+  const helpers = pool || own;
+  try {
+    if (helpers && todo.length) {
+      await helpers.run(
+        todo.map((sid) => {
+          const entry = comboShares.get(keyOf(sid));
+          const ctx = Simulate.comboContext(master, scope.keys.concat(entry ? [...entry.b.keys()] : []), scope.support, scope.idle);
+          return { type: "combo", scoreId: sid, ctx, bt: { rank: bt.rank, justRate: bt.justRate }, keys: scope.keys, entry };
+        }),
+        (k, out) => finish(todo[k], out),
+        () => {},
+      );
     }
-    byScore.set(sid, comboShares.get(k));
+  } catch (err) {
+    console.warn("COMBO count-up helpers failed", err);
+  } finally {
+    if (own) own.close();
   }
+  const left = todo.filter((sid) => !measured.has(sid));
+  const s = left.length ? await replaySession() : null;
+  for (const sid of left) finish(sid, Simulate.comboBoosts(s, master, bt, sid, scope.keys, scope.support, scope.idle, comboShares.get(keyOf(sid))));
+  for (const sid of scope.scoreIds) byScore.set(sid, comboShares.get(keyOf(sid)));
   return { byScore, byMusic: new Map([...scope.byMusic].map(([mid, sid]) => [mid, byScore.get(sid)])) };
 }
 
@@ -250,8 +272,9 @@ const SCORE_MARGIN = 0.97;
 
 // The score objective's input with snap skill rates (Simulate.snapSkillRates on the charts Engine.scoreScope names), and
 // the songs left unmeasured. `every`: every song is played (a public room's random song), on one chart each. Progress
-// goes to the page as {type: "progress", id, stage: "rates", done, total}.
-async function scoreInput(base, id, every) {
+// goes to the page as {type: "progress", id, stage: "rates", done, total}. `pool`: helpers (helperPool) to measure on, or
+// null for helpers of its own.
+async function scoreInput(base, id, every, pool = null) {
   if (!replay) return { input: base, approx: [] };
   let input = base;
   let approx = [];
@@ -275,30 +298,100 @@ async function scoreInput(base, id, every) {
     const k = sid + "|" + gkKey;
     if (!snapRates.has(k)) snapRates.set(k, new Map());
     const have = snapRates.get(k);
-    return { sid, have, pairs: scope.pairs.filter((p) => !have.has(p.key)) };
+    return { sid, have, pairs: scope.pairs.filter((p) => p.keys.some((k) => !have.has(k))) };
   });
-  const total = todo.reduce((a, t) => a + t.pairs.length, 0);
-  let done = 0;
-  if (total) {
-    const s = await replaySession();
-    let last = 0;
-    for (const t of todo) {
-      if (!t.pairs.length) continue;
-      const b = gk && battle.byScore.get(t.sid);
-      const gekisou = gk ? { ranks: [gk.rank, gk.rank, gk.rank], justRate: gk.justRate, justTypes: master.justTypes, seeds: b ? [b.seeds[0].seed] : [0] } : null;
-      const rates = Simulate.snapSkillRates(s, master, t.sid, t.pairs, gekisou, (n) => {
-        const now = Date.now();
-        if (now - last > 200) {
-          last = now;
-          self.postMessage({ type: "progress", id, stage: "rates", done: done + n, total });
-        }
-      });
-      for (const [k, v] of rates) t.have.set(k, v);
-      done += t.pairs.length;
+  const work = todo.filter((t) => t.pairs.length).map((t) => {
+    const b = gk && battle.byScore.get(t.sid);
+    const gekisou = gk ? { ranks: [gk.rank, gk.rank, gk.rank], justRate: gk.justRate, justTypes: master.justTypes, seeds: b ? [b.seeds[0].seed] : [0] } : null;
+    return { t, gekisou, jobs: Simulate.snapSkillJobs(master, t.pairs), done: 0 };
+  });
+  const total = work.reduce((a, w) => a + w.jobs.length, 0);
+  let last = 0;
+  const report = (w, n) => {
+    w.done = n;
+    const now = Date.now();
+    if (now - last > 200) {
+      last = now;
+      self.postMessage({ type: "progress", id, stage: "rates", done: work.reduce((a, x) => a + x.done, 0), total });
+    }
+  };
+  if (work.length) {
+    const own = pool ? null : helperPool(work.length);
+    const helpers = pool || own;
+    try {
+      if (helpers) {
+        await helpers.run(
+          work.map((w) => ({ type: "rates", scoreId: w.t.sid, jobs: w.jobs, gekisou: w.gekisou })),
+          (k, out) => {
+            for (const [key, v] of out) work[k].t.have.set(key, v);
+            report(work[k], work[k].jobs.length);
+          },
+          (k, n) => report(work[k], n),
+        );
+      }
+    } catch (err) {
+      console.warn("snap skill rate helpers failed", err);
+    } finally {
+      if (own) own.close();
+    }
+    const left = work.filter((w) => w.t.pairs.some((p) => p.keys.some((k) => !w.t.have.has(k))));
+    if (left.length) {
+      const s = await replaySession();
+      for (const w of left) {
+        for (const [k, v] of Simulate.measureSnapJobs(s, w.t.sid, w.jobs, w.gekisou, (n) => report(w, n))) w.t.have.set(k, v);
+      }
     }
   }
   const byScore = new Map(todo.map((t) => [t.sid, t.have]));
   return { input: { ...input, snapSkill: { byScore } }, approx };
+}
+
+// Helpers (simworker.js, a replay each) for snap skill rates and saved-deck simulations, a chart at a time each: the
+// cores but one, at most 6. helperPool(n) starts up to n of them; null without workers here (Node) or for fewer than two.
+const HELPERS = Math.max(1, Math.min(6, ((self.navigator && self.navigator.hardwareConcurrency) || 2) - 1));
+function helperPool(n) {
+  n = typeof Worker === "undefined" ? 0 : Math.min(HELPERS, n);
+  if (n < 2) return null;
+  const helpers = [];
+  try {
+    for (let i = 0; i < n; i++) helpers.push(new Worker("simworker.js"));
+  } catch (err) {
+    for (const h of helpers) h.terminate();
+    console.warn("no helpers", err);
+    return null;
+  }
+  return {
+    // Sends each task (a simworker.js message) to the next free helper: onDone(k, out) with task k's reply,
+    // onProgress(k, done) meanwhile. A helper's failure rejects, leaving the tasks not done to the caller.
+    async run(tasks, onDone, onProgress) {
+      let next = 0;
+      let failed = false;
+      await Promise.all(helpers.map(async (h) => {
+        while (!failed && next < tasks.length) {
+          const k = next++;
+          try {
+            const out = await new Promise((resolve, reject) => {
+              h.onmessage = (e) => {
+                const m = e.data;
+                if (m.type === "progress") onProgress(k, m.done);
+                else if (m.type === "done") resolve(m.out);
+                else reject(new Error(m.message));
+              };
+              h.onerror = (e) => reject(new Error(e.message || "simworker.js failed"));
+              h.postMessage({ ...tasks[k], replay });
+            });
+            onDone(k, out);
+          } catch (err) {
+            failed = true;
+            throw err;
+          }
+        }
+      }));
+    },
+    close() {
+      for (const h of helpers) h.terminate();
+    },
+  };
 }
 
 // Saved decks for a public room (激奏 公開房). Its song is drawn at random, and the deck can still be switched for about
@@ -316,9 +409,11 @@ const RANK_RUNS = 5;
 const SHOW_RUNS = 10;
 
 async function savedDecks(msg) {
+  let helpers = null;
   try {
     const t0 = Date.now();
-    let input = await engineInput(msg);
+    helpers = replay ? helperPool(HELPERS) : null;
+    let input = await engineInput(msg, helpers);
     input = { ...input, multi: { ...input.multi, pickSong: false } };
     const scoreMode = input.objective === "score";
     const groups = Engine.gekisouSongGroups(input);
@@ -329,7 +424,7 @@ async function savedDecks(msg) {
     let snapError = null;
     if (scoreMode) {
       try {
-        ({ input } = await scoreInput(input, msg.id, true));
+        ({ input } = await scoreInput(input, msg.id, true, helpers));
       } catch (err) {
         session = null;
         snapError = String((err && err.message) || err);
@@ -361,12 +456,10 @@ async function savedDecks(msg) {
     // Simulation: the payoff of a deck on one song from its simulated mean (score: times the play's share; points: the
     // room's rank chances, Engine.roomPayoff).
     const sim = replay && gkOut ? await replaySession() : null;
+    const gkRun = gkOut ? { ranks: [gkOut.rank, gkOut.rank, gkOut.rank], justRate: gkOut.justRate, justTypes: master.justTypes } : null;
     const runners = new Map();
     const runnerOf = (sid) => {
-      if (!runners.has(sid)) {
-        const r = gkOut.rank;
-        runners.set(sid, Simulate.chartRunner(sim, sid, { ranks: [r, r, r], justRate: gkOut.justRate, justTypes: master.justTypes }));
-      }
+      if (!runners.has(sid)) runners.set(sid, Simulate.chartRunner(sim, sid, gkRun));
       return runners.get(sid);
     };
     const luckOf = (sid) => !!(battle.byScore.get(sid) || {}).luck;
@@ -381,21 +474,66 @@ async function savedDecks(msg) {
     );
     let runs = 0;
     let runsTotal = 0;
-    const tick = () => {
-      if (++runs % 25 === 0) progress("simulate", runs, runsTotal);
-    };
-    // A per-song deck's simulated mean over `n` runs (5 off LUCK charts), adding to `prev` (its mean over `from` runs).
-    const simulateOn = (d, n, prev, from) => {
-      const sid = d.chart.scoreId;
-      const total = luckOf(sid) ? n : RANK_RUNS;
-      if (prev !== undefined && from >= total) return prev;
-      const run = runnerOf(sid);
-      const counted = (power, perf, order, seed) => {
-        tick();
-        return run(power, perf, order, seed);
-      };
-      const rest = Simulate.meanScore(counted, d.displayPower, perfOf(d), seedsOf(sid), total, from || 0);
-      return prev === undefined ? rest : (prev * from + rest * (total - from)) / total;
+    // Simulated means of per-song decks, reqs [{d, n, prev, from}]: over `n` runs (5 off LUCK charts), added to `prev`
+    // (the deck's mean over `from` runs). On the helpers one task per chart (its runner built once), else here.
+    const simulateAll = async (reqs) => {
+      const items = reqs.map((r) => {
+        const sid = r.d.chart.scoreId;
+        const total = luckOf(sid) ? r.n : RANK_RUNS;
+        const from = r.from || 0;
+        return { ...r, sid, total, from, kept: r.prev !== undefined && from >= total };
+      });
+      const rest = new Array(items.length);
+      const bySid = new Map();
+      items.forEach((it, i) => {
+        if (it.kept) return;
+        if (!bySid.has(it.sid)) bySid.set(it.sid, []);
+        bySid.get(it.sid).push(i);
+      });
+      const tasks = [...bySid];
+      if (helpers && tasks.length) {
+        const busy = new Array(tasks.length).fill(0);
+        let last = 0;
+        const report = () => {
+          const now = Date.now();
+          if (now - last > 200) {
+            last = now;
+            progress("simulate", runs + busy.reduce((a, b) => a + b, 0), runsTotal);
+          }
+        };
+        try {
+          await helpers.run(
+            tasks.map(([sid, idx]) => ({
+              type: "mean", scoreId: sid, gekisou: gkRun,
+              items: idx.map((i) => ({ power: items[i].d.displayPower, perf: perfOf(items[i].d), seeds: seedsOf(sid), total: items[i].total, from: items[i].from })),
+            })),
+            (k, out) => {
+              tasks[k][1].forEach((i, t) => (rest[i] = out[t]));
+              busy[k] = 0;
+              for (const i of tasks[k][1]) runs += items[i].total - items[i].from;
+              report();
+            },
+            (k, n) => {
+              busy[k] = n;
+              report();
+            },
+          );
+        } catch (err) {
+          console.warn("simulation helpers failed", err);
+        }
+      }
+      for (const [sid, idx] of tasks) {
+        if (idx.every((i) => rest[i] !== undefined)) continue;
+        const run = runnerOf(sid);
+        const counted = (power, perf, order, seed) => {
+          if (++runs % 25 === 0) progress("simulate", runs, runsTotal);
+          return run(power, perf, order, seed);
+        };
+        for (const i of idx) {
+          if (rest[i] === undefined) rest[i] = Simulate.meanScore(counted, items[i].d.displayPower, perfOf(items[i].d), seedsOf(sid), items[i].total, items[i].from);
+        }
+      }
+      return items.map((it, i) => (it.kept ? it.prev : it.prev === undefined ? rest[i] : (it.prev * it.from + rest[i] * (it.total - it.from)) / it.total));
     };
     const valueOf = (d, score) => {
       if (scoreMode) return { value: score * d.accuracy, score };
@@ -412,18 +550,35 @@ async function savedDecks(msg) {
       for (const d of (allOut.perSong && allOut.perSong[0]) || []) runsTotal += runsFor(d.chart.scoreId, SHOW_RUNS);
     }
 
-    const outGroups = pools.map((p) => {
-      if (!p.pool.length) return { type: p.type, musicIds: p.musicIds, error: p.error };
-      // Rank the pool by the simulated mean over the group's songs (the estimate without the replay).
+    // Rank each group's pool by the simulated mean over the group's songs (the estimate without the replay).
+    const live = pools.filter((p) => p.pool.length);
+    const first = sim ? await simulateAll(live.flatMap((p) => p.pool.flatMap((x) => x.perSong.map((d) => ({ d, n: RANK_RUNS }))))) : null;
+    let q = 0;
+    for (const p of live) {
       for (const x of p.pool) {
-        x.sims = x.perSong.map((d) => (sim ? simulateOn(d, RANK_RUNS) : null));
+        x.sims = x.perSong.map(() => (sim ? first[q++] : null));
         x.vals = x.perSong.map((d, k) => (sim ? valueOf(d, x.sims[k]) : estOf(d)));
         x.mean = x.vals.reduce((a, v) => a + v.value, 0) / x.vals.length;
       }
-      const order = p.pool.slice().sort((a, b) => b.mean - a.mean);
+      p.order = p.pool.slice().sort((a, b) => b.mean - a.mean);
+    }
+    // Then on SHOW_RUNS: the winners, each song's own best deck and one deck for every song, on the same seeds.
+    const bests = live.flatMap((p) => p.order[0].perSong.map((d) => bestBySong.get(d.chart.musicId) || null));
+    const allPer = allOut.results && allOut.results.length ? allOut.perSong[0] : [];
+    const second = sim
+      ? await simulateAll([
+        ...live.flatMap((p) => p.order[0].perSong.map((d, k) => ({ d, n: SHOW_RUNS, prev: p.order[0].sims[k], from: RANK_RUNS }))),
+        ...bests.filter(Boolean).map((d) => ({ d, n: SHOW_RUNS })),
+        ...allPer.map((d) => ({ d, n: SHOW_RUNS })),
+      ])
+      : null;
+    q = 0;
+    const outGroups = pools.map((p) => {
+      if (!p.pool.length) return { type: p.type, musicIds: p.musicIds, error: p.error };
+      const order = p.order;
       const win = order[0];
       if (sim) {
-        win.sims = win.perSong.map((d, k) => simulateOn(d, SHOW_RUNS, win.sims[k], RANK_RUNS));
+        win.sims = win.perSong.map(() => second[q++]);
         win.vals = win.perSong.map((d, k) => valueOf(d, win.sims[k]));
         win.mean = win.vals.reduce((a, v) => a + v.value, 0) / win.vals.length;
       }
@@ -440,20 +595,19 @@ async function savedDecks(msg) {
         pool: order.map((x) => ({ members: x.deck.members.map((v) => v.id), snaps: x.deck.snaps.map((s) => s && s.id), est: x.deck.score, sim: sim ? x.mean : null })),
       };
     });
-    // Each song's own best deck, and one deck for every song, on the same seeds.
     const songs = [];
+    let bi = 0;
     for (const g of outGroups) {
       for (const s of g.songs || []) {
-        const best = bestBySong.get(s.musicId);
-        const b = best ? (sim ? valueOf(best, simulateOn(best, SHOW_RUNS)) : estOf(best)) : null;
+        const best = bests[bi++];
+        const b = best ? (sim ? valueOf(best, second[q++]) : estOf(best)) : null;
         songs.push({ musicId: s.musicId, type: g.type, saved: s.deck, best: best ? { ...slim(best), simPay: b } : null });
       }
     }
     let all = null;
-    if (allOut.results && allOut.results.length) {
-      const per = allOut.perSong[0];
-      const vals = per.map((d) => (sim ? valueOf(d, simulateOn(d, SHOW_RUNS)) : estOf(d)));
-      const bySong = new Map(per.map((d, k) => [d.chart.musicId, vals[k]]));
+    if (allPer.length) {
+      const vals = allPer.map((d) => (sim ? valueOf(d, second[q++]) : estOf(d)));
+      const bySong = new Map(allPer.map((d, k) => [d.chart.musicId, vals[k]]));
       for (const s of songs) s.all = bySong.get(s.musicId) || null;
       all = { deck: slim(allOut.results[0]), value: vals.reduce((a, v) => a + v.value, 0) / vals.length };
     }
@@ -463,6 +617,8 @@ async function savedDecks(msg) {
     });
   } catch (err) {
     self.postMessage({ type: "error", id: msg.id, message: String((err && err.stack) || err) });
+  } finally {
+    if (helpers) helpers.close();
   }
 }
 

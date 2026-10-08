@@ -164,26 +164,39 @@
 
   /**
    * Snap skill score per unit of power of each kind of member/snap pairing on chart `scoreId`, for the score search
-   * (Engine.search snapSkill; pairs from Engine.scoreScope: [{key, member: {id, skillLevel}, snap: {id, rank}}]).
+   * (Engine.search snapSkill; pairs from Engine.scoreScope: [{key, keys, member: {id, skillLevel}, snap: {id, rank}}],
+   * the pairing measured for every key of `keys`, its class).
    * A pairing's gain at a performance position does not depend on the other slots, so five copies of it in one run
    * add up its gains at the five positions: (five copies with the snap - five without) / 5 / power is its mean over the
    * uniformly random order. Gekisou skills and Gekisou support skills are left out (the search adds the members' own;
-   * the snaps' are left to orderScores). `gekisou` as for orderScores. Returns Map key -> rate; `progress(done, total)`.
+   * the snaps' are left to orderScores). `gekisou` as for orderScores. Returns Map key -> rate; `progress(done, total)`
+   * counts pairs.
    */
   function snapSkillRates(session, m, scoreId, pairs, gekisou, progress, power = 1e6) {
+    return measureSnapJobs(session, scoreId, snapSkillJobs(m, pairs), gekisou, progress, power);
+  }
+
+  /** snapSkillRates in two steps, the second without the master data (worker helpers): each pair's performers. */
+  function snapSkillJobs(m, pairs) {
+    return pairs.map((pr) => {
+      const p = { ...performers(m, [pr.member], [pr.snap])[0], gekisouSkill: null, gekisouSupportSkills: [] };
+      // Members of one live skill score alike without snaps (the key's member part, Engine.snapSkillKey).
+      const bare = { ...p, supportSkills: [] };
+      return { keys: pr.keys || [pr.key], without: pr.memberKey || JSON.stringify(bare), p, bare };
+    });
+  }
+
+  function measureSnapJobs(session, scoreId, jobs, gekisou, progress, power = 1e6) {
     let tpl = JSON.parse(session.template(scoreId, power, FPS));
     if (gekisou) tpl = gekisouRequest(session, tpl, scoreId, gekisou);
     const run = (p) => JSON.parse(session.run(JSON.stringify({ ...tpl, performers: [p, p, p, p, p] }))).score;
     const without = new Map(); // member side -> score of five copies without snap skills
     const out = new Map();
-    pairs.forEach((pr, i) => {
-      const p = { ...performers(m, [pr.member], [pr.snap])[0], gekisouSkill: null, gekisouSupportSkills: [] };
-      const bare = { ...p, supportSkills: [] };
-      // Members of one live skill score alike without snaps (the key's member part, Engine.snapSkillKey).
-      const k = pr.memberKey || JSON.stringify(bare);
-      if (!without.has(k)) without.set(k, run(bare));
-      out.set(pr.key, (run(p) - without.get(k)) / 5 / power);
-      if (progress) progress(i + 1, pairs.length);
+    jobs.forEach((job, i) => {
+      if (!without.has(job.without)) without.set(job.without, run(job.bare));
+      const r = (run(job.p) - without.get(job.without)) / 5 / power;
+      for (const key of job.keys) out.set(key, r);
+      if (progress) progress(i + 1, jobs.length);
     });
     return out;
   }
@@ -337,21 +350,40 @@
    * saturation `s`. COMBO ranges do not depend on the seed, so one run each, at bt's rank and Just rate.
    */
   function comboBoosts(session, m, bt, scoreId, keys, support, idle, entry) {
+    const known = entry ? [...entry.b.keys()] : [];
+    return comboBoostsWith(session, comboContext(m, keys.concat(known), support, idle), bt, scoreId, keys, entry);
+  }
+
+  /** comboBoosts in two steps, the second without the master data (worker helpers): what its hosts take from it. */
+  function comboContext(m, keys, support, idle) {
+    const top = m.gekisouSupportSkillMaxLevel.get(support) || 1;
+    const target = conditionTarget(m, support, top);
+    const rows = {};
+    for (const id of [idle, ...keys.map((k) => Number(k.split(":")[0]))]) {
+      const row = m.gekisouSkills.get(id);
+      rows[id] = { missionType: row._gekisouMissionType, categories: row._skillCategories || [] };
+    }
+    return {
+      justTypes: m.justTypes, support, top, idle, rows,
+      bandId: target ? target._bandID || 0 : 0, characterId: target ? target._characterID || 0 : 0,
+    };
+  }
+
+  function comboBoostsWith(session, ctx, bt, scoreId, keys, entry) {
     const out = entry || { b: new Map(), s: [0, 0], sKey: null };
     const todo = keys.filter((k) => !out.b.has(k));
     if (!todo.length && out.sKey && keys.every((k) => (out.b.get(k) || [0])[0] <= (out.b.get(out.sKey) || [0])[0])) return out;
-    const run = chartRunner(session, scoreId, { ranks: [bt.rank, bt.rank, bt.rank], justRate: bt.justRate, justTypes: m.justTypes });
-    const top = m.gekisouSupportSkillMaxLevel.get(support) || 1;
-    const target = conditionTarget(m, support, top);
+    const run = chartRunner(session, scoreId, { ranks: [bt.rank, bt.rank, bt.rank], justRate: bt.justRate, justTypes: ctx.justTypes });
+    const { support, top, idle } = ctx;
     const empty = {
       liveSkill: null, supportSkills: [], bandId: 0, characterId: 0, cardType: 0, tagIds: [], liveSkillCategories: [],
       gekisouSkillCategories: [], gekisouMissionType: 0, gekisouSkill: null, gekisouSupportSkills: [],
     };
     const host = (gk, match, sup) => {
-      const row = m.gekisouSkills.get(gk[0]);
+      const row = ctx.rows[gk[0]];
       return {
-        ...empty, bandId: match && target ? target._bandID || 0 : 0, characterId: match && target ? target._characterID || 0 : 0,
-        gekisouSkill: gk, gekisouMissionType: row._gekisouMissionType, gekisouSkillCategories: row._skillCategories || [],
+        ...empty, bandId: match ? ctx.bandId : 0, characterId: match ? ctx.characterId : 0,
+        gekisouSkill: gk, gekisouMissionType: row.missionType, gekisouSkillCategories: row.categories,
         gekisouSupportSkills: sup ? [[support, top]] : [],
       };
     };
@@ -440,8 +472,9 @@
   }
 
   const api = {
-    ORDERS, performers, gekisouRequest, orderScores, chartRunner, meanScore, snapSkillRates, gekisouLevelFactors, gekisouSupportLevelFactors,
-    comboBoosts, luckSeeds, loadReplay,
+    ORDERS, performers, gekisouRequest, orderScores, chartRunner, meanScore, snapSkillRates, snapSkillJobs, measureSnapJobs,
+    gekisouLevelFactors, gekisouSupportLevelFactors,
+    comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Simulate = api;

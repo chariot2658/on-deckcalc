@@ -641,30 +641,44 @@
   /**
    * DP over snaps assigning each to at most one of the five slots. Keeps, per filled-slot mask, the states that no
    * other matches or beats in point bonus, item bonus, pair rate and snap power. Returns the final states kept the
-   * same way. A snap that five others match or beat in bonuses, and in power and pair rate on every slot, is skipped:
-   * one of those five is always free to take its place. `X` (or null): X[slot][snap] = the snap's pair rate with that
+   * same way. A snap that five others match or beat on a slot (in bonuses, and in power and pair rate there) does not
+   * go to that slot: one of those five is always free to take its place. `X` (or null): X[slot][snap] = the snap's pair rate with that
    * slot's member (the score objective: its snap skills' and Gekisou support skills' score per unit of power on the
    * chart; points on a random song: supportMeans); a state's `x` sums them.
    */
   function snapStates(G, snapPoint, snapItem, nSnaps, X) {
-    const atLeast = (k, j) => {
-      if (snapPoint[k] < snapPoint[j] || snapItem[k] < snapItem[j]) return false;
-      for (let i = 0; i < 5; i++) if (G[i][k] < G[i][j] || (X && X[i][k] < X[i][j])) return false;
-      return true;
-    };
+    const atLeast = (i, k, j) => snapPoint[k] >= snapPoint[j] && snapItem[k] >= snapItem[j] && G[i][k] >= G[i][j] && (!X || X[i][k] >= X[i][j]);
+    const slotOk = [0, 1, 2, 3, 4].map(() => new Uint8Array(nSnaps));
     const useful = [];
     for (let j = 0; j < nSnaps; j++) {
-      let n = 0;
-      for (let k = 0; k < nSnaps && n < 5; k++) {
-        if (k !== j && atLeast(k, j) && (k < j || !atLeast(j, k))) n++;
+      let any = false;
+      for (let i = 0; i < 5; i++) {
+        let n = 0;
+        for (let k = 0; k < nSnaps && n < 5; k++) {
+          if (k !== j && atLeast(i, k, j) && (k < j || !atLeast(i, j, k))) n++;
+        }
+        if (n < 5) slotOk[i][j] = 1;
+        any = any || n < 5;
       }
-      if (n < 5) useful.push(j);
+      if (any) useful.push(j);
     }
     // Pareto front in (pt, it, x, power): what the callers rank states by is monotone in all four, and a dominated
-    // partial state stays dominated whatever snaps are added to it. Ties keep the earlier state.
+    // partial state stays dominated whatever snaps are added to it. Ties keep the earlier state. Without bonuses (the
+    // score objective) the front is in (x, power) alone: one sweep down the power order.
+    const flat = snapPoint.every((p) => p === 0) && snapItem.every((p) => p === 0);
     const front = (list) => {
       list.sort((a, b) => b.power - a.power || b.pt - a.pt || b.it - a.it || b.x - a.x);
       const kept = [];
+      if (flat) {
+        let x = -Infinity;
+        for (const st of list) {
+          if (st.x > x) {
+            kept.push(st);
+            x = st.x;
+          }
+        }
+        return kept;
+      }
       for (const st of list) if (!kept.some((k) => k.pt >= st.pt && k.it >= st.it && k.x >= st.x)) kept.push(st);
       return kept;
     };
@@ -675,7 +689,7 @@
       for (let mask = 0; mask < 32; mask++) {
         for (const st of states[mask]) {
           for (let i = 0; i < 5; i++) {
-            if (mask & (1 << i)) continue;
+            if (mask & (1 << i) || !slotOk[i][j]) continue;
             next[mask | (1 << i)].push({
               pt: st.pt + snapPoint[j], it: st.it + snapItem[j], x: X ? st.x + X[i][j] : 0, power: st.power + G[i][j], pick: { i, j, prev: st.pick },
             });
@@ -685,6 +699,43 @@
       states = next.map((b, mask) => (b.length > states[mask].length ? front(b) : b));
     }
     return front([].concat(...states));
+  }
+
+  /**
+   * The most that distinct snaps add to five slots, W[slot][snap] each (a slot may stay empty): a DP over filled-slot
+   * masks, the snap DP without its states. Bounds use it.
+   */
+  function bestAssignment(W, nSnaps) {
+    // A slot takes one of its five largest weights (snapStates' argument), so only those snaps enter the DP.
+    const use = new Uint8Array(nSnaps);
+    for (let i = 0; i < 5; i++) {
+      const top = [];
+      for (let j = 0; j < nSnaps; j++) {
+        if (top.length < 5) top.push(j);
+        else {
+          let lo = 0;
+          for (let t = 1; t < 5; t++) if (W[i][top[t]] < W[i][top[lo]]) lo = t;
+          if (W[i][j] > W[i][top[lo]]) top[lo] = j;
+        }
+      }
+      for (const j of top) use[j] = 1;
+    }
+    const best = new Float64Array(32);
+    for (let j = 0; j < nSnaps; j++) {
+      if (!use[j]) continue;
+      for (let mask = 31; mask >= 0; mask--) {
+        const b = best[mask];
+        for (let i = 0; i < 5; i++) {
+          const bit = 1 << i;
+          if (mask & bit) continue;
+          const x = b + W[i][j];
+          if (x > best[mask | bit]) best[mask | bit] = x;
+        }
+      }
+    }
+    let a = 0;
+    for (let mask = 0; mask < 32; mask++) if (best[mask] > a) a = best[mask];
+    return a;
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -816,6 +867,60 @@
     }
     const skills = s.supportSkills.map((x) => x.join(":")).join(",");
     return `${perCard ? "c" + v.id + ":" + v.liveSkillLevel : v.liveSkillId + ":" + v.liveSkillLevel}|${skills}|${mask}`;
+  }
+
+  /**
+   * Pairings that score alike (snapSkillKey's member part and the same effect rows acting) share a class: the effect
+   * rows of the snap's skills, without their ids. A condition group of member conditions (5000) alone is decided here
+   * (as the replay does: any condition set whose conditions all hold) and becomes T or F, a row whose condition or
+   * trigger group is F never acting; a group without member conditions stays by id, and one mixing them keeps the
+   * pairing's own key. null as for snapSkillKey.
+   */
+  function snapSkillClass(m, v, s) {
+    const key = snapSkillKey(m, v, s);
+    if (!key) return null;
+    // true/false: a member condition group that holds or not; "keep": no member condition; null: mixed.
+    const decide = (g) => {
+      if (!(g > 0)) return "keep";
+      let member = false;
+      let other = false;
+      let any = false;
+      for (const cs of m.conditionSets.get(g) || []) {
+        let all = true;
+        let items = 0;
+        for (const cid of cs._conditionIds) {
+          const c = m.skillConditions.get(cid);
+          if (!c || c._conditionType === 0) continue;
+          items++;
+          if (c._conditionType !== 5000) {
+            other = true;
+            continue;
+          }
+          member = true;
+          if (matchesAny(v, targetsOf(m, c._conditionTargetIDs)) !== c._isPositive) all = false;
+        }
+        if (items && all) any = true;
+      }
+      if (!member) return "keep";
+      return other ? null : any;
+    };
+    const rows = [];
+    for (const [id, level] of s.supportSkills || []) {
+      for (const e of m.supportSkillEffects.get(id + ":" + level) || []) {
+        if (!SNAP_SCORE_EFFECTS.has(e._skillEffectType)) continue;
+        const { _id, _supportSkillID, _level, ...rest } = e;
+        let acts = true;
+        for (const f of ["_skillConditionGroup", "_skillTriggerConditionGroup", "_skillReleaseConditionGroup"]) {
+          const d = decide(e[f]);
+          if (d === null) return key;
+          if (d === "keep") continue;
+          if (!d && f !== "_skillReleaseConditionGroup") acts = false;
+          rest[f] = d ? "T" : "F";
+        }
+        if (acts) rows.push(JSON.stringify(rest));
+      }
+    }
+    return key.slice(0, key.indexOf("|")) + "|" + rows.sort().join(";");
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -1055,8 +1160,9 @@
   /**
    * What a score-objective search plays, for Simulate.snapSkillRates to measure first: per song, the charts whose
    * score per unit of power with the roster's five best skills is within `margin` of the song's best chart (a lower
-   * difficulty seldom scores more), and one owned member and snap of every kind of pairing (snapSkillKey).
-   * Returns {scoreIds, pairs: [{key, memberKey (the key's member part), member, snap}]} (member and snap as owned).
+   * difficulty seldom scores more), and one owned member and snap of every class of pairings (snapSkillClass), with the
+   * keys (snapSkillKey) of the class. Returns {scoreIds, pairs: [{key, keys, memberKey (the key's member part), member,
+   * snap}]} (member and snap as owned).
    */
   function scoreScope(input, margin = 0.05) {
     const m = input.master;
@@ -1077,11 +1183,15 @@
       const best = Math.max(...list.map((x) => x[1]));
       for (const [c, r] of list) if (r >= (1 - margin) * best) scoreIds.push(c.scoreId);
     }
-    const pairs = new Map();
+    const pairs = new Map(); // class -> pair
     for (const [mo, v] of members) {
       for (const [so, s] of snaps) {
         const key = snapSkillKey(m, v, s);
-        if (key && !pairs.has(key)) pairs.set(key, { key, memberKey: key.slice(0, key.indexOf("|")), member: mo, snap: so });
+        if (!key) continue;
+        const cls = snapSkillClass(m, v, s);
+        if (!pairs.has(cls)) pairs.set(cls, { key, keys: [], memberKey: key.slice(0, key.indexOf("|")), member: mo, snap: so });
+        const p = pairs.get(cls);
+        if (!p.keys.includes(key)) p.keys.push(key);
       }
     }
     return { scoreIds, pairs: [...pairs.values()] };
@@ -1226,8 +1336,9 @@
         const row = m.t.MasterChallengeMusic.find((r) => r._eventId === event._id && r._liveMusicId === c.musicId);
         if (row && row._musicType) mv.musicType = row._musicType;
       }
-      const key = mv.musicType + "|" + mv.tags.join(",") + (scoreMode && pairX ? "|" + c.scoreId : "");
-      if (!groups.has(key)) groups.set(key, { music: mv, charts: [] });
+      const musicKey = mv.musicType + "|" + mv.tags.join(",");
+      const key = musicKey + (scoreMode && pairX ? "|" + c.scoreId : "");
+      if (!groups.has(key)) groups.set(key, { music: mv, musicKey, charts: [] });
       groups.get(key).charts.push(c);
     }
 
@@ -1344,17 +1455,53 @@
       }
       return row[j];
     };
-    const snapKeys = new Map(); // member view -> snapSkillKey per snap
-    const snapRatesOf = (v, c, g = null) => {
-      const i = chartIdx.get(c);
-      if (snapSkill && !snapKeys.has(v)) snapKeys.set(v, snaps.map((s) => snapSkillKey(m, v, s)));
-      const keys = snapSkill ? snapKeys.get(v) : null;
-      const rates = snapSkill ? snapSkill.byScore.get(c.scoreId) : null;
-      return Float64Array.from(snaps, (_, j) => {
-        const x = keys && keys[j] ? rates.get(keys[j]) || 0 : 0;
-        const sup = pairPts ? pairOf(v, j, g) : gkSup ? supOf(v, j, g) : null;
-        return sup ? x + sup[i] : x;
-      });
+    // Measured snap skill rates of member v per chart of chartList (per snap), or null without them.
+    const snapX = new Map();
+    const snapXOf = (v) => {
+      if (!snapSkill) return null;
+      if (!snapX.has(v)) {
+        const keys = snaps.map((s) => snapSkillKey(m, v, s));
+        snapX.set(v, chartList.map((c) => {
+          const rates = snapSkill.byScore.get(c.scoreId);
+          return Float64Array.from(keys, (k) => (k ? rates.get(k) || 0 : 0));
+        }));
+      }
+      return snapX.get(v);
+    };
+    const supportOf = (v, j, g) => (pairPts ? pairOf(v, j, g) : gkSup ? supOf(v, j, g) : null);
+    // Member v's pair rates (per snap) on the charts of chartList at indices idx, in a deck of boost profile g.
+    const snapRatesOf = (v, idx, g = null) => {
+      const xs = snapXOf(v);
+      const out = idx.map(() => new Float64Array(snaps.length));
+      for (let j = 0; j < snaps.length; j++) {
+        const sup = supportOf(v, j, g);
+        idx.forEach((i, k) => {
+          const x = xs ? xs[i][j] : 0;
+          out[k][j] = sup ? x + sup[i] : x;
+        });
+      }
+      return out;
+    };
+    // Member v's best pairing (at least 0) on each chart of chartList, in a deck of boost profile g: bounds.
+    const bestPairs = new Map(); // profile key -> member view -> Float64Array
+    const bestPairOf = (v, g = null) => {
+      const gk = g ? g.key : "";
+      if (!bestPairs.has(gk)) bestPairs.set(gk, new Map());
+      const byV = bestPairs.get(gk);
+      if (!byV.has(v)) {
+        const out = new Float64Array(chartList.length);
+        const xs = snapXOf(v);
+        for (let j = 0; j < snaps.length; j++) {
+          const sup = supportOf(v, j, g);
+          for (let i = 0; i < out.length; i++) {
+            const x = xs ? xs[i][j] : 0;
+            const r = sup ? x + sup[i] : x;
+            if (r > out[i]) out[i] = r;
+          }
+        }
+        byV.set(v, out);
+      }
+      return byV.get(v);
     };
 
     // Candidate member cards: per character, drop a card another card beats in every respect that feeds the deck: event
@@ -1365,8 +1512,9 @@
     const statBase = new Map(members.map((v) => [v, memberBase(m, v, ctx).map((b, i) => b + pctOf(b, v.bandItemPct[i]))]));
     const baseSum = new Map(members.map((v) => [v, statBase.get(v).reduce((a, b) => a + b, 0)]));
     const skillsOf = new Map(members.map((v) => [v, Float64Array.from(chartList, (c) => skillRateOf(v, c))]));
-    const snapsOf = pairX ? new Map(members.map((v) => [v, chartList.map((c) => snapRatesOf(v, c, gMax))])) : null;
-    const snapsOf0 = pairX && gMax ? new Map(members.map((v) => [v, chartList.map((c) => snapRatesOf(v, c, null))])) : null;
+    const everyChart = chartList.map((_, i) => i);
+    const snapsOf = pairX ? new Map(members.map((v) => [v, snapRatesOf(v, everyChart, gMax)])) : null;
+    const snapsOf0 = pairX && gMax ? new Map(members.map((v) => [v, snapRatesOf(v, everyChart, null)])) : null;
     const sameList = (x, y) => x.length === y.length && x.every((e) => y.includes(e));
     const leaderAsGood = (b, a) =>
       !isUsefulLeader(a) || (a.leaderSkillId === b.leaderSkillId && b.leaderSkillLevel >= a.leaderSkillLevel);
@@ -1617,7 +1765,8 @@
     // Score mode: the payoff is the expected score, linear in power, so there are no breakpoints to split buckets at (and
     // with no event bonuses one bucket holds every set). Each group sorts the sets into bins by powBound once
     // (binSets, a counting sort), and walkScore visits the bins from the top, bounding a bin by its largest powBound at
-    // T's best rate, then the sets by ubOf.
+    // T's best rate, then the sets by ubOf, and a set ubOf leaves by `refine` (or null), a tighter bound, before it is
+    // visited.
     const NB = 4096;
     let bins = null;
     let binPow = null;
@@ -1649,7 +1798,7 @@
       for (let s = 0; s < nSets; s++) binOrder[fill[binOf(binPow[s])]++] = s;
       return { start, max, order: binOrder };
     }
-    function walkScore(T, bMax, powBound, ubOf, threshold, visit) {
+    function walkScore(T, bMax, powBound, ubOf, threshold, visit, refine = null) {
       const { start, max, order } = bins;
       const rMax = T.rate.get(T.best);
       const sets = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.e < y.e));
@@ -1673,6 +1822,11 @@
         if (!sets.size) break;
         const x = sets.pop();
         if (x.key < threshold()) break;
+        if (refine && !x.refined) {
+          const key = Math.min(x.key, refine(x.s));
+          if (key >= threshold()) sets.push({ key, s: x.s, e: x.e, refined: true });
+          continue;
+        }
         visit(x.s);
       }
     }
@@ -1983,12 +2137,11 @@
     // Live skill score per unit of power of each candidate on each chart of `list`; a set adds its five. The bound takes,
     // per chart, the five largest gains of any candidates.
     // With Gekisou, a member's Gekisou skill adds its own gain (whatever the performance order).
-    // With pair rates (snap skills, Gekisou support skills), a bound also adds each member's best snap pairing at the
-    // largest boost profile (`setBound`; `maxSkill` includes them) and `snapRates(c, g)` gives member view -> rates per
+    // With pair rates (snap skills, Gekisou support skills), a bound also adds each member's best snap pairing: a set's
+    // at its own boost profile (`setBound`), `maxSkill` at the largest. `snapRates(c, g)` gives member view -> rates per
     // snap on chart c in a deck of boost profile g.
     function skillRates(list) {
       const skillOf = new Map();
-      const boundOf = new Map();
       if (sw) {
         for (const v of allCand) {
           const terms = liveSkillTerms(m, v, sw.kinds);
@@ -2004,21 +2157,34 @@
         }
       }
       // Pair rates per chart of list (member view -> rates per snap) in a deck of boost profile g; bounds take gMax.
+      const listIdx = list.map((c) => chartIdx.get(c));
       const ratesAt = new Map();
       const snapRatesAt = (g) => {
         const gk = g ? g.key : "";
-        if (!ratesAt.has(gk)) ratesAt.set(gk, list.map((c) => new Map(allCand.map((v) => [v, snapRatesOf(v, c, g)]))));
+        if (!ratesAt.has(gk)) {
+          const byChart = list.map(() => new Map());
+          for (const v of allCand) snapRatesOf(v, listIdx, g).forEach((r, k) => byChart[k].set(v, r));
+          ratesAt.set(gk, byChart);
+        }
         return ratesAt.get(gk);
       };
-      const snapByChart = pairX ? snapRatesAt(gMax) : null;
-      if (pairX) {
-        for (const v of allCand) {
-          const a = Float64Array.from(skillOf.get(v) || new Float64Array(list.length));
-          list.forEach((c, i) => (a[i] += Math.max(0, ...snapByChart[i].get(v))));
-          boundOf.set(v, a);
+      // Member view -> skill rates plus the best pairing per chart, in a deck of boost profile g.
+      const boundAt = new Map();
+      const boundsAt = (g) => {
+        const gk = g ? g.key : "";
+        if (!boundAt.has(gk)) {
+          const out = new Map();
+          for (const v of allCand) {
+            const a = Float64Array.from(skillOf.get(v) || new Float64Array(list.length));
+            const best = bestPairOf(v, g);
+            for (let i = 0; i < a.length; i++) a[i] += best[listIdx[i]];
+            out.set(v, a);
+          }
+          boundAt.set(gk, out);
         }
-      }
-      const bounds = pairX ? boundOf : skillOf;
+        return boundAt.get(gk);
+      };
+      const bounds = pairX ? boundsAt(gMax) : skillOf;
       const anySkill = bounds.size > 0;
       const maxSkill = new Float64Array(list.length);
       if (anySkill) {
@@ -2037,7 +2203,8 @@
         return a;
       };
       const snapRates = pairX ? (c, g = null) => snapRatesAt(g)[list.indexOf(c)] : null;
-      return { anySkill, maxSkill, setSkill: sum(skillOf), setBound: sum(bounds), snapRates };
+      const setBound = pairX ? (vs) => sum(boundsAt(boostOf(vs)))(vs) : sum(skillOf);
+      return { anySkill, maxSkill, setSkill: sum(skillOf), setBound, snapRates };
     }
 
     let evaluated = 0;
@@ -2117,7 +2284,7 @@
       const order = new Int32Array(nSets);
       for (let s = 0; s < nSets; s++) order[fill[binOf(cheap[s])]++] = s;
       const setVs = (s) => [0, 1, 2, 3, 4].map((i) => allCand[setV[s * 5 + i]]);
-      // A set's own bound: its skills and each member's best pairing (at the strongest gauge) at its power bound per group.
+      // A set's own bound: its skills and each member's best pairing (at its boost profile) at its power bound per group.
       const ubOf = (s) => {
         const b = sk.anySkill ? sk.setBound(setVs(s)) : null;
         const pg = new Float64Array(nG);
@@ -2137,6 +2304,63 @@
         return xs;
       };
       const ratesOf = (vs) => (sk.snapRates ? list.map((c) => sk.snapRates(c, boostOf(vs))) : null);
+      // A tighter bound for a set ubOf could not rule out, where each snap goes to one slot (ubOf gives every member its
+      // best pairing): a deck of power F + P plays sum_k w_k (F_k + P) (c_k + x_k), with F_k at most the set's leader term
+      // bound (Fb), P at most the best snap per slot (Pmax) and x_k the pairs' rates, so it is at most sum_k w_k Fb_k c_k
+      // plus the best assignment of weights C G[i][j] + sum_k w_k (Fb_k + Pmax) X_k[i][j] (bestAssignment). The pair part
+      // comes from wRatesOf: per boost profile and member, R[G nJ + j] = sum over the charts k of song group G of
+      // w_k max(0, X_k[j]), and R[nG nJ + j] their sum over the groups.
+      const wRates = new Map(); // profile key -> member view -> R
+      const wRatesOf = (v, g, xr) => {
+        const gk = g ? g.key : "";
+        if (!wRates.has(gk)) wRates.set(gk, new Map());
+        const byV = wRates.get(gk);
+        if (!byV.has(v)) {
+          const nJ = snaps.length;
+          const R = new Float64Array((nG + 1) * nJ);
+          for (let k = 0; k < nS; k++) {
+            const r = xr[k].get(v);
+            const o = gOf[k] * nJ;
+            for (let j = 0; j < nJ; j++) if (r[j] > 0) R[o + j] += w[k] * r[j];
+          }
+          for (let G = 0; G < nG; G++) for (let j = 0; j < nJ; j++) R[nG * nJ + j] += R[G * nJ + j];
+          byV.set(v, R);
+        }
+        return byV.get(v);
+      };
+      const refine = (s) => {
+        const vs = setVs(s);
+        const skill = sk.anySkill ? sk.setSkill(vs) : null;
+        let pMax = 0;
+        for (const v of vs) pMax += bestG.get(v);
+        const fb = new Float64Array(nG);
+        for (let g = 0; g < nG; g++) fb[g] = powB(g, s) - pMax;
+        let base = 0;
+        let C = 0;
+        for (let k = 0; k < nS; k++) {
+          const c = list[k].perPower + (skill ? skill[k] : 0);
+          base += w[k] * fb[gOf[k]] * c;
+          C += w[k] * c;
+        }
+        const xr = ratesOf(vs);
+        const profile = boostOf(vs);
+        const nJ = snaps.length;
+        const W = vs.map((v) => {
+          const g = Gm.get(v);
+          const row = new Float64Array(nJ);
+          for (let j = 0; j < nJ; j++) row[j] = C * g[j];
+          if (xr) {
+            const R = wRatesOf(v, profile, xr);
+            for (let G = 0; G <= nG; G++) {
+              const f = G < nG ? fb[G] : pMax;
+              const o = G * nJ;
+              for (let j = 0; j < nJ; j++) row[j] += f * R[o + j];
+            }
+          }
+          return row;
+        });
+        return base + bestAssignment(W, nJ);
+      };
 
       function exact(s) {
         evaluated++;
@@ -2214,6 +2438,11 @@
         if (!heap.size) break;
         const x = heap.pop();
         if (x.key < threshold()) break;
+        if (!x.refined) {
+          const key = Math.min(x.key, refine(x.s));
+          if (key >= threshold()) heap.push({ key, s: x.s, e: x.e, refined: true });
+          continue;
+        }
         const r = exact(x.s);
         r.e = x.e;
         found.push(r);
@@ -2545,9 +2774,20 @@
       };
     }
 
-    const found = [];
-    const songs = [];
-    for (const group of groups.values()) {
+    // Groups of one music type and tags (with pair rates the score objective's groups are single charts) are visited one
+    // after another: their sets' power bounds, bins and best leaders are the same. Results keep the groups' order.
+    const groupList = [...groups.values()];
+    const firstOf = new Map();
+    groupList.forEach((g, i) => firstOf.has(g.musicKey) || firstOf.set(g.musicKey, i));
+    const visitOrder = groupList.map((_, i) => i).sort((a, b) => firstOf.get(groupList[a].musicKey) - firstOf.get(groupList[b].musicKey) || a - b);
+    const foundBy = groupList.map(() => []);
+    const songsBy = groupList.map(() => []);
+    let lastMusic = null;
+    let bMax = null;
+    for (const gi of visitOrder) {
+      const group = groupList[gi];
+      const sameMusic = group.musicKey === lastMusic;
+      lastMusic = group.musicKey;
       const music = group.music;
       const gc = group.charts;
       const { anySkill, maxSkill, setSkill, setBound, snapRates } = skillRates(gc);
@@ -2566,7 +2806,7 @@
       const fNo = Int32Array.from(allCand, (v) => slotF(m, v, [0, 0, 0], music, ctx));
 
       // Exact best leader F of set s (cached in bfF/bfL): simple leaders from LT, others exactly.
-      bfF.fill(-1);
+      if (!sameMusic) bfF.fill(-1);
       const bestF = (s) => {
         if (bfF[s] < 0) {
           const o = s * 5;
@@ -2602,16 +2842,18 @@
         const o = s * 5;
         return setSU[s] + fNo[setV[o]] + fNo[setV[o + 1]] + fNo[setV[o + 2]] + fNo[setV[o + 3]] + fNo[setV[o + 4]];
       };
-      const bMax = new Float64Array(B);
-      if (scoreMode) bins = binSets(powBound);
-      else {
-        for (let b = 0; b < B; b++) {
-          let mx = -Infinity;
-          for (let s = bStart[b]; s < bEnd[b]; s++) {
-            const p = powBound(s);
-            if (p > mx) mx = p;
+      if (!sameMusic) {
+        bMax = new Float64Array(B);
+        if (scoreMode) bins = binSets(powBound);
+        else {
+          for (let b = 0; b < B; b++) {
+            let mx = -Infinity;
+            for (let s = bStart[b]; s < bEnd[b]; s++) {
+              const p = powBound(s);
+              if (p > mx) mx = p;
+            }
+            bMax[b] = mx;
           }
-          bMax[b] = mx;
         }
       }
       // Score mode bounds a set by its own skills (and each member's best snap pairing) on T's charts (choose's
@@ -2631,6 +2873,28 @@
           }
         : (s, T) => upperBound(setOf(s), bestF(s), T);
       const walk = scoreMode ? walkScore : bestFirst;
+      // With pair rates (one chart per group), ubOf gives every member its best pairing; `refine` gives each snap to one
+      // slot: a deck of power F + P scores share (F + P) (c + x), at most share (F c + the best assignment of
+      // c G[i][j] + (F + Pmax) X[i][j]), Pmax the best snap per slot.
+      const refine = scoreMode && Xm
+        ? (s) => {
+            const so = setOf(s);
+            const bf = bestF(s);
+            const c = gc[0];
+            const c0 = c.perPower + (anySkill ? setSkill(so.vs)[0] : 0);
+            const xm = Xm(boostOf(so.vs));
+            const mult = bf.f + so.g;
+            const nJ = snaps.length;
+            const W = so.vs.map((v) => {
+              const g = Gm.get(v);
+              const x = xm.get(v);
+              const row = new Float64Array(nJ);
+              for (let j = 0; j < nJ; j++) row[j] = c0 * g[j] + (x[j] > 0 ? mult * x[j] : 0);
+              return row;
+            });
+            return shares(c).mean * (bf.f * c0 + bestAssignment(W, nJ));
+          }
+        : null;
 
       const groupFound = [];
       let kth = -Infinity;
@@ -2644,8 +2908,8 @@
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
         if (groupFound.length > topK) groupFound.length = topK;
         if (groupFound.length >= topK) kth = groupFound[topK - 1].score;
-      });
-      found.push(...groupFound);
+      }, refine);
+      foundBy[gi].push(...groupFound);
 
       // Song comparison: the best deck of every song of the group, from the same leader terms. The set with the
       // highest bound gives a floor; only sets whose bound reaches it can beat it.
@@ -2656,6 +2920,11 @@
           bySong.get(c.musicId).push(i);
         });
         for (const idx of bySong.values()) {
+          // A group of one song (the score objective with pair rates: one chart per group): the group's walk found it.
+          if (bySong.size === 1 && groupFound.length) {
+            songsBy[gi].push(groupFound[0]);
+            continue;
+          }
           const list = idx.map((i) => gc[i]);
           const pick = (a) => Float64Array.from(idx, (i) => a[i]);
           const srt = rankTable(list, anySkill ? pick(maxSkill) : null, stochastic);
@@ -2675,10 +2944,12 @@
             const d = evaluate(so, bf, ti.mean || ti.bound, music, Xm, ti.px);
             if (!best || d.score > best.score || (d.score === best.score && d.power > best.power)) best = d;
           });
-          songs.push(best);
+          songsBy[gi].push(best);
         }
       }
     }
+    const found = foundBy.flat();
+    const songs = songsBy.flat();
     found.sort((a, b) => b.score - a.score || b.power - a.power);
     const seen = new Set();
     const results = [];
@@ -3220,7 +3491,7 @@
     charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
     battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
-    gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, scoreScope, roughSnapRate,
+    gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, snapSkillClass, scoreScope, roughSnapRate,
     luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, gekisouSongType, gekisouSongGroups, roomPayoff,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
