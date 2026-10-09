@@ -158,6 +158,11 @@ node test/score.test.js    # 最高分數：快照技能的量法，最佳隊伍
 node test/coverage.test.js # 四個區服的每張卡的技能都有算到（新卡用了新技能時會失敗）
 ```
 
+GitHub Actions 的「資料檢查」（`.github/workflows/data-check.yml`）用最新的 masterdata 和 music-data 跑上面全部的測試：
+push、PR 時跑，另外每小時看一次這份程式、masterdata、music-data 有沒有變，有變就測一次（同一組資料只測一次），
+失敗時 GitHub 會寄信。masterdata 更新後 nnnotes 要 1.5～2 小時重建 music-data，這段期間新技能還沒量、測試必然失敗，
+所以 music-data 還沒追上最新的台服 masterdata 時先等（最多 6 小時，`test/ci-wait.js`）；手動執行可以勾選「照測」。
+
 檔案：`engine.js`（計算核心，瀏覽器與 Node 共用）、`data.js`（下載與快取）、`worker.js`（背景搜尋與模擬）、
 `simulate.js`（呼叫 ournotes-deck 的 WASM 做整場模擬，瀏覽器與 Node 共用）、
 `recognize.js`（截圖辨識，瀏覽器與 Node 共用，輸入是 `{width, height, data}` RGBA）、`app.js`（介面）。
