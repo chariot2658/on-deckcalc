@@ -209,16 +209,24 @@
     setLoading("讀取 masterdata 版本…");
     try {
       if (force) await Data.clearAll();
-      const [mst, md] = await Promise.all([
-        Data.loadMaster(region, Engine.TABLES, (d, n) => setLoading(`下載 masterdata… ${d}/${n}`)),
-        Data.loadMusicData(force).catch((e) => {
+      const loadMd = (maxAge) =>
+        Data.loadMusicData(force, maxAge).catch((e) => {
           console.warn(e);
           return null;
-        }),
+        });
+      let [mst, md] = await Promise.all([
+        Data.loadMaster(region, Engine.TABLES, (d, n) => setLoading(`下載 masterdata… ${d}/${n}`)),
+        loadMd(),
       ]);
       setLoading("整理資料…");
       const lang = (Data.REGIONS[region] || Data.REGIONS["hk-tw-mo"]).text;
       state.master = Engine.buildMaster(mst.raw, lang);
+      // nnnotes publishes a new song's chart data a while after the master lists it (a new event's song), so while
+      // music-data lacks a song, check it again hourly instead of daily.
+      if (md && !force) {
+        const have = new Set((md.songs || []).map((x) => x.id));
+        if (state.master.t.MasterLiveMusic.some((mu) => !have.has(mu._id))) md = (await loadMd(3600e3)) || md;
+      }
       state.version = mst;
       state.perPower = md ? Engine.perPowerFromMusicData(md) : new Map();
       state.lengths = md ? Engine.chartLengthsFromMusicData(md) : new Map();
@@ -880,8 +888,8 @@
     if (hasSongs) renderSongs(out);
   }
 
-  // Owned cards with skills this search leaves out (Engine.skillGaps), as a warning line, or "". Every card released
-  // so far is covered; this is for new ones.
+  // What this search leaves out, as warning lines, or "": owned cards' skills (Engine.skillGaps; every card released
+  // so far is covered, this is for new ones) and challenge songs music-data has no charts for yet.
   const GAP_TEXT = {
     "leader:unknown": () => "隊長技能有新的效果或條件，綜合力沒算到",
     "live:unmeasured": () => "演出技能有 music-data 沒量過的效果，沒算",
@@ -911,7 +919,19 @@
     };
     scan("member", Object.keys(state.roster.members));
     scan("snap", Object.keys(state.roster.snaps));
-    return items.length ? `<span class="warn">有卡片的技能沒計入計算，用到這些卡的隊伍預估可能偏低：${items.join("；")}。</span>` : "";
+    const notes = [];
+    if (items.length) notes.push(`<span class="warn">有卡片的技能沒計入計算，用到這些卡的隊伍預估可能偏低：${items.join("；")}。</span>`);
+    // A new event's new song can be a challenge song before music-data has its charts: the search skips it.
+    const missing = out.input.mode === "challenge"
+      ? m.t.MasterChallengeMusic.filter((r) => r._eventId === out.eventId).map((r) => r._liveMusicId).filter((id) => {
+        const mu = m.musics.get(id);
+        return !mu || !["_easyID", "_normalID", "_hardID", "_expertID"].some((k) => state.perPower.has(mu[k]));
+      })
+      : [];
+    if (missing.length) {
+      notes.push(`<span class="warn">挑戰曲${missing.map((id) => `「${esc(musicTitle(id))}」`).join("、")}還沒有譜面資料（nnnotes 的 music-data 通常在 masterdata 更新後幾小時內補上），這次沒列入計算。補上後按「更新資料」重新計算。</span>`);
+    }
+    return notes.join("<br>");
   }
 
   // The explanation above the score objective's results.

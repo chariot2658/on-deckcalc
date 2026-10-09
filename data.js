@@ -68,11 +68,11 @@
     return { ...info, raw };
   }
 
-  /** music-data.json, refreshed once a day (or when forced). */
-  async function loadMusicData(force) {
+  /** music-data.json, refreshed once a day (or after `maxAge` ms, or when forced). */
+  async function loadMusicData(force, maxAge = MUSIC_DATA_MAX_AGE) {
     const stamp = Number(safeGet("deckcalc:musicDataAt") || 0);
     const cacheName = "deckcalc-musicdata";
-    if (hasCache && (force || Date.now() - stamp > MUSIC_DATA_MAX_AGE)) {
+    if (hasCache && (force || Date.now() - stamp > maxAge)) {
       await caches.delete(cacheName);
       safeSet("deckcalc:musicDataAt", String(Date.now()));
     }
