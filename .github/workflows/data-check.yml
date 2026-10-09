@@ -1,0 +1,114 @@
+name: 資料檢查
+
+# Runs the tests on the latest masterdata and music-data, laid out as in the workspace (deckcalc/, moenotes-masterdata/,
+# data/), so a game update the calculator mishandles (a new skill, a changed table) fails here and GitHub mails it.
+# Hourly it checks whether this commit, the masterdata commit or music-data changed and tests each combination once;
+# while music-data is still being rebuilt from a new masterdata it waits (test/ci-wait.js).
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: music-data 還沒追上 masterdata 也照測
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: data-check-${{ github.ref }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 資料版本
+        id: inputs
+        run: |
+          master=$(git ls-remote https://github.com/StarMoe-org/moenotes-masterdata HEAD | cut -f1)
+          etag=$(curl -fsSI --retry 3 https://storage.bdon.moe/moenotes/music-data/music-data.json | tr -d '\r' | awk -F': ' 'tolower($1) == "etag" { print $2 }')
+          echo "masterdata $master, music-data $etag"
+          echo "master=$master" >> "$GITHUB_OUTPUT"
+          echo "key=$(printf '%s %s %s' "$GITHUB_SHA" "$master" "$etag" | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      # Scheduled runs skip a combination already tested; the others always test.
+      - name: 這組資料測過了嗎
+        id: seen
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v6
+        with:
+          path: .checked
+          key: checked-${{ steps.inputs.outputs.key }}
+          lookup-only: true
+
+      - uses: actions/checkout@v7
+        if: steps.seen.outputs.cache-hit != 'true'
+        with:
+          path: deckcalc
+      - uses: actions/checkout@v7
+        if: steps.seen.outputs.cache-hit != 'true'
+        with:
+          repository: StarMoe-org/moenotes-masterdata
+          ref: ${{ steps.inputs.outputs.master }}
+          path: moenotes-masterdata
+      - uses: actions/setup-node@v7
+        if: steps.seen.outputs.cache-hit != 'true'
+        with:
+          node-version: 22
+      - name: 下載 music-data
+        if: steps.seen.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data
+          curl -fsSL --retry 3 --compressed -o data/music-data.json https://storage.bdon.moe/moenotes/music-data/music-data.json
+      - name: music-data 追上 masterdata 了嗎
+        id: wait
+        if: steps.seen.outputs.cache-hit != 'true'
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: node deckcalc/test/ci-wait.js
+
+      - name: 下載模擬器（replay）
+        id: replay
+        if: steps.seen.outputs.cache-hit != 'true' && steps.wait.outputs.wait != 'true'
+        run: node deckcalc/test/fetch-replay.js
+      # Every test runs even when an earlier one failed.
+      - name: power.test.js（綜合力）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/power.test.js
+      - name: search.test.js（活動點數、搜尋）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/search.test.js
+      - name: coverage.test.js（每張卡的技能都有算到）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/coverage.test.js
+      - name: skills.test.js（演出技能、模擬）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/skills.test.js
+      - name: gekisou.test.js（激奏）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/gekisou.test.js
+      - name: score.test.js（最高分數）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/score.test.js
+
+      # Remembered whether the tests passed or not, so a failure mails once per combination, not hourly.
+      - name: 記下測過的資料
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        run: mkdir -p .checked && echo "${{ steps.inputs.outputs.key }}" > .checked/key
+      - uses: actions/cache/save@v6
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        with:
+          path: .checked
+          key: checked-${{ steps.inputs.outputs.key }}
