@@ -222,7 +222,7 @@ function simulateDeck(s, scoreId, power, members, snaps, gekisou) {
   if (gekisou) {
     const b = battle && battle.byScore.get(scoreId);
     const r = gekisou.rank;
-    const seeds = !b ? [0] : b.luck ? Simulate.luckSeeds(b.seeds.map((x) => x.seed), LUCK_SEEDS) : [b.seeds[0].seed];
+    const seeds = !b ? [0] : b.luck ? Simulate.luckSeeds(b.replaySeeds, LUCK_SEEDS) : [b.seeds[0].seed];
     gk = { ranks: [r, r, r], justRate: gekisou.justRate, justTypes: master.justTypes, seeds };
   }
   return Simulate.orderScores(s, scoreId, power, Simulate.performers(master, members, snaps), gk);
@@ -432,7 +432,7 @@ async function savedDecks(msg) {
     const luckOf = (sid) => !!(battle.byScore.get(sid) || {}).luck;
     const seedsOf = (sid) => {
       const b = battle.byScore.get(sid);
-      return !b ? [0] : b.luck ? Simulate.luckSeeds(b.seeds.map((x) => x.seed), SHOW_RUNS) : [b.seeds[0].seed];
+      return !b ? [0] : b.luck ? Simulate.luckSeeds(b.replaySeeds, SHOW_RUNS) : [b.seeds[0].seed];
     };
     const perfOf = (d) => Simulate.performers(
       master,

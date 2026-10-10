@@ -221,19 +221,23 @@ assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]
     return;
   }
   const gk = (sid, rank, justRate, seeds) => ({
-    ranks: [rank, rank, rank], justRate, justTypes: m.justTypes, seeds: seeds || battle.byScore.get(sid).seeds.map((x) => x.seed),
+    ranks: [rank, rank, rank], justRate, justTypes: m.justTypes, seeds: seeds || battle.byScore.get(sid).replaySeeds,
   });
   const empty = S.performers(m, [0, 0, 0, 0, 0].map(() => ({ id: -1 })), [null, null, null, null, null]);
 
   // No skills: the simulation equals the rates at any rank (the rank bonus is linear in each range's score) and at
-  // Just rate 0 or 1, on luck charts too (seed mean); between them the linear Just rate is within 0.5%.
+  // Just rate 0 or 1; between them the linear Just rate is within 0.5%. On luck charts music-data gives the expectation
+  // over the lotteries, which the mean of 64 seeds is within 0.3% of (8 seeds: 0.3% on 2026-10-10's charts).
   for (const missions of ["111", "333", "231", "222"]) {
     const song = md.songs.find((s) => s.gekisouMissions.join("") === missions);
     const sid = song.charts[3].scoreId;
+    const luck = battle.byScore.get(sid).luck;
+    const seeds = luck ? S.luckSeeds(battle.byScore.get(sid).replaySeeds, 64) : undefined;
     for (const [rank, j] of [[1, 1], [3, 1], [3, 0], [5, 0], [3, 0.5], [4, 0.7]]) {
       const model = E.battleRates(battle, rank, j).perPower.get(sid) * P;
-      const sim = S.orderScores(session, sid, P, empty, gk(sid, rank, j)).base;
-      if (j === 0 || j === 1) assert.ok(Math.abs(sim - model) < 1e-6, `${sid} rank ${rank} Just ${j}: ${sim} vs ${model}`);
+      const sim = S.orderScores(session, sid, P, empty, gk(sid, rank, j, seeds)).base;
+      if (luck) assert.ok(Math.abs(sim / model - 1) < (j === 0 || j === 1 ? 0.003 : 0.005), `${sid} rank ${rank} Just ${j}: ${sim} vs ${model}`);
+      else if (j === 0 || j === 1) assert.ok(Math.abs(sim - model) < 1e-6, `${sid} rank ${rank} Just ${j}: ${sim} vs ${model}`);
       else assert.ok(Math.abs(sim / model - 1) < 0.005, `${sid} rank ${rank} Just ${j}: ${sim} vs ${model}`);
     }
   }
@@ -438,7 +442,7 @@ assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]
     const rush = d.snaps.filter((s, i) => s && s.gekisouSupportSkills.length && E.gekisouSupportMatch(m, d.members[i], s.gekisouSupportSkills[0][0], 5) &&
       m.gekisouSupportSkills.get(s.gekisouSupportSkills[0][0])._gekisouMissionType === 2);
     const t2 = Date.now();
-    const seeds = S.luckSeeds(battle.byScore.get(sidL).seeds.map((x) => x.seed), 64);
+    const seeds = S.luckSeeds(battle.byScore.get(sidL).replaySeeds, 64);
     const perfL = S.performers(m, d.members.map((v) => ({ id: v.id, skillLevel: v.liveSkillLevel, gekisouSkillLevel: 5 })), d.snaps.map((s) => (s ? { id: s.id, rank: s.rank } : null)));
     const gkL = { ranks: [3, 3, 3], justRate: 0.2, justTypes: m.justTypes, seeds };
     const simL = S.orderScores(session, sidL, d.power, perfL, gkL);

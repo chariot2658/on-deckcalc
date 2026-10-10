@@ -3139,11 +3139,13 @@
 
   /**
    * Gekisou-on chart data from music-data.json, as nnnotes measured it (theoretical best play: Just inside Just-count
-   * ranges, Perfect elsewhere; rank 1 in every range; luck ranges on the first published seeds):
+   * ranges, Perfect elsewhere; rank 1 in every range). Format /2 gives the expectation over the lotteries' nominal
+   * probabilities, each value an Estimate [center, radius] (the centers are kept), and the replay seeds apart; /1 gave
+   * the results on the first published seeds, which `seeds` still reads (a cached copy):
    * {power, kinds, shapes: "gekisouSkillId:level" -> aptitude shape of member Gekisou skills (measured at level 5),
    *  supportShapes: "gekisouSupportSkillId:level" -> aptitude shape of snaps' Gekisou support skills (level 5),
-   *  byScore: scoreId -> {seeds: [{seed, score, scorePerfect, ranges: [[rangeScore, rangeScorePerfect, rankBonus]],
-   *  weights, rangeWeights}], percents: rank bonus % per range at ranks 1..5, missions (the song's range missions: 1 COMBO,
+   *  byScore: scoreId -> {seeds: [{seed, score, scorePerfect, ranges: [[rangeScore, rangeScorePerfect, rankBonus, rankBonusPerfect]],
+   *  weights, rangeWeights}] (/2: one entry, the expectation), replaySeeds (the seeds to replay it on), percents: rank bonus % per range at ranks 1..5, missions (the song's range missions: 1 COMBO,
    *  2 LUCK, 3 JUST), luck (whether a range is a LUCK one, whose lottery draws from the live's seed), apt: shape -> {tail, tailPerfect, ranges: [[rangeScore, rangeScorePerfect]]}
    *  (seed means of the increments), aptSupport: "shape:match" -> the same for a support shape, paired with a member
    *  that is (1) or is not (0) a target of its member condition (5000), justRanges: per range [Just notes, notes] of the
@@ -3161,10 +3163,21 @@
       if (to) for (const s of sh.skills) to.set(s.id + ":" + s.level, sh.id);
     }
     const inc = (v) => ({ tail: v.tail[0], tailPerfect: v.tailPerfect[0], ranges: v.ranges.map((r) => [r.rangeScore[0], r.rangeScorePerfect[0]]) });
+    const est = (x) => (Array.isArray(x) ? x[0] : x);
+    const rows = (a, depth) => a && a.map((x) => (x === null ? null : depth > 1 ? rows(x, depth - 1) : est(x)));
     for (const s of md.songs || []) {
       for (const c of s.charts || []) {
         const d = c.deck;
-        if (!d || d.unplayable || !d.seeds || !d.seeds.length || !d.ranges || d.ranges.length !== 3) continue;
+        const e = d && d.expectation;
+        const seeds = !d ? null : e ? [{
+          seed: (d.replaySeeds && d.replaySeeds[0]) || 0,
+          score: est(e.score),
+          scorePerfect: est(e.scorePerfect),
+          ranges: e.ranges.map((r) => ({ rangeScore: est(r.rangeScore), rangeScorePerfect: est(r.rangeScorePerfect), rankBonus: est(r.rankBonus), rankBonusPerfect: est(r.rankBonusPerfect), justCount: r.justCount, maxCombo: r.maxCombo })),
+          weights: rows(e.weights, 2),
+          rangeWeights: rows(e.rangeWeights, 3),
+        }] : d.seeds;
+        if (!d || d.unplayable || !seeds || !seeds.length || !d.ranges || d.ranges.length !== 3) continue;
         const apt = new Map();
         const aptSupport = new Map();
         for (const v of (d.gekisouAptitude && d.gekisouAptitude.variants) || []) {
@@ -3172,20 +3185,21 @@
           else aptSupport.set(v.shape + ":" + (v.bandMatch ? 1 : 0), inc(v));
         }
         out.byScore.set(c.scoreId, {
-          seeds: d.seeds.map((x) => ({
+          seeds: seeds.map((x) => ({
             seed: x.seed || 0,
             score: x.score,
             scorePerfect: x.scorePerfect,
-            ranges: x.ranges.map((r) => [r.rangeScore, r.rangeScorePerfect, r.rankBonus]),
+            ranges: x.ranges.map((r, i) => [r.rangeScore, r.rangeScorePerfect, r.rankBonus, r.rankBonusPerfect ?? Math.trunc((r.rangeScorePerfect * d.ranges[i].rankBonusPercent) / 100)]),
             weights: x.weights,
             rangeWeights: x.rangeWeights,
           })),
+          replaySeeds: d.replaySeeds || seeds.map((x) => x.seed || 0),
           percents: d.ranges.map((r) => r.rankBonusPercents),
           missions: (s.gekisouMissions || []).slice(),
           luck: (s.gekisouMissions || []).includes(2),
           apt,
           aptSupport,
-          justRanges: d.seeds[0].ranges.map((r) => [r.justCount || 0, r.maxCombo || 0]),
+          justRanges: seeds[0].ranges.map((r) => [r.justCount || 0, r.maxCombo || 0]),
         });
       }
     }
@@ -3232,9 +3246,13 @@
       for (const s of b.seeds) {
         let sc = s.score;
         let sp = s.scorePerfect;
-        s.ranges.forEach(([rs, rsP, rb], i) => {
-          sc += Math.trunc((rs * p[i][1]) / 100) - rb;
-          sp += Math.trunc((rsP * p[i][1]) / 100) - Math.trunc((rsP * p[i][0]) / 100);
+        // The measured rank-1 bonus, replaced at another rank by the range's score × its percent, truncated as the game
+        // does when the score is one play's (an integer); an expectation's truncation is not the expected truncation.
+        const bonus = (x, pct) => (Number.isInteger(x) ? Math.trunc((x * pct) / 100) : (x * pct) / 100);
+        s.ranges.forEach(([rs, rsP, rb, rbP], i) => {
+          if (p[i][1] === p[i][0]) return;
+          sc += bonus(rs, p[i][1]) - rb;
+          sp += bonus(rsP, p[i][1]) - rbP;
         });
         base += sp + j * (sc - sp);
         (s.weights || []).forEach((row, q) => {
