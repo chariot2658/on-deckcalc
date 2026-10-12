@@ -91,6 +91,40 @@
   }
 
   /**
+   * gekisouRequest's `gekisou` for a search's Gekisou rank `gk` ({rank, ranks, justRate}: Engine.battleRates or a
+   * search's `gekisou`) on a chart whose ranges give the bonus `percents` (Engine.battleFromMusicData: per range the
+   * percent of each rank): every range at gk.rank, or with gk.ranks one play at the first of them, which scoreOf turns
+   * into their mean (`mean`: per range the percents of those ranks). `seeds` as for orderScores.
+   */
+  function gekisouPlay(gk, percents, justTypes, seeds) {
+    const r = gk.ranks ? gk.ranks[0] : gk.rank;
+    const out = { ranks: [r, r, r], justRate: gk.justRate, justTypes };
+    if (seeds) out.seeds = seeds;
+    if (gk.ranks) {
+      if (!percents) throw new Error("no rank bonus percents for the mean over ranks");
+      out.mean = percents.map((row) => gk.ranks.map((x) => row[x - 1]));
+    }
+    return out;
+  }
+
+  /**
+   * The score of a replay result `res`; with gekisou.mean (gekisouPlay) the mean over its ranks. A range's rank bonus is
+   * its score times the rank's percent, truncated, and nothing else depends on the rank (gekisou.test.js checks it), so
+   * one play gives every rank's score.
+   */
+  function scoreOf(res, gekisou) {
+    if (!gekisou || !gekisou.mean) return res.score;
+    let s = res.score;
+    gekisou.mean.forEach((pcts, i) => {
+      const x = res.ranges && res.ranges[i];
+      if (!x) return;
+      const range = x.endScore - x.startScore;
+      s += pcts.reduce((a, p) => a + Math.trunc((range * p) / 100), 0) / pcts.length - x.rankBonus;
+    });
+    return s;
+  }
+
+  /**
    * The score of every performance order of a deck on a chart at `power`: {base (no skills), scores (ascending, one
    * per order), mean, exact (whether the additive scores were confirmed)}. null when the replay data lacks the chart.
    * `gekisou` ({ranks, justRate, justTypes, seeds}) plays a multiplayer live (gekisouRequest). Gekisou skills act
@@ -106,7 +140,7 @@
       return null;
     }
     const run = (ps, order, seed) =>
-      JSON.parse(session.run(JSON.stringify({ ...tpl, performers: ps, skillOrder: order, ...(seed === undefined ? {} : { seed }) }))).score;
+      scoreOf(JSON.parse(session.run(JSON.stringify({ ...tpl, performers: ps, skillOrder: order, ...(seed === undefined ? {} : { seed }) }))), gekisou);
     const bare = (p) => ({ ...p, liveSkill: null, supportSkills: [] });
     let base = run(perf.map(bare), [0, 1, 2, 3, 4]);
     let shift = 0;
@@ -146,7 +180,7 @@
     const { performers: _p, skillOrder: _o, seed: _s, power: _w, ...rest } = tpl;
     const body = JSON.stringify(rest).slice(0, -1);
     return (power, perf, order, seed) =>
-      JSON.parse(session.run(`${body},"power":${power},"performers":${JSON.stringify(perf)},"skillOrder":${JSON.stringify(order)},"seed":${seed || 0}}`)).score;
+      scoreOf(JSON.parse(session.run(`${body},"power":${power},"performers":${JSON.stringify(perf)},"skillOrder":${JSON.stringify(order)},"seed":${seed || 0}}`)), gekisou);
   }
 
   /**
@@ -189,7 +223,7 @@
   function measureSnapJobs(session, scoreId, jobs, gekisou, progress, power = 1e6) {
     let tpl = JSON.parse(session.template(scoreId, power, FPS));
     if (gekisou) tpl = gekisouRequest(session, tpl, scoreId, gekisou);
-    const run = (p) => JSON.parse(session.run(JSON.stringify({ ...tpl, performers: [p, p, p, p, p] }))).score;
+    const run = (p) => scoreOf(JSON.parse(session.run(JSON.stringify({ ...tpl, performers: [p, p, p, p, p] }))), gekisou);
     const without = new Map(); // member side -> score of five copies without snap skills
     const out = new Map();
     jobs.forEach((job, i) => {
@@ -219,9 +253,9 @@
     const request = (sid) => {
       if (!reqs.has(sid)) {
         const b = battle.byScore.get(sid);
-        const gekisou = { ranks: [bt.rank, bt.rank, bt.rank], justRate: bt.justRate, justTypes: m.justTypes, seeds: [b.seeds[0].seed] };
+        const gekisou = gekisouPlay(bt, b.percents, m.justTypes, [b.seeds[0].seed]);
         const tpl = gekisouRequest(session, JSON.parse(session.template(sid, battle.power, FPS)), sid, gekisou);
-        const run = (perf) => JSON.parse(session.run(JSON.stringify({ ...tpl, performers: perf }))).score;
+        const run = (perf) => scoreOf(JSON.parse(session.run(JSON.stringify({ ...tpl, performers: perf }))), gekisou);
         reqs.set(sid, { run, base: run([0, 1, 2, 3, 4].map(empty)) });
       }
       return reqs.get(sid);
@@ -279,9 +313,10 @@
     const runs = new Map(); // scoreId -> run(performers)
     const runOn = (sid) => {
       if (!runs.has(sid)) {
-        const gekisou = { ranks: [bt.rank, bt.rank, bt.rank], justRate: bt.justRate, justTypes: m.justTypes, seeds: [battle.byScore.get(sid).seeds[0].seed] };
+        const b = battle.byScore.get(sid);
+        const gekisou = gekisouPlay(bt, b.percents, m.justTypes, [b.seeds[0].seed]);
         const tpl = gekisouRequest(session, JSON.parse(session.template(sid, battle.power, FPS)), sid, gekisou);
-        runs.set(sid, (perf) => JSON.parse(session.run(JSON.stringify({ ...tpl, performers: perf }))).score);
+        runs.set(sid, (perf) => scoreOf(JSON.parse(session.run(JSON.stringify({ ...tpl, performers: perf }))), gekisou));
       }
       return runs.get(sid);
     };
@@ -347,7 +382,8 @@
    * share = the support skills' gain with the count-up over their gain without, minus 1. Five hosts whose own Gekisou
    * skill (`idle`, a skill id) adds no score hold the support skill `support` at its top level, beside a member of its
    * condition's band (match 1) or not (0); one host takes the count-up for `b`, all five the strongest for the
-   * saturation `s`. COMBO ranges do not depend on the seed, so one run each, at bt's rank and Just rate.
+   * saturation `s`. COMBO ranges do not depend on the seed, so one run each, at bt's rank and Just rate (`bt`: {rank,
+   * ranks, justRate, percents}, the chart's percents for averaged ranks, see gekisouPlay).
    */
   function comboBoosts(session, m, bt, scoreId, keys, support, idle, entry) {
     const known = entry ? [...entry.b.keys()] : [];
@@ -373,7 +409,7 @@
     const out = entry || { b: new Map(), s: [0, 0], sKey: null };
     const todo = keys.filter((k) => !out.b.has(k));
     if (!todo.length && out.sKey && keys.every((k) => (out.b.get(k) || [0])[0] <= (out.b.get(out.sKey) || [0])[0])) return out;
-    const run = chartRunner(session, scoreId, { ranks: [bt.rank, bt.rank, bt.rank], justRate: bt.justRate, justTypes: ctx.justTypes });
+    const run = chartRunner(session, scoreId, gekisouPlay(bt, bt.percents, ctx.justTypes));
     const { support, top, idle } = ctx;
     const empty = {
       liveSkill: null, supportSkills: [], bandId: 0, characterId: 0, cardType: 0, tagIds: [], liveSkillCategories: [],
@@ -472,7 +508,7 @@
   }
 
   const api = {
-    ORDERS, performers, gekisouRequest, orderScores, chartRunner, meanScore, snapSkillRates, snapSkillJobs, measureSnapJobs,
+    ORDERS, performers, gekisouRequest, gekisouPlay, scoreOf, orderScores, chartRunner, meanScore, snapSkillRates, snapSkillJobs, measureSnapJobs,
     gekisouLevelFactors, gekisouSupportLevelFactors,
     comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay,
   };

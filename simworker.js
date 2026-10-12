@@ -26,7 +26,7 @@ self.onmessage = async (e) => {
       self.postMessage({ type: "done", out: [...out] });
     } else if (msg.type === "mean") {
       const g = msg.gekisou;
-      const key = msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate : "");
+      const key = msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate + (g.mean ? ":" + JSON.stringify(g.mean) : "") : "");
       if (!runners.has(key)) runners.set(key, Simulate.chartRunner(s, msg.scoreId, g));
       const run = runners.get(key);
       let runs = 0;
