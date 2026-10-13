@@ -33,6 +33,9 @@
     songOverhead: 40,
     multi: false,
     multiPlayers: 5,
+    // "auto": the others are unknown (Engine.opponentLevels: their average log-uniform over Engine.OPPONENT_RANGE, the
+    // Gekisou rank averaged over the room); "known": multiOthersAvg and multiGekisouRank as set.
+    multiOpponents: "auto",
     multiOthersAvg: 5000000,
     multiGekisouRank: 3, // assumed rank in every Gekisou range
     multiJustRate: 50, // %, of the Just-count ranges' notes
@@ -432,6 +435,40 @@
 
   // --- calc tab ---
 
+  const wan = (x) => `${fmt(Math.round(x / 1e4))} 萬`;
+  const OPPONENTS_HELP = `選隊時還不知道會配到誰。「不確定」時，把其他玩家的平均分數當成 ${wan(Engine.OPPONENT_RANGE[0])}～${wan(Engine.OPPONENT_RANGE[1])}之間的各種情況，激奏每段的名次當成第 1 名到最後一名的各種情況，選平均起來最好的隊伍（全卡池實測：比事先知道對手的平均分數只少約 1%）。和朋友開私人房、知道對手大概多強時，選「我知道大概」再填數字。`;
+  // The Gekisou rank a search assumed (its `gekisou`, else the settings): "第 3 名" or "第 1～5 名平均".
+  const rankText = (gk, multi) => {
+    const g = gk || (multi && multi.auto ? { ranks: Engine.gekisouRanks(multi) } : { rank: multi ? multi.gekisouRank : 1 });
+    return g.ranks ? `第 ${g.ranks[0]}～${g.ranks[g.ranks.length - 1]} 名平均` : `第 ${g.rank} 名`;
+  };
+  // The others' scores a room search assumed.
+  const othersText = (multi) =>
+    multi.auto
+      ? `其他 ${multi.players - 1} 人的平均分數不確定，取 ${wan(Engine.OPPONENT_RANGE[0])}～${wan(Engine.OPPONENT_RANGE[1])}之間各種情況的平均`
+      : `其他 ${multi.players - 1} 人 × ${fmt(Math.round((multi.othersScore || 0) / Math.max(1, multi.players - 1)))}`;
+  // The others' average levels shown beside an expected payoff with the others unknown.
+  const SHOW_OTHERS = [2e6, 5e6, 1e7];
+  // Mean payoff of decks [{chart, score (all Perfect), pb, ib}] if the others' average were each of SHOW_OTHERS.
+  function payoffByOthers(out, decks) {
+    const multi = out.input.multi;
+    const base = {
+      master: state.master, event: state.master.events.get(out.eventId), boosts: out.input.boosts, objective: out.input.objective,
+      cpValue: out.input.cpValue || 0, accuracy: out.input.accuracy,
+    };
+    return SHOW_OTHERS.map((avg) => {
+      const input = { ...base, multi: { ...multi, auto: false, othersScore: avg * (multi.players - 1) } };
+      let v = 0;
+      for (const d of decks) {
+        const p = Engine.roomPayoff(input, d.chart, d.score, d.pb, d.ib);
+        v += out.input.objective === "items" ? p.items : p.points + p.cp * (input.cpValue || 0);
+      }
+      return v / Math.max(1, decks.length);
+    });
+  }
+  const othersLine = (out, vals) =>
+    `對手強弱的影響：其他人平均 ${SHOW_OTHERS.map(wan).join("／")} 時約 ${vals.map((v) => fmt(Math.round(v))).join("／")} ${out.input.objective === "items" ? "道具" : "pt"}`;
+
   function renderCalc() {
     const s = state.settings;
     const ev = currentEvent();
@@ -449,6 +486,7 @@
     const randomSong = randomSongOf(s);
     const saved = savedOf(s);
     const score = s.objective === "score";
+    const knownOpp = s.multiOpponents === "known";
     const diffChips = Object.keys(DIFF_NAMES)
       .map((d) => `<label><input type="checkbox" name="diff" value="${d}" ${s.difficulties.includes(d) ? "checked" : ""}>${DIFF_NAMES[d]}</label>`)
       .join("");
@@ -492,9 +530,15 @@
           </div>
           <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"}><span>房間人數</span>
             <input type="number" id="multiPlayers" min="2" max="5" value="${s.multiPlayers}" style="width:70px"></label>
-          <label class="field" ${s.mode === "normal" && s.multi && !score ? "" : "hidden"}><span>其他玩家平均分數</span>
+          <div class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="${esc(OPPONENTS_HELP)}"><span>對手</span>
+            <div class="chips">
+              <label><input type="radio" name="multiOpponents" value="auto" ${knownOpp ? "" : "checked"}>不確定（自動）</label>
+              <label><input type="radio" name="multiOpponents" value="known" ${knownOpp ? "checked" : ""}>我知道大概</label>
+            </div>
+          </div>
+          <label class="field" ${s.mode === "normal" && s.multi && knownOpp && !score ? "" : "hidden"} title="結算畫面右邊其他玩家分數的平均"><span>其他玩家平均分數</span>
             <input type="number" id="multiOthersAvg" min="0" step="100000" value="${s.multiOthersAvg}" style="width:120px"></label>
-          <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="激奏的三段任務（連擊／幸運／JUST）各自在房間裡排名，名次越前，該段分數的加成越高（依歌曲，第 1 名 +250%～+370%，第 4、5 名 +100%～+170%）"><span>激奏每段的名次</span>
+          <label class="field" ${s.mode === "normal" && s.multi && knownOpp ? "" : "hidden"} title="激奏的三段任務（連擊／幸運／JUST）各自在房間裡排名，名次越前，該段分數的加成越高（依歌曲，第 1 名 +250%～+370%，第 4、5 名 +100%～+170%）"><span>激奏每段的名次</span>
             <select id="multiGekisouRank">${range(1, 5).map((r) => `<option value="${r}" ${r === s.multiGekisouRank ? "selected" : ""}>第 ${r} 名</option>`).join("")}</select></label>
           <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="JUST 激奏區間裡打出 JUST 的比例（其餘當 PERFECT）。JUST 一個音符算 230%，PERFECT 算 100%"><span>JUST 區間的 JUST 率（%）</span>
             <input type="number" id="multiJustRate" min="0" max="100" step="5" value="${s.multiJustRate}" style="width:80px"></label>
@@ -568,6 +612,13 @@
     }));
     el.querySelectorAll("input[name=multiSong]").forEach((r) => (r.onchange = () => {
       s.multiSong = r.value;
+      // A private room's players are usually known; a public room's are not.
+      s.multiOpponents = r.value === "pick" ? "known" : "auto";
+      saveSettings();
+      renderCalc();
+    }));
+    el.querySelectorAll("input[name=multiOpponents]").forEach((r) => (r.onchange = () => {
+      s.multiOpponents = r.value;
       saveSettings();
       renderCalc();
     }));
@@ -663,7 +714,7 @@
       musicIds: scoreSong ? [scoreSong] : null,
       multi: s.mode === "normal" && s.multi
         ? {
-          players: s.multiPlayers, othersScore: score ? 0 : s.multiOthersAvg * (s.multiPlayers - 1), gekisouRank: s.multiGekisouRank,
+          players: s.multiPlayers, othersScore: score ? 0 : s.multiOthersAvg * (s.multiPlayers - 1), gekisouRank: s.multiGekisouRank, auto: s.multiOpponents !== "known",
           justRate: s.multiJustRate / 100, pickSong: multiSongOf(s) === "pick",
         }
         : null,
@@ -749,7 +800,7 @@
         <div><div class="big"><span class="points">${fmt(d.points)} pt</span>${
           d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""
         } · <span class="items">${fmt(d.items)} 道具</span></div>
-          ${rankDistLine(d)}
+          ${rankDistLine(d, out)}
           ${
             out.cpPlan && d.cp
               ? `<div class="small">CP 換算約 ${fmt(Math.round(d.cpPoints))} pt，合計約 <b class="points">${fmt(Math.round(d.points + d.cpPoints))} pt</b></div>`
@@ -773,16 +824,20 @@
   function chartSide(d, key, out) {
     const multi = out.input.multi;
     const margin = d.needDisplayPower > 0 ? d.displayPower / d.needDisplayPower - 1 : null;
+    const auto = multi && multi.auto;
     return `<div><b>${esc(musicTitle(d.chart.musicId))}</b> ${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</div>
       <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>（${
-        margin === null
-          ? `${esc(d.rankName)} 靠其他玩家的分數就夠`
-          : `${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕 <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>`
+        auto
+          ? "房間評級看對手，見左邊的機率"
+          : margin === null
+            ? `${esc(d.rankName)} 靠其他玩家的分數就夠`
+            : `${esc(d.rankName)} 需要 ${fmt(d.needDisplayPower)}，餘裕 <span class="${margin < 0.03 ? "warn" : ""}">${(margin * 100).toFixed(1)}%</span>`
       }）</div>
       ${d.nextRankName ? `<div class="small muted">${esc(d.nextRankName)} 需要 ${fmt(d.nextNeedDisplayPower)}</div>` : ""}
       <div class="small muted">預估${out.gekisou ? "激奏" : ""}分數約 ${fmt(d.estScore)}${skillParts(d)}${
-        multi ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""
+        multi && !auto ? `，房間總分約 ${fmt(d.estScore + multi.othersScore)}（${multi.players} 人）` : ""
       }</div>
+      ${auto ? `<div class="small muted">${othersLine(out, payoffByOthers(out, [{ chart: d.chart, score: d.estScore / (d.accuracy || 1), pb: d.pointBonus, ib: d.itemBonus }]))}</div>` : ""}
       ${state.worker && state.replay ? `<div class="small sim" data-sim="${key}">模擬中…</div>` : ""}`;
   }
 
@@ -818,15 +873,16 @@
     return parts.length ? `（${parts.join("，")}）` : "";
   }
 
-  // With combo breaks the search ranks by the expected payoff: the chance of each rank it may reach.
-  function rankDistLine(d) {
+  // With combo breaks or the others unknown the search ranks by the expected payoff: the chance of each rank it may reach.
+  function rankDistLine(d, out) {
     if (d.random) {
       const parts = d.rankDist.map((x) => `${esc(x.rankName)} ${Math.round(x.p * 100)}%`).join("、");
       return `<div class="small">各首歌的房間評級：${parts}；點數、道具和 CP 是所有歌的平均</div>`;
     }
     if (!d.rankDist || d.rankDist.length < 2) return "";
     const parts = d.rankDist.map((x) => `${esc(x.rankName)} ${Math.round(x.p * 100)}%`).join("、");
-    return `<div class="small">依你的準度（斷 combo 的位置不同）：${parts}，數字是期望值</div>`;
+    const why = out && out.input.multi && out.input.multi.auto ? "依對手強弱、激奏名次和你的準度" : "依你的準度（斷 combo 的位置不同）";
+    return `<div class="small">${why}：${parts}，數字是期望值</div>`;
   }
 
   const resultUnit = (out) =>
@@ -864,13 +920,13 @@
         「模擬分數」用 ournotes-deck 的整場模擬算出 120 種發動順序的分數（快照技能逐格計算），評級機率同時考慮發動順序和斷 combo 的位置。
         餘裕小於 3% 的隊伍，實際可能差一級。${
           out.input.multi
-            ? `<br>多人（激奏）：活動點數、道具和 CP 看的是<b>房間評級</b>（結算畫面右上角的大徽章），不是自己分數的評級。房間評級＝全房總分對照該曲的多人門檻（依人數調整）；這裡用「自己的預估分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(state.settings.multiOthersAvg)}」估算。其他玩家的分數通常佔大部分，所以加成高的隊伍比綜合力高的隊伍划算。${
+            ? `<br>多人（激奏）：活動點數、道具和 CP 看的是<b>房間評級</b>（結算畫面右上角的大徽章），不是自己分數的評級。房間評級＝全房總分對照該曲的多人門檻（依人數調整）；這裡用「自己的預估分數＋${othersText(out.input.multi)}」估算。其他玩家的分數通常佔大部分，所以加成高的隊伍比綜合力高的隊伍划算。${
                 out.random
                   ? `公開房的歌是抽出來的（直接開始隨機，自己選歌也要和其他人選的歌一起抽），所以隊伍依<b>所有 ${fmt((out.stats && out.stats.songs) || 0)} 首歌的平均收益</b>排名，每首歌都打允許的難度裡收益最好的譜面；綜合力是激奏編成畫面顯示的（還沒選歌，不含歌曲加成）。第 1 名的隊伍在各首歌的評級在下方「歌曲比較」。抽完歌後約 10 秒內還能換成存好的編組，「激奏的歌」選「預存隊伍」可以依激奏區間的種類各算一隊；私人房可以指定歌曲，請改成「自己選」。`
                   : `這裡假設是<b>私人房，自己指定歌曲</b>，所以和單人一樣挑最划算的歌；公開房的歌是抽出來的，請把「激奏的歌」改成「預存隊伍」或「一隊打全部」。`
               }${
                 out.gekisou
-                  ? `<br>自己的分數用<b>開激奏</b>的分數：JUST 區間打出 JUST（JUST 率 ${Math.round(out.gekisou.justRate * 100)}%）、每段激奏結束時依名次加成（三段都假設第 ${out.gekisou.rank} 名），再加上成員卡的激奏技能和快照的激奏技能。結算畫面大字的 SCORE 是不含激奏的分數（存成最高分），比這裡低很多。激奏技能在搜尋裡是估計值：各技能分開量再相加，未滿級的依模擬換算，JUST 區間「每個 JUST 累積加分」的快照依 JUST 率和上限換算；成員的 LUCK 量條技能讓 RUSH 變多、快照的 RUSH 加分跟著變多（用平均比例，單首歌可能差幾 %），COMBO 激奏數 UP 讓快照的 COMBO 累積加分疊得更快（逐首模擬量）。「模擬分數」逐格模擬，包含成員的激奏技能和快照的激奏技能。`
+                  ? `<br>自己的分數用<b>開激奏</b>的分數：JUST 區間打出 JUST（JUST 率 ${Math.round(out.gekisou.justRate * 100)}%）、每段激奏結束時依名次加成（三段都假設${rankText(out.gekisou)}），再加上成員卡的激奏技能和快照的激奏技能。結算畫面大字的 SCORE 是不含激奏的分數（存成最高分），比這裡低很多。激奏技能在搜尋裡是估計值：各技能分開量再相加，未滿級的依模擬換算，JUST 區間「每個 JUST 累積加分」的快照依 JUST 率和上限換算；成員的 LUCK 量條技能讓 RUSH 變多、快照的 RUSH 加分跟著變多（用平均比例，單首歌可能差幾 %），COMBO 激奏數 UP 讓快照的 COMBO 累積加分疊得更快（逐首模擬量）。「模擬分數」逐格模擬，包含成員的激奏技能和快照的激奏技能。`
                   : ""
               }`
             : ""
@@ -952,7 +1008,7 @@
       `「模擬分數」逐格模擬整場，列出 120 種出場順序的平均和最高分（全 Perfect），以及依你的準度的平均。排行榜記錄的是你打過最高的一次，要靠全 Perfect 加上好的出場順序。`,
     ];
     if (multi) {
-      parts.push(`多人（激奏）：用<b>開激奏</b>的分數（JUST 率 ${Math.round((out.gekisou ? out.gekisou.justRate : multi.justRate) * 100)}%、三段都第 ${out.gekisou ? out.gekisou.rank : multi.gekisouRank} 名），也就是房間合計用的分數。
+      parts.push(`多人（激奏）：用<b>開激奏</b>的分數（JUST 率 ${Math.round((out.gekisou ? out.gekisou.justRate : multi.justRate) * 100)}%、三段都${rankText(out.gekisou, multi)}），也就是房間合計用的分數。
         成員的激奏技能會觸發搭配快照的激奏技能，而且各成員之間會互相影響、不能逐對相加，所以先估計出 15 支候選隊伍，再逐一完整模擬、依模擬分數排名（候選外的隊伍沒有模擬，少數情況可能漏掉更好的）。
         結算畫面大字的 SCORE（存成最高分）不含激奏，和單人一樣，請用「單人」計算。`);
     }
@@ -966,11 +1022,15 @@
     return `<p class="note">${parts.join("<br>")}</p>`;
   }
 
-  // Own score each rank needs: solo thresholds, or what the room's other players leave (as the search).
-  function ownThresholds(d, out) {
+  // Own score each rank needs: solo thresholds, or what the room's other players leave (as the search), per level of
+  // the others' total: [[thresholds, weight]].
+  function ownThresholdLevels(d, out) {
     const multi = out.input.multi;
-    if (!multi) return d.chart.thresholds;
-    return d.chart.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, Engine.battleRequiredScore(base, multi.players) - (multi.othersScore || 0))]);
+    if (!multi) return [[d.chart.thresholds, 1]];
+    return Engine.opponentLevels(multi).map(([others, w]) => [
+      d.chart.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, Engine.battleRequiredScore(base, multi.players) - others)]),
+      w,
+    ]);
   }
 
   // The simulated scores with the play accuracy, and the chance of each rank over performance orders and breaks.
@@ -982,8 +1042,6 @@
     const lo = Math.min(...shares.map(([x]) => x));
     const hi = Math.max(...shares.map(([x]) => x));
     const sc = sim.scores;
-    const need = new Map();
-    for (const [r, req] of ownThresholds(d, out)) if (!need.has(r) || req < need.get(r)) need.set(r, req);
     // P(order score x share >= req): per order, the weight of the shares of at least req / score.
     const sorted = shares.slice().sort((a, b) => a[0] - b[0]);
     const tail = new Float64Array(sorted.length + 1);
@@ -998,8 +1056,13 @@
       }
       return tail[a];
     };
-    const chance = [...need]
-      .map(([r, req]) => [r, Math.min(1, sc.reduce((a, x) => a + atLeast(req / x), 0) / sc.length)])
+    const byRank = new Map();
+    for (const [th, w] of ownThresholdLevels(d, out)) {
+      const need = new Map();
+      for (const [r, req] of th) if (!need.has(r) || req < need.get(r)) need.set(r, req);
+      for (const [r, req] of need) byRank.set(r, (byRank.get(r) || 0) + w * Math.min(1, sc.reduce((a, x) => a + atLeast(req / x), 0) / sc.length));
+    }
+    const chance = [...byRank]
       .map(([r, p]) => [r, p > 0.9995 ? 1 : p < 0.0005 ? 0 : p])
       .sort((a, b) => b[0] - a[0]);
     const name = (r) => Engine.RANK_NAMES[r] || String(r);
@@ -1011,7 +1074,7 @@
     else if (top) text = `<b>${name(top[0])}</b> 機率 ${Math.round(top[1] * 100)}%` + (sure ? `，否則 ${name(sure[0])}` : "");
     const differs = likely && likely[0] !== d.rank;
     const what = sim.gekisou && out.gekisou
-      ? `開激奏模擬分數（每段第 ${out.gekisou.rank} 名、JUST 率 ${Math.round(out.gekisou.justRate * 100)}%，含快照與激奏技能）`
+      ? `開激奏模擬分數（每段${rankText(out.gekisou)}、JUST 率 ${Math.round(out.gekisou.justRate * 100)}%，含快照與激奏技能）`
       : "模擬分數（含快照技能）";
     return `${what}全 Perfect 平均 ${fmt(Math.round(sim.mean))}；依你的準度平均 <b>${fmt(Math.round(sim.mean * meanShare))}</b>，` +
       `範圍 ${fmt(Math.round(sc[0] * lo))}–${fmt(Math.round(sc[sc.length - 1] * hi))}：${text}` +
@@ -1094,7 +1157,7 @@
     const notes = [
       `公開房的歌是抽出來的，但抽完歌後大約有 10 秒可以換隊：來得及換成存好的編組，來不及重排卡片。遊戲可以存 50 組編組，同一張卡可以放在好幾組，所以這裡依<b>激奏三段的種類</b>把歌分成 ${groups.length} 組（全 COMBO、全 LUCK、全 JUST、混合），每組各找一隊。抽到歌時看三段激奏的種類，換成那組的隊伍。`,
       `每組先用搜尋找出該組歌曲平均最好的幾隊（估計值在第 1 名 5% 以內，最多 8 隊），再逐首用 ournotes-deck 的整場模擬比較，取平均最高的：每首歌模擬 ${out.runs ? out.runs.rank : 5} 局，每局換出場順序（5 局剛好每人每個位置各一次）；有 LUCK 區間的歌每局換抽選的種子，所有隊伍用同一批種子，所以兩隊的差距只差約 0.3%（單一隊伍每局差約 10%）。顯示的分數在 LUCK 歌用 ${out.runs ? out.runs.show : 10} 局（單首約 ±3%）。`,
-      `激奏${score ? "分數" : ""}的條件：每段第 ${gk ? gk.rank : s.multiGekisouRank} 名、JUST 率 ${Math.round((gk ? gk.justRate : s.multiJustRate / 100) * 100)}%${score ? `，依你的準度（Perfect 率 ${s.perfectRate}%、斷 combo ${s.comboBreaks} 次）打折` : `；收益看房間評級（自己的模擬分數＋其他 ${out.input.multi.players - 1} 人 × ${fmt(s.multiOthersAvg)}），依你的準度算各評級的機率`}。`,
+      `激奏${score ? "分數" : ""}的條件：每段${rankText(gk, out.input.multi)}、JUST 率 ${Math.round((gk ? gk.justRate : s.multiJustRate / 100) * 100)}%${score ? `，依你的準度（Perfect 率 ${s.perfectRate}%、斷 combo ${s.comboBreaks} 次）打折` : `；收益看房間評級（自己的模擬分數＋${othersText(out.input.multi)}），依你的準度算各評級的機率`}。${out.input.multi.auto ? `對手不確定：選的是在各種對手和名次下平均最好的隊伍，不會因為猜錯一個數字而偏掉。` : ""}`,
       `搜尋的估計已包含兩種成員激奏技能和快照激奏技能的交互作用：成員的 LUCK 量條技能讓 RUSH 變多，快照的 LUCKY RUSH 分數 UP 跟著多（全 LUCK 歌約 +17%、混合歌約 +32%）；成員的 COMBO 激奏數 UP 讓快照的激奏 COMBO 分數 UP 更快疊滿（依譜面逐首模擬量，可達 +30%～+190%）。`,
     ];
     if (score && !out.snapSkills) notes.push(`<span class="warn">這次沒能模擬快照技能${out.snapError ? `（${esc(out.snapError)}）` : ""}，搜尋的估計沒算快照技能。</span>`);
@@ -1105,7 +1168,13 @@
       ? `<p><b>全部 ${songs.length} 首歌的平均${out.simulated ? "（模擬" : "（估計"}${savedWhat(out) ? "，" + savedWhat(out) : ""}）</b>：一隊打全部 ${fmt(Math.round(vAll))}${u}
         → <b>${groups.length} 組預存 ${fmt(Math.round(vSaved))}${u}（${gapPct(vAll, vSaved)}）</b>
         → 每首都換成該歌的最佳隊 ${fmt(Math.round(vBest))}${u}（${gapPct(vAll, vBest)}）。
-        ${big ? `有 ${big} 首歌換成該歌的最佳隊能多 3% 以上（下表標橘色），常抽到的話可以多存一隊。` : "每首歌用預存隊和用該歌最佳隊都差不到 3%，4 隊就夠了。"}</p>`
+        ${big ? `有 ${big} 首歌換成該歌的最佳隊能多 3% 以上（下表標橘色），常抽到的話可以多存一隊。` : "每首歌用預存隊和用該歌最佳隊都差不到 3%，4 隊就夠了。"}</p>${
+          !score && out.input.multi.auto
+            ? `<p class="small">${othersLine(out, payoffByOthers(out, songs.filter((x) => x.saved.simPay).map((x) => ({
+              chart: x.saved.chart, score: x.saved.simPay.score, pb: x.saved.pointBonus, ib: x.saved.itemBonus,
+            }))))}（預存隊，每場平均）。</p>`
+            : ""
+        }`
       : "";
     el.innerHTML = `<div class="panel">
         <h2>預存隊伍（公開房）</h2>

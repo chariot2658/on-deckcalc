@@ -55,9 +55,8 @@ const supportFactors = new Map();
 async function gekisouLevels(input) {
   const multi = input.multi;
   if (!multi || !battle || !battle.power || !replay) return { levels: null, supportLevels: null };
-  const rank = Math.min(multi.gekisouRank || 1, Math.max(1, multi.players));
-  const bt = Engine.battleRates(battle, rank, multi.justRate);
-  const key = bt.rank + ":" + bt.justRate;
+  const bt = Engine.battleRates(battle, Engine.gekisouRanks(multi), multi.justRate);
+  const key = Engine.gekisouKey(bt);
   if (!levelFactors.has(key)) levelFactors.set(key, new Map());
   if (!supportFactors.has(key)) supportFactors.set(key, new Map());
   const known = levelFactors.get(key);
@@ -124,13 +123,15 @@ async function comboBoostOf(input, id, pool = null) {
   if (!multi || !battle || !battle.power || !replay) return null;
   const scope = Engine.comboScope(input);
   if (!scope) return null;
-  const bt = Engine.battleRates(battle, Math.min(multi.gekisouRank || 1, Math.max(1, multi.players)), multi.justRate);
+  const bt = Engine.battleRates(battle, Engine.gekisouRanks(multi), multi.justRate);
   const byScore = new Map();
+  const keyOf = (sid) => sid + "|" + Engine.gekisouKey(bt);
   const todo = scope.scoreIds.filter((sid) => {
-    const e = comboShares.get(sid + "|" + bt.rank + ":" + bt.justRate);
+    const e = comboShares.get(keyOf(sid));
     return !e || scope.keys.some((k) => !e.b.has(k));
   });
-  const keyOf = (sid) => sid + "|" + bt.rank + ":" + bt.justRate;
+  // The rank as Simulate.comboBoostsWith takes it, with the chart's bonus percents for averaged ranks.
+  const btOf = (sid) => ({ rank: bt.rank, ranks: bt.ranks, justRate: bt.justRate, percents: battle.byScore.get(sid).percents });
   let done = 0;
   const measured = new Set();
   const finish = (sid, entry) => {
@@ -146,7 +147,7 @@ async function comboBoostOf(input, id, pool = null) {
         todo.map((sid) => {
           const entry = comboShares.get(keyOf(sid));
           const ctx = Simulate.comboContext(master, scope.keys.concat(entry ? [...entry.b.keys()] : []), scope.support, scope.idle);
-          return { type: "combo", scoreId: sid, ctx, bt: { rank: bt.rank, justRate: bt.justRate }, keys: scope.keys, entry };
+          return { type: "combo", scoreId: sid, ctx, bt: btOf(sid), keys: scope.keys, entry };
         }),
         (k, out) => finish(todo[k], out),
         () => {},
@@ -159,7 +160,7 @@ async function comboBoostOf(input, id, pool = null) {
   }
   const left = todo.filter((sid) => !measured.has(sid));
   const s = left.length ? await replaySession() : null;
-  for (const sid of left) finish(sid, Simulate.comboBoosts(s, master, bt, sid, scope.keys, scope.support, scope.idle, comboShares.get(keyOf(sid))));
+  for (const sid of left) finish(sid, Simulate.comboBoosts(s, master, btOf(sid), sid, scope.keys, scope.support, scope.idle, comboShares.get(keyOf(sid))));
   for (const sid of scope.scoreIds) byScore.set(sid, comboShares.get(keyOf(sid)));
   return { byScore, byMusic: new Map([...scope.byMusic].map(([mid, sid]) => [mid, byScore.get(sid)])) };
 }
@@ -215,15 +216,14 @@ const gekisouOn = (input) => !!(input.mode === "normal" && input.multi && input.
 // 1% (8 seeds: 3%), for about 0.5 s more per deck.
 const LUCK_SEEDS = 64;
 
-// Simulate.orderScores of one deck; gekisou ({rank, justRate}) plays with Gekisou on: a chart with a LUCK range on
-// LUCK_SEEDS seeds, others on their first published seed (nothing else draws from the seed).
+// Simulate.orderScores of one deck; gekisou ({rank, ranks, justRate}, a search's) plays with Gekisou on: a chart with a
+// LUCK range on LUCK_SEEDS seeds, others on their first published seed (nothing else draws from the seed).
 function simulateDeck(s, scoreId, power, members, snaps, gekisou) {
   let gk = null;
   if (gekisou) {
     const b = battle && battle.byScore.get(scoreId);
-    const r = gekisou.rank;
     const seeds = !b ? [0] : b.luck ? Simulate.luckSeeds(b.replaySeeds, LUCK_SEEDS) : [b.seeds[0].seed];
-    gk = { ranks: [r, r, r], justRate: gekisou.justRate, justTypes: master.justTypes, seeds };
+    gk = Simulate.gekisouPlay(gekisou, b && b.percents, master.justTypes, seeds);
   }
   return Simulate.orderScores(s, scoreId, power, Simulate.performers(master, members, snaps), gk);
 }
@@ -246,7 +246,7 @@ async function scoreInput(base, id, every, pool = null) {
   let input = base;
   let approx = [];
   const multi = base.mode === "normal" && base.multi && base.multi.players >= 1 ? base.multi : null;
-  const gk = multi && battle && battle.power ? Engine.battleRates(battle, Math.min(multi.gekisouRank || 1, Math.max(1, multi.players)), multi.justRate) : null;
+  const gk = multi && battle && battle.power ? Engine.battleRates(battle, Engine.gekisouRanks(multi), multi.justRate) : null;
   if (!every && base.mode !== "challenge" && !(base.musicIds && base.musicIds.length)) {
     const pre = Engine.search({ ...base, compareSongs: true, topK: 1 });
     if (pre.error || !pre.songs.length) return { input: base, approx: [] };
@@ -259,7 +259,7 @@ async function scoreInput(base, id, every, pool = null) {
     input = { ...base, musicIds: picked };
     approx = pre.songs.filter((d) => !picked.includes(d.chart.musicId));
   }
-  const gkKey = gk ? gk.rank + ":" + gk.justRate : "solo";
+  const gkKey = gk ? Engine.gekisouKey(gk) : "solo";
   const scope = Engine.scoreScope(input, every ? 0 : undefined);
   const todo = scope.scoreIds.map((sid) => {
     const k = sid + "|" + gkKey;
@@ -269,7 +269,7 @@ async function scoreInput(base, id, every, pool = null) {
   });
   const work = todo.filter((t) => t.pairs.length).map((t) => {
     const b = gk && battle.byScore.get(t.sid);
-    const gekisou = gk ? { ranks: [gk.rank, gk.rank, gk.rank], justRate: gk.justRate, justTypes: master.justTypes, seeds: b ? [b.seeds[0].seed] : [0] } : null;
+    const gekisou = gk ? Simulate.gekisouPlay(gk, b && b.percents, master.justTypes, b ? [b.seeds[0].seed] : [0]) : null;
     return { t, gekisou, jobs: Simulate.snapSkillJobs(master, t.pairs), done: 0 };
   });
   const total = work.reduce((a, w) => a + w.jobs.length, 0);
@@ -423,10 +423,10 @@ async function savedDecks(msg) {
     // Simulation: the payoff of a deck on one song from its simulated mean (score: times the play's share; points: the
     // room's rank chances, Engine.roomPayoff).
     const sim = replay && gkOut ? await replaySession() : null;
-    const gkRun = gkOut ? { ranks: [gkOut.rank, gkOut.rank, gkOut.rank], justRate: gkOut.justRate, justTypes: master.justTypes } : null;
+    const gkRun = (sid) => (gkOut ? Simulate.gekisouPlay(gkOut, (battle.byScore.get(sid) || {}).percents, master.justTypes) : null);
     const runners = new Map();
     const runnerOf = (sid) => {
-      if (!runners.has(sid)) runners.set(sid, Simulate.chartRunner(sim, sid, gkRun));
+      if (!runners.has(sid)) runners.set(sid, Simulate.chartRunner(sim, sid, gkRun(sid)));
       return runners.get(sid);
     };
     const luckOf = (sid) => !!(battle.byScore.get(sid) || {}).luck;
@@ -471,7 +471,7 @@ async function savedDecks(msg) {
         try {
           await helpers.run(
             tasks.map(([sid, idx]) => ({
-              type: "mean", scoreId: sid, gekisou: gkRun,
+              type: "mean", scoreId: sid, gekisou: gkRun(sid),
               items: idx.map((i) => ({ power: items[i].d.displayPower, perf: perfOf(items[i].d), seeds: seedsOf(sid), total: items[i].total, from: items[i].from })),
             })),
             (k, out) => {

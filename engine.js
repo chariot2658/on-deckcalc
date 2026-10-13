@@ -562,6 +562,41 @@
     return Math.trunc(Math.sqrt(5 / players) * base * players);
   }
 
+  // A public room's opponents are not known when the deck is chosen (multi.auto): the others' average score is taken
+  // log-uniform over OPPONENT_RANGE, in OPPONENT_LEVELS equally likely levels (each level's geometric midpoint), and the
+  // rank in every Gekisou range uniform over the room's ranks. Measured with every card owned (2026-10-12, true rank
+  // uniform 1–5, the others' average 1–20M): saved decks chosen this way lost 0.6% on average against the best candidate
+  // for the true others' average (1.6% at worst), decks chosen for one fixed guess 0.9–5.0% (2.0–9.8% at worst); picking
+  // among five candidates, the decks for 2–8M were those for 1–20M.
+  const OPPONENT_RANGE = [1e6, 2e7];
+  const OPPONENT_LEVELS = 10;
+
+  /** The others' total score in a room: [[total, weight]] (multi.auto: OPPONENT_LEVELS levels, else othersScore). */
+  function opponentLevels(multi) {
+    if (!multi) return [[0, 1]];
+    if (!multi.auto) return [[multi.othersScore || 0, 1]];
+    const [a, b] = OPPONENT_RANGE;
+    const n = Math.max(0, (multi.players || 1) - 1);
+    return Array.from({ length: OPPONENT_LEVELS }, (_, i) => [n * a * Math.pow(b / a, (i + 0.5) / OPPONENT_LEVELS), 1 / OPPONENT_LEVELS]);
+  }
+
+  /** The Gekisou rank a search assumes: multi.gekisouRank (at most the room size), or with multi.auto every rank of the room. */
+  function gekisouRanks(multi) {
+    const n = Math.min(5, Math.max(1, (multi && multi.players) || 1));
+    if (multi && multi.auto) return Array.from({ length: n }, (_, i) => i + 1);
+    return Math.min((multi && multi.gekisouRank) || 1, n);
+  }
+
+  /** A search's `gekisou`: {rank, justRate}, or with averaged ranks {rank: null, ranks, justRate}. */
+  function gekisouOut(bt) {
+    return bt.ranks ? { rank: null, ranks: bt.ranks, justRate: bt.justRate } : { rank: bt.rank, justRate: bt.justRate };
+  }
+
+  /** A cache key of battleRates' (or a search's `gekisou`) rank and Just rate. */
+  function gekisouKey(gk) {
+    return (gk.ranks ? "r" + gk.ranks.join("") : gk.rank) + ":" + gk.justRate;
+  }
+
   /**
    * Playable charts: {scoreId, musicId, difficulty, level, perPower, thresholds, battle, lengthSec}. perPower is the no-skill score per
    * unit of power (music-data.json offSeeds, Gekisou off, every note Perfect); charts without it are skipped.
@@ -1234,9 +1269,9 @@
     const event = input.event;
     const multi = mode === "normal" && input.multi && input.multi.players >= 1 ? input.multi : null;
     // A multiplayer live scores with Gekisou (battleRates): the chart rates, live skill weights and Gekisou skills at
-    // the rank assumed in every range (at most the room size) and the Just rate.
+    // the rank assumed in every range (at most the room size; multi.auto: the mean over the room's ranks) and the Just rate.
     const battle = multi && input.battle && input.battle.power ? input.battle : null;
-    const bt = battle ? battleRates(battle, Math.min(multi.gekisouRank || 1, Math.max(1, multi.players)), multi.justRate) : null;
+    const bt = battle ? battleRates(battle, gekisouRanks(multi), multi.justRate) : null;
     const sw = bt
       ? { kinds: battle.kinds, byScore: bt.weights }
       : input.skillWeights && input.skillWeights.kinds.length ? input.skillWeights : null;
@@ -1376,8 +1411,10 @@
     const player = input.player || {};
     const topK = input.topK || 5;
     const accuracy = input.accuracy || null;
+    // A room whose others are unknown (multi.auto): the payoff is the expected one over opponentLevels.
+    const oppLevels = !scoreMode && mode === "normal" && input.multi && input.multi.players >= 1 && input.multi.auto ? opponentLevels(input.multi) : null;
     // The expected score is linear in the play share, so the score mode needs only its mean.
-    const stochastic = !scoreMode && !!(accuracy && accuracy.breaks > 0);
+    const stochastic = !scoreMode && (!!(accuracy && accuracy.breaks > 0) || !!oppLevels);
     const sharesOf = new Map(); // scoreId -> {mean, max, q}
     const shares = (c) => {
       let v = sharesOf.get(c.scoreId);
@@ -1388,6 +1425,8 @@
           max: Math.max(...out.map(([x]) => x)),
           q: stochastic ? shareQuantiles(m, c.scoreId, accuracy) : null,
         };
+        // One play share (no combo breaks): every quantile is the same.
+        v.det = !!v.q && v.q[0] === v.q[v.q.length - 1];
         sharesOf.set(c.scoreId, v);
       }
       return v;
@@ -1405,9 +1444,9 @@
     const cpOf = (rank) => (pay.cp.get(rank) || 0) * rate;
     const { multi, battle, bt, sw, skillRateOf: liveRateOf, chartList: playable } = liveSetup(input);
     // Own score each rank needs on a chart: solo thresholds, or in a room what the others' scores leave (E counts as D).
-    const ownThresholds = (c) =>
+    const ownThresholds = (c, others = multi ? multi.othersScore || 0 : 0) =>
       multi
-        ? c.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
+        ? c.battle.map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - others)])
         : c.thresholds;
     const scoreOf = (points, items, rank) => (points + cpOf(rank) * cpValue) * W.point + items * W.item;
     // A public room draws its song at random: no song to choose, per minute or otherwise. Decks are ranked by the mean
@@ -1826,6 +1865,7 @@
      */
     function bestFirst(T, bMax, powBound, ubOf, threshold, visit) {
       const ps = new Set();
+      if (T.mix) for (const sub of mixSubs(T)) for (const n of sub.need.values()) ps.add(n.power);
       for (const n of T.need.values()) ps.add(n.power);
       if (T.frontier) for (const kept of T.frontier.values()) for (const o of kept) ps.add(o.power);
       const P = Float64Array.from(ps).sort();
@@ -1951,22 +1991,8 @@
         for (const c of list) if (rate.get(c) > rate.get(best)) best = c;
         return { need: new Map(), rankList: [], rankFor: () => 0, frontier: null, rate, cands: null, best, charts: list };
       }
-      // Ties (in a room, often ranks the others' scores reach alone) go solo to the easier chart, in a room to the
-      // higher own score, which leaves the room more margin.
-      const tie = (c, cur) => (multi ? rate.get(c) > rate.get(cur.chart) : c.level < cur.chart.level);
-      const need = new Map();
-      for (const c of list) {
-        for (const [r, req] of ownThresholds(c)) {
-          const p = Math.ceil(req / rate.get(c));
-          const cur = need.get(r);
-          if (!cur || p < cur.power || (p === cur.power && tie(c, cur))) need.set(r, { power: p, chart: c });
-        }
-      }
-      const rankList = [...need.keys()].sort((a, b) => b - a);
-      const rankFor = (power) => {
-        for (const r of rankList) if (need.get(r).power <= power) return r;
-        return rankList[rankList.length - 1];
-      };
+      if (oppLevels) return mixTable(list, rateP, rate, optimistic);
+      const { need, rankList, rankFor } = stepTable(list, rate, ownThresholds);
       // Per minute: per rank, the charts not beaten by one needing no more power and taking no longer, by power.
       let frontier = null;
       if (perMinute) {
@@ -1996,17 +2022,94 @@
             list.slice().sort((a, b) => needOf(a) - needOf(b)).slice(0, 3).forEach((c) => picked.add(c));
           }
         }
-        cands = [...picked].map((c) => ({
-          chart: c,
-          // [rank, power reaching it at share 1], highest rank first
-          xs: ownThresholds(c).map(([r, req]) => [r, req / rateP.get(c)]).sort((a, b) => b[0] - a[0]),
-          q: shares(c).q,
-          mean: shares(c).mean,
-          min: perMinute ? minutesOf(c) : 0,
-        }));
+        cands = [...picked].map((c) => candOf(c, rateP, [[multi ? multi.othersScore || 0 : 0, 1]]));
       }
       return { need, rankList, rankFor, frontier, rate, cands };
     }
+    // Per rank the chart of `list` needing the least power at chart rates `rate` and thresholds `thOf(c)`.
+    function stepTable(list, rate, thOf) {
+      // Ties (in a room, often ranks the others' scores reach alone) go solo to the easier chart, in a room to the
+      // higher own score, which leaves the room more margin.
+      const tie = (c, cur) => (multi ? rate.get(c) > rate.get(cur.chart) : c.level < cur.chart.level);
+      const need = new Map();
+      for (const c of list) {
+        for (const [r, req] of thOf(c)) {
+          const p = Math.ceil(req / rate.get(c));
+          const cur = need.get(r);
+          if (!cur || p < cur.power || (p === cur.power && tie(c, cur))) need.set(r, { power: p, chart: c });
+        }
+      }
+      const rankList = [...need.keys()].sort((a, b) => b - a);
+      const rankFor = (power) => {
+        for (const r of rankList) if (need.get(r).power <= power) return r;
+        return rankList[rankList.length - 1];
+      };
+      return { need, rankList, rankFor };
+    }
+    // A candidate chart for chooseExpected: per level of the others' total ([[others, weight]]), [rank, power reaching
+    // it at share 1], highest rank first.
+    function candOf(c, rateP, levels) {
+      return {
+        chart: c,
+        levels: levels.map(([others, w]) => [w, ownThresholds(c, others).map(([r, req]) => [r, req / rateP.get(c)]).sort((a, b) => b[0] - a[0])]),
+        q: shares(c).q,
+        mean: shares(c).mean,
+        min: perMinute ? minutesOf(c) : 0,
+      };
+    }
+    // The others unknown (oppLevels): per chart and level, [rank, own score needed], highest rank first (cached).
+    const levelTh = new Map();
+    const levelThresholds = (c) => {
+      let a = levelTh.get(c);
+      if (!a) {
+        a = oppLevels.map(([others]) => ownThresholds(c, others).slice().sort((x, y) => y[0] - x[0]));
+        levelTh.set(c, a);
+      }
+      return a;
+    };
+    // An optimistic table (`opt`) bounds the expected payoff by each level on its own chart, at the best play share
+    // (choose); per level the step table at its thresholds (mixSubs, built when needed) gives the power breakpoints
+    // between which that bound is constant. A mean table holds the `cands` (with their rate `rp`) that give the
+    // expected payoff on one chart (chooseExpected): per level and rank the three charts needing the least power.
+    function mixTable(list, rateP, rate, optimistic) {
+      const base = { mix: true, list, need: new Map(), rankList: [], rankFor: null, frontier: null, rate };
+      if (optimistic) return { ...base, opt: true, cands: null };
+      let picked = list;
+      if (list.length > 3) {
+        // A song's charts share its thresholds, so of each song only the chart of the highest rate can need the least.
+        const bySong = new Map();
+        for (const c of list) {
+          const cur = bySong.get(c.musicId);
+          if (!cur || rate.get(c) > rate.get(cur)) bySong.set(c.musicId, c);
+        }
+        const top = new Map(); // level * 64 + rank -> [[need, chart]] (at most 3, ascending)
+        for (const c of bySong.values()) {
+          const rc = rate.get(c);
+          levelThresholds(c).forEach((th, j) => {
+            for (const [r, req] of th) {
+              const key = j * 64 + r;
+              const need = req / rc;
+              let t = top.get(key);
+              if (!t) top.set(key, (t = []));
+              if (t.length < 3 || need < t[t.length - 1][0]) {
+                t.push([need, c]);
+                t.sort((x, y) => x[0] - y[0]);
+                if (t.length > 3) t.pop();
+              }
+            }
+          });
+        }
+        const set = new Set();
+        for (const t of top.values()) for (const [, c] of t) set.add(c);
+        picked = [...set];
+      }
+      const cands = picked.map((c) => ({ chart: c, rp: rateP.get(c), q: shares(c).q, mean: shares(c).mean, min: perMinute ? minutesOf(c) : 0 }));
+      return { ...base, cands };
+    }
+    // An optimistic mix table's step tables per level ({w, need, rankList, rankFor}), built once.
+    const mixSubs = (t) => t.subs || (t.subs = oppLevels.map(([, w], j) => ({ w, ...stepTable(t.list, t.rate, (c) => levelThresholds(c)[j]) })));
+    // A mix table's weighted payoff with `vals` (payoff by rank) at `power`, each level on its own chart (a bound).
+    const mixVal = (rt, vals, power) => mixSubs(rt).reduce((a, s) => a + s.w * vals[s.rankFor(power)], 0);
     // Rank and chart a deck of `power` with bonuses pb/ib plays: the best rank (per live), or the best rank and chart
     // pair per minute. Monotone in power and bonuses, so it also gives the upper bounds. `x`: the deck's snap skill
     // score per unit of power (score objective).
@@ -2021,6 +2124,28 @@
         return { rank, chart: c, needPower: th ? Math.ceil(th[1] / r) : 0, points: 0, items: 0, sc, x };
       }
       if (rt.cands) return chooseExpected(rt, power, pb, ib);
+      if (rt.mix) {
+        // A bound: each level of the others' total on its own chart (the step tables' arithmetic; powers are whole).
+        let sc = 0;
+        for (let j = 0; j < oppLevels.length; j++) {
+          let r = -1;
+          let low = 0;
+          for (const c of rt.list) {
+            const th = levelThresholds(c)[j];
+            low = th[th.length - 1][0];
+            const y = power * rt.rate.get(c);
+            for (const [rk, req] of th) {
+              if (req <= y) {
+                if (rk > r) r = rk;
+                break;
+              }
+            }
+          }
+          if (r < 0) r = low;
+          sc += oppLevels[j][1] * scoreOf(eventPoints(pb, rate, pay.points.get(r) || 0), eventItems(pay.items.get(r) || 0, ib, rate), r);
+        }
+        return { sc };
+      }
       const at = (r, chart, needPower, min) => {
         const points = eventPoints(pb, rate, pay.points.get(r) || 0);
         const items = eventItems(pay.items.get(r) || 0, ib, rate);
@@ -2045,37 +2170,60 @@
       const n = rt.need.get(r);
       return at(r, n.chart, n.power, rt.frontier && n.chart.lengthSec ? minutesOf(n.chart) : 0);
     }
-    // With combo breaks: per candidate chart, the chance of each rank over the play's shares, and the expected payoff
-    // (per minute: over the chart's minutes). `rank` is the median rank and `chance` the chance of reaching it.
+    // With combo breaks or the others unknown: per candidate chart, the chance of each rank over the play's shares (and
+    // the levels of the others' total), and the expected payoff (per minute: over the chart's minutes). `rank` is the
+    // median rank and `chance` the chance of reaching it; `needPower` the power reaching it at the mean share (with one
+    // level of the others' total).
     function chooseExpected(rt, power, pb, ib) {
       let best = null;
       for (const cd of rt.cands) {
-        let above = 0;
+        const byRank = new Map();
+        if (cd.rp !== undefined) {
+          // The others unknown: the levels' thresholds (levelThresholds) at the candidate's rate.
+          const th = levelThresholds(cd.chart);
+          const s0 = power * cd.rp;
+          for (let j = 0; j < th.length; j++) {
+            const w = oppLevels[j][1];
+            let above = 0;
+            for (const [r, req] of th[j]) {
+              const P = Math.max(above, req <= 0 ? 1 : survive(cd.q, req / s0));
+              if (P > above) byRank.set(r, (byRank.get(r) || 0) + w * (P - above));
+              above = P;
+            }
+          }
+        } else {
+          for (const [w, xs] of cd.levels) {
+            let above = 0;
+            for (const [r, x] of xs) {
+              const P = Math.max(above, x <= 0 ? 1 : survive(cd.q, x / power));
+              if (P > above) byRank.set(r, (byRank.get(r) || 0) + w * (P - above));
+              above = P;
+            }
+          }
+        }
+        const dist = [...byRank].sort((a, b) => b[0] - a[0]);
         let sc = 0;
         let points = 0;
         let items = 0;
         let cp = 0;
+        let acc = 0;
         let median = null;
-        const dist = [];
-        for (const [r, x] of cd.xs) {
-          const P = Math.max(above, x <= 0 ? 1 : survive(cd.q, x / power));
-          const p = P - above;
-          if (p > 0) {
-            const pt = eventPoints(pb, rate, pay.points.get(r) || 0);
-            const it = eventItems(pay.items.get(r) || 0, ib, rate);
-            sc += p * scoreOf(pt, it, r);
-            points += p * pt;
-            items += p * it;
-            cp += p * cpOf(r);
-            dist.push([r, p]);
-          }
-          if (!median && P >= 0.5) median = { rank: r, chance: P, x };
-          above = P;
+        for (const [r, p] of dist) {
+          const pt = eventPoints(pb, rate, pay.points.get(r) || 0);
+          const it = eventItems(pay.items.get(r) || 0, ib, rate);
+          sc += p * scoreOf(pt, it, r);
+          points += p * pt;
+          items += p * it;
+          cp += p * cpOf(r);
+          acc += p;
+          if (!median && acc >= 0.5 - 1e-9) median = { rank: r, chance: acc };
         }
+        if (!median) median = dist.length ? { rank: dist[dist.length - 1][0], chance: acc } : { rank: 0, chance: 0 };
         if (cd.min) sc /= cd.min;
         if (!best || sc > best.sc) {
+          const x = cd.levels && cd.levels.length === 1 ? (cd.levels[0][1].find(([r]) => r === median.rank) || [0, 0])[1] : null;
           best = {
-            rank: median.rank, chance: median.chance, dist, chart: cd.chart, needPower: Math.ceil(median.x / cd.mean),
+            rank: median.rank, chance: median.chance, dist, chart: cd.chart, needPower: x === null ? null : Math.ceil(x / cd.mean),
             points, items, cp, sc,
           };
         }
@@ -2608,7 +2756,7 @@
         perSong: built.map((x) => x.perSong),
         random: true,
         rate,
-        gekisou: bt ? { rank: bt.rank, justRate: bt.justRate } : null,
+        gekisou: bt ? gekisouOut(bt) : null,
         payoff: pay,
         ctx,
         stats: { sets: nSets, evaluated, groups: nG, songs: nS, ms: Date.now() - t0 },
@@ -2640,7 +2788,9 @@
       const boundT = tablesOf(sk.anySkill ? sk.maxSkill : null, stochastic);
       let meanNoSkill = null;
       let RMAX = 1;
-      for (const t of boundT) for (const r of t.rankList) RMAX = Math.max(RMAX, r + 1);
+      for (const t of boundT) for (const r of t.mix ? mixSubs(t).flatMap((x) => x.rankList) : t.rankList) RMAX = Math.max(RMAX, r + 1);
+      // A bound table's payoff with `vals` (payoff by rank) at power p (mix tables: weighted over the others' levels).
+      const valAt = (t, vals, p) => (t.mix ? mixVal(t, vals, p) : vals[t.rankFor(p)]);
       // Payoff of each rank with bonuses pb/ib, indexed by rank.
       const values = (pb, ib) => {
         const out = new Float64Array(RMAX);
@@ -2655,10 +2805,17 @@
         const ks = [];
         songList.forEach((so, k) => so.g === gi && ks.push(k));
         const ps = new Set();
-        for (const k of ks) for (const n of boundT[k].need.values()) ps.add(n.power);
+        for (const k of ks) for (const t of boundT[k].mix ? mixSubs(boundT[k]) : [boundT[k]]) for (const n of t.need.values()) ps.add(n.power);
         const P = Float64Array.from(ps).sort();
         const cnt = new Float64Array((P.length + 1) * RMAX);
-        for (const k of ks) for (let l = 0; l <= P.length; l++) cnt[l * RMAX + boundT[k].rankFor(l ? P[l - 1] : -Infinity)]++;
+        for (const k of ks) {
+          const t = boundT[k];
+          for (let l = 0; l <= P.length; l++) {
+            const p = l ? P[l - 1] : -Infinity;
+            if (t.mix) for (const s of mixSubs(t)) cnt[l * RMAX + s.rankFor(p)] += s.w;
+            else cnt[l * RMAX + t.rankFor(p)]++;
+          }
+        }
         const fNo = Int32Array.from(allCand, (v) => slotF(m, v, [0, 0, 0], g.music, ctx));
         return { P, cnt, fNo };
       });
@@ -2699,6 +2856,73 @@
       // Sums over songs in a different order: a bound may fall a rounding error short of the exact payoff.
       const slack = (x) => x - Math.abs(x) * 1e-9;
 
+      // The others unknown (oppLevels): a song's payoff straight from its charts' thresholds per level, without tables
+      // (build() makes the tables of the decks found). `x`: per chartList chart the rate added to perPower, or null;
+      // `p` the power, `V` the payoff by rank. oppUb bounds it (each level on its own chart, at the best play share);
+      // oppSong is chooseExpected's arithmetic, one chart for every level.
+      const oppUb = (so, x, p, V) => {
+        let v = 0;
+        for (let j = 0; j < oppLevels.length; j++) {
+          let best = -1;
+          let low = 0;
+          so.list.forEach((c, i) => {
+            const sc = p * (c.perPower + (x ? x[so.idx[i]] : 0)) * shares(c).max;
+            const th = levelThresholds(c)[j];
+            low = th[th.length - 1][0];
+            for (const [r, req] of th) {
+              if (req <= sc) {
+                if (r > best) best = r;
+                break;
+              }
+            }
+          });
+          v += oppLevels[j][1] * V[best < 0 ? low : best];
+        }
+        return v;
+      };
+      const oppSong = (so, x, p, V) => {
+        // A song's charts share its room thresholds: with one play share each, the chart scoring most pays most.
+        if (so.list.every((c) => shares(c).det)) {
+          let c = null;
+          let sc = -Infinity;
+          so.list.forEach((d, i) => {
+            const y = p * (d.perPower + (x ? x[so.idx[i]] : 0)) * shares(d).q[0];
+            if (y > sc) {
+              sc = y;
+              c = d;
+            }
+          });
+          const th = levelThresholds(c);
+          let v = 0;
+          for (let j = 0; j < th.length; j++) {
+            for (const [r, req] of th[j]) {
+              if (req <= sc) {
+                v += oppLevels[j][1] * V[r];
+                break;
+              }
+            }
+          }
+          return v;
+        }
+        let best = -Infinity;
+        so.list.forEach((c, i) => {
+          const s0 = p * (c.perPower + (x ? x[so.idx[i]] : 0));
+          const q = shares(c).q;
+          const th = levelThresholds(c);
+          let v = 0;
+          for (let j = 0; j < th.length; j++) {
+            let above = 0;
+            for (const [r, req] of th[j]) {
+              const P = Math.max(above, req <= 0 ? 1 : survive(q, req / s0));
+              if (P > above) v += oppLevels[j][1] * (P - above) * V[r];
+              above = P;
+            }
+          }
+          if (v > best) best = v;
+        });
+        return best;
+      };
+
       // The exact best deck of set s (sum of the payoff over the songs), or null when its own bound misses `th`.
       function exact(s, th) {
         evaluated++;
@@ -2711,13 +2935,14 @@
         // With Gekisou support skills, the bound adds each member's best pairing and every snap assignment plays tables
         // of its own (as pairTable).
         const bound = pairPts ? sk.setBound(vs) : skill;
-        const bndT = bound ? tablesOf(bound, stochastic) : boundT;
-        const meanT = pairPts ? null : !stochastic ? bndT : skill ? tablesOf(skill, false) : meanNoSkill || (meanNoSkill = tablesOf(null, false));
+        const bndT = oppLevels ? null : bound ? tablesOf(bound, stochastic) : boundT;
+        const meanT = oppLevels || pairPts ? null : !stochastic ? bndT : skill ? tablesOf(skill, false) : meanNoSkill || (meanNoSkill = tablesOf(null, false));
         if (bound && th > -Infinity) {
           const vals = values(pt + maxSnapPoint, it + maxSnapItem);
           const pb = gl.map((_, g) => powBound(g, s));
           let ub = 0;
-          songList.forEach((so, k) => (ub += vals[bndT[k].rankFor(pb[so.g])]));
+          if (oppLevels) for (const so of songList) ub += oppUb(so, bound, pb[so.g], vals);
+          else songList.forEach((so, k) => (ub += valAt(bndT[k], vals, pb[so.g])));
           if (ub < th) return null;
         }
         // Exact F per group for each leader; leaders another matches or beats in every group are dropped.
@@ -2747,8 +2972,22 @@
         for (const st of snapStates(G, snapPoint, snapItem, snaps.length, pairPts ? supportMeans(vs, allIdx) : null)) {
           const pb = pt + st.pt;
           const ib = it + st.it;
-          const vals = stochastic ? null : values(pb, ib);
           const g = st.power;
+          if (oppLevels) {
+            const V = values(pb, ib);
+            let x = skill;
+            if (pairPts) {
+              x = pairSum(vs, st.pick, allIdx);
+              if (skill) for (let c = 0; c < x.length; c++) x[c] += skill[c];
+            }
+            for (const ld of kept) {
+              let sum = 0;
+              for (let k = 0; k < nSongs; k++) sum += oppSong(songList[k], x, ld.f[songList[k].g] + g, V);
+              if (!best || sum > best.sum || (sum === best.sum && g > best.g)) best = { sum, st, g, ld, pb, ib, x };
+            }
+            continue;
+          }
+          const vals = stochastic ? null : values(pb, ib);
           let T = meanT;
           if (pairPts) {
             const x = pairSum(vs, st.pick, allIdx);
@@ -2764,7 +3003,7 @@
             if (!best || sum > best.sum || (sum === best.sum && g > best.g)) best = { sum, st, g, ld, pb, ib, T };
           }
         }
-        return { s, vs, best, meanT: best.T };
+        return { s, vs, best, meanT: best.T || tablesOf(best.x, false) };
       }
 
       const found = [];
@@ -2873,7 +3112,7 @@
         perSong: built.map((x) => x.perSong),
         random: true,
         rate,
-        gekisou: bt ? { rank: bt.rank, justRate: bt.justRate } : null,
+        gekisou: bt ? gekisouOut(bt) : null,
         payoff: pay,
         ctx,
         stats: { sets: nSets, evaluated, groups: nG, songs: nSongs, ms: Date.now() - t0 },
@@ -3075,7 +3314,7 @@
         else seenSong.add(songs[i].chart.musicId);
       }
     }
-    const gekisou = bt ? { rank: bt.rank, justRate: bt.justRate } : null;
+    const gekisou = bt ? gekisouOut(bt) : null;
     return { results, songs, rate, gekisou, payoff: pay, ctx, stats: { sets: nSets, evaluated, groups: groups.size, ms: Date.now() - t0 } };
   }
 
@@ -3217,9 +3456,13 @@
    * For the support skills that add up per Just (gekisouSupportJustStack), `aptSupportJust` (scoreId -> "shape:match" ->
    * {tail, ranges}) keeps the Just play's increments at the rank and `justRanges` (scoreId -> [[Just notes, notes, range
    * score at the Just rate over the Just play's]]) what scales them.
+   * `rank` may be a list of ranks (gekisouRanks with multi.auto): every rate above is linear in the ranges' bonus
+   * percents, so the mean over those ranks is the rate at their mean percents (`rank` is then null and `ranks` the list).
    */
   function battleRates(battle, rank, justRate) {
-    const r = Math.min(5, Math.max(1, Math.round(rank || 1)));
+    const ranks = Array.isArray(rank) ? rank.map((x) => Math.min(5, Math.max(1, Math.round(x)))) : null;
+    const r = ranks ? null : Math.min(5, Math.max(1, Math.round(rank || 1)));
+    const pctOf = (row) => (ranks ? ranks.reduce((a, x) => a + row[x - 1], 0) / ranks.length : row[r - 1]);
     const j = Math.min(1, Math.max(0, justRate ?? 1));
     const P = battle.power;
     const nk = battle.kinds.length;
@@ -3230,7 +3473,7 @@
     const aptSupportJust = new Map();
     const justRanges = new Map();
     for (const [sid, b] of battle.byScore) {
-      const p = b.percents.map((row) => [row[0], row[r - 1]]);
+      const p = b.percents.map((row) => [row[0], pctOf(row)]);
       let base = 0;
       const w = new Float64Array(nk);
       // Each range's score at Just rate j over the Just play's (seed means): a Just note scores more than a Perfect one.
@@ -3285,7 +3528,7 @@
       aptSupportJust.set(sid, gj);
       if (b.justRanges) justRanges.set(sid, b.justRanges.map(([J, n], i) => [J, n, js[i]]));
     }
-    return { rank: r, justRate: j, perPower, weights, apt, aptSupport, aptSupportJust, justRanges, memo: new Map() };
+    return { rank: r, ranks, justRate: j, perPower, weights, apt, aptSupport, aptSupportJust, justRanges, memo: new Map() };
   }
 
   /**
@@ -3529,7 +3772,7 @@
    * The expected payoff of a multiplayer normal live (input as for search: master, event, boosts, objective, cpValue,
    * accuracy, multi) on `chart` (a charts() entry) when the player's all-Perfect score is `score` and the deck's
    * bonuses are pb/ib: {points, items, cp, sc (what the search ranks by), rankDist: [[rank, p]]}. The play keeps a share
-   * of the score as playShares; the room's rank adds multi.othersScore (E counts as D, as in the search).
+   * of the score as playShares; the room's rank adds multi.othersScore, or with multi.auto each of opponentLevels (E counts as D, as in the search).
    */
   function roomPayoff(input, chart, score, pb, ib) {
     const m = input.master;
@@ -3537,14 +3780,17 @@
     const pay = payoff(m, input.event, "normal");
     const rate = boostRate(m, "normal", input.boosts || 0);
     const W = input.objective === "items" ? { point: 1, item: 1e6 } : { point: 1e6, item: 1 };
-    const th = chart.battle
-      .map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - (multi.othersScore || 0))])
-      .sort((a, b) => a[1] - b[1]);
-    const lowest = Math.min(...th.map((x) => x[0]));
     const dist = new Map();
-    for (const [x, p] of playShares(m, chart.scoreId, input.accuracy || null)) {
-      const r = scoreRankOf(th, score * x) || lowest;
-      dist.set(r, (dist.get(r) || 0) + p);
+    const plays = playShares(m, chart.scoreId, input.accuracy || null);
+    for (const [others, w] of opponentLevels(multi)) {
+      const th = chart.battle
+        .map(([r, base]) => [Math.max(r, 2), Math.max(0, battleRequiredScore(base, multi.players) - others)])
+        .sort((a, b) => a[1] - b[1]);
+      const lowest = Math.min(...th.map((x) => x[0]));
+      for (const [x, p] of plays) {
+        const r = scoreRankOf(th, score * x) || lowest;
+        dist.set(r, (dist.get(r) || 0) + w * p);
+      }
     }
     const out = { points: 0, items: 0, cp: 0, sc: 0, rankDist: [...dist].sort((a, b) => b[0] - a[0]) };
     for (const [r, p] of dist) {
@@ -3616,7 +3862,7 @@
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
     battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
     gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, snapSkillClass, skillGaps, scoreScope, roughSnapRate,
-    luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, gekisouSongType, gekisouSongGroups, roomPayoff,
+    luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, gekisouSongType, gekisouSongGroups, roomPayoff, opponentLevels, gekisouRanks, gekisouKey, gekisouOut, OPPONENT_RANGE,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Engine = api;

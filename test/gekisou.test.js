@@ -75,43 +75,43 @@ assert.strictEqual(E.search({ ...input, multi: { players: 2, othersScore: 0, gek
     songs.get(c.musicId).push(c);
   }
   const music = new Map([...songs.keys()].map((id) => [id, E.musicView(m, id)]));
-  const rankOn = (list, power) => {
-    let best = 0;
-    for (const c of list) {
-      const own = c.battle.map(([r, b]) => [Math.max(r, 2), Math.max(0, E.battleRequiredScore(b, 5) - multi.othersScore)]);
-      best = Math.max(best, E.scoreRankOf(own, power * c.perPower));
-    }
-    return best;
-  };
+  const rankAt = (c, power, others) =>
+    E.scoreRankOf(c.battle.map(([r, b]) => [Math.max(r, 2), Math.max(0, E.battleRequiredScore(b, 5) - others)]), power * c.perPower);
+  const rankOn = (list, power) => Math.max(0, ...list.map((c) => rankAt(c, power, multi.othersScore)));
   const value = (sum, points, rank) => E.eventPoints(points, rate, pay.points.get(rank) || 0) * 1e6 + E.eventItems(pay.items.get(rank) || 0, sum.it, rate);
   // Snap placements: each snap in one slot or unused.
   const places = [];
   for (let a = -1; a < 5; a++) for (let b = -1; b < 5; b++) if (a < 0 || a !== b) places.push([a, b]);
-  let best = -Infinity;
-  const pick = (k, from, acc) => {
-    if (acc.length === 5) {
-      for (let L = 0; L < 5; L++) {
-        const order = acc.slice();
-        [order[L], order[2]] = [order[2], order[L]];
-        for (const [a, b] of places) {
-          const sn = [null, null, null, null, null];
-          if (a >= 0) sn[a] = sv[0];
-          if (b >= 0) sn[b] = sv[1];
-          const pt = order.reduce((x, v) => x + ctx.memberBonus.get(v).point, 0) + sn.reduce((x, s) => x + (s ? ctx.snapBonus.get(s).point : 0), 0);
-          const it = order.reduce((x, v) => x + ctx.memberBonus.get(v).item, 0) + sn.reduce((x, s) => x + (s ? ctx.snapBonus.get(s).item : 0), 0);
-          let sum = 0;
-          for (const [id, list] of songs) sum += value({ it }, pt, rankOn(list, E.deckPower(m, order, sn, music.get(id), ctx)));
-          best = Math.max(best, sum / songs.size);
+  // The best mean over the songs of songValue(list, power, pt, it) by brute force.
+  const bruteForce = (songValue) => {
+    let best = -Infinity;
+    const pick = (from, acc) => {
+      if (acc.length === 5) {
+        for (let L = 0; L < 5; L++) {
+          const order = acc.slice();
+          [order[L], order[2]] = [order[2], order[L]];
+          for (const [a, b] of places) {
+            const sn = [null, null, null, null, null];
+            if (a >= 0) sn[a] = sv[0];
+            if (b >= 0) sn[b] = sv[1];
+            const pt = order.reduce((x, v) => x + ctx.memberBonus.get(v).point, 0) + sn.reduce((x, s) => x + (s ? ctx.snapBonus.get(s).point : 0), 0);
+            const it = order.reduce((x, v) => x + ctx.memberBonus.get(v).item, 0) + sn.reduce((x, s) => x + (s ? ctx.snapBonus.get(s).item : 0), 0);
+            let sum = 0;
+            for (const [id, list] of songs) sum += songValue(list, E.deckPower(m, order, sn, music.get(id), ctx), pt, it);
+            best = Math.max(best, sum / songs.size);
+          }
         }
+        return;
       }
-      return;
-    }
-    for (let i = from; i < mv.length; i++) {
-      if (acc.some((v) => v.characterId === mv[i].characterId)) continue;
-      pick(k, i + 1, acc.concat([mv[i]]));
-    }
+      for (let i = from; i < mv.length; i++) {
+        if (acc.some((v) => v.characterId === mv[i].characterId)) continue;
+        pick(i + 1, acc.concat([mv[i]]));
+      }
+    };
+    pick(0, []);
+    return best;
   };
-  pick(0, 0, []);
+  const best = bruteForce((list, power, pt, it) => value({ it }, pt, rankOn(list, power)));
   const top = out.results[0];
   console.log(`random song: ${out.stats.songs} songs, best mean ${(top.score / 1e6).toFixed(2)} pt (brute force ${(best / 1e6).toFixed(2)}),`,
     `ranks ${top.rankDist.map((x) => `${x.rankName} ${Math.round(x.p * 100)}%`).join(" ")}`);
@@ -129,6 +129,27 @@ assert.strictEqual(E.search({ ...input, multi: { players: 2, othersScore: 0, gek
     const p = E.roomPayoff({ ...base, master: m }, d.chart, d.estScore / d.accuracy, d.pointBonus, d.itemBonus);
     assert.strictEqual(p.points, d.points);
   }
+
+  // The others unknown (multi.auto): each song on one chart, the payoff averaged over the levels of the others' total
+  // (Engine.opponentLevels, log-uniform). The search's mean matches the brute force; roomPayoff agrees per song.
+  const auto = { players: 5, auto: true };
+  const levels = E.opponentLevels(auto);
+  assert.strictEqual(levels.length, 10);
+  assert.ok(Math.abs(levels.reduce((a, [, w]) => a + w, 0) - 1) < 1e-12 && levels[0][0] > 4 * 1e6 && levels[9][0] < 4 * 2e7);
+  const autoOut = E.search({ ...base, multi: auto });
+  const bestAuto = bruteForce((list, power, pt, it) =>
+    Math.max(...list.map((c) => levels.reduce((a, [others, w]) => a + w * value({ it }, pt, rankAt(c, power, others)), 0))));
+  const ta = autoOut.results[0];
+  console.log(`random song, others unknown: best mean ${(ta.score / 1e6).toFixed(2)} pt (brute force ${(bestAuto / 1e6).toFixed(2)}),`,
+    `ranks ${ta.rankDist.map((x) => `${x.rankName} ${Math.round(x.p * 100)}%`).join(" ")}`);
+  assert.ok(Math.abs(ta.score - bestAuto) < 1e-6 * bestAuto, `${ta.score} vs ${bestAuto}`);
+  for (const d of autoOut.songs.slice(0, 10)) {
+    const p = E.roomPayoff({ ...base, master: m, multi: auto }, d.chart, d.estScore / d.accuracy, d.pointBonus, d.itemBonus);
+    assert.ok(Math.abs(p.sc - d.score) < 1e-6 * d.score, `${p.sc} vs ${d.score}`);
+  }
+  // A private room with the others unknown: the chosen song's deck by the same expectation.
+  const pickedAuto = E.search({ ...base, multi: { ...auto, pickSong: true } });
+  assert.ok(pickedAuto.results[0].chart && pickedAuto.results[0].score >= ta.score);
 }
 
 // Saved decks for public rooms are one per Gekisou range type: every song with Gekisou data falls in one group.
@@ -240,6 +261,34 @@ assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]
       else if (j === 0 || j === 1) assert.ok(Math.abs(sim - model) < 1e-6, `${sid} rank ${rank} Just ${j}: ${sim} vs ${model}`);
       else assert.ok(Math.abs(sim / model - 1) < 0.005, `${sid} rank ${rank} Just ${j}: ${sim} vs ${model}`);
     }
+  }
+
+  // The others unknown (multi.auto) average the rank over the room: one play rescored to the mean over the ranks
+  // (Simulate.gekisouPlay, scoreOf) is the mean of the plays at each rank (a range's bonus is its score times the rank's
+  // percent, nothing else depends on the rank), on a real deck with skills, on both percent tables and every mission;
+  // battleRates at the list of ranks is the mean of each rank's rates.
+  {
+    const deck = S.performers(m, [52, 59, 58, 60, 62].map((id) => ({ id, skillLevel: 5, gekisouSkillLevel: 5 })), [51, 33, 40, 55, 11].map((id) => ({ id, rank: 5 })));
+    const tables = new Set(); // "missions|percents" tested
+    for (const missions of ["111", "333", "231", "222"]) {
+      for (const song of md.songs.filter((s) => s.gekisouMissions.join("") === missions)) {
+        const sid = song.charts[song.charts.length - 1].scoreId;
+        const b = battle.byScore.get(sid);
+        const key = missions + "|" + JSON.stringify(b && b.percents[0]);
+        if (!b || tables.has(key)) continue;
+        tables.add(key);
+        const ranks = [1, 2, 3, 4, 5];
+        const seed = b.replaySeeds[0];
+        const mean = S.chartRunner(session, sid, S.gekisouPlay({ ranks, justRate: 0.5 }, b.percents, m.justTypes))(P, deck, [0, 1, 2, 3, 4], seed);
+        const each = ranks.map((r) => S.chartRunner(session, sid, S.gekisouPlay({ rank: r, justRate: 0.5 }, b.percents, m.justTypes))(P, deck, [0, 1, 2, 3, 4], seed));
+        assert.ok(Math.abs(mean - each.reduce((a, x) => a + x, 0) / 5) < 1e-6, `${sid}: ${mean} vs ${each}`);
+        const avg = E.battleRates(battle, ranks, 0.5).perPower.get(sid);
+        const per = ranks.reduce((a, r) => a + E.battleRates(battle, r, 0.5).perPower.get(sid), 0) / 5;
+        assert.ok(Math.abs(avg / per - 1) < 1e-6, `${sid}: ${avg} vs ${per}`);
+      }
+    }
+    assert.ok([...tables].some((t) => t.includes("370")) && [...tables].some((t) => t.includes("250,190")));
+    console.log(`mean over ranks 1–5: one play rescored = the mean of the five plays on ${tables.size} charts`);
   }
 
   // A member's Gekisou skill alone at the top level adds what music-data measured (charts without luck ranges, where
