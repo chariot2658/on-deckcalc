@@ -2,6 +2,7 @@
 importScripts("engine.js", "simulate.js");
 
 let master = null;
+let masterLang = null;
 let perPower = null;
 let lengths = null;
 let skillWeights = null;
@@ -17,6 +18,7 @@ self.onmessage = (e) => {
   try {
     if (msg.type === "init") {
       master = Engine.buildMaster(msg.raw, msg.lang);
+      masterLang = msg.lang;
       perPower = new Map(msg.perPower);
       lengths = new Map(msg.lengths || []);
       skillWeights = msg.skillWeights
@@ -29,6 +31,8 @@ self.onmessage = (e) => {
       supportFactors.clear();
       comboShares.clear();
       snapRates.clear();
+      savedSamples.clear();
+      savedResults.clear();
       self.postMessage({ type: "ready" });
     } else if (msg.type === "search") {
       search(msg);
@@ -94,9 +98,11 @@ async function gekisouLevels(input) {
 // measured first (on `pool`'s helpers, or helpers of its own).
 async function engineInput(msg, pool = null) {
   let levels = { levels: null, supportLevels: null };
+  let prepareFailed = false;
   try {
     levels = await gekisouLevels(msg.input);
   } catch (err) {
+    prepareFailed = true;
     session = null;
     console.warn("Gekisou level factors unavailable", err);
   }
@@ -108,9 +114,11 @@ async function engineInput(msg, pool = null) {
   try {
     input.comboBoost = await comboBoostOf(input, msg.id, pool);
   } catch (err) {
+    prepareFailed = true;
     session = null;
     console.warn("COMBO count-up shares unavailable", err);
   }
+  if (prepareFailed) input.prepareFailed = true;
   return input;
 }
 
@@ -320,6 +328,7 @@ function helperPool(n) {
   n = typeof Worker === "undefined" ? 0 : Math.min(HELPERS, n);
   if (n < 2) return null;
   const helpers = [];
+  const failedHelpers = new Set();
   try {
     for (let i = 0; i < n; i++) helpers.push(new Worker("simworker.js"));
   } catch (err) {
@@ -330,10 +339,12 @@ function helperPool(n) {
   return {
     // Sends each task (a simworker.js message) to the next free helper: onDone(k, out) with task k's reply,
     // onProgress(k, done) meanwhile. A helper's failure rejects, leaving the tasks not done to the caller.
-    async run(tasks, onDone, onProgress) {
+    async run(tasks, onDone, onProgress, concurrency = helpers.length) {
+      const active = helpers.filter((h) => !failedHelpers.has(h)).slice(0, concurrency);
+      if (!active.length) throw new Error("no working helpers");
       let next = 0;
       let failed = false;
-      await Promise.all(helpers.map(async (h) => {
+      const settled = await Promise.allSettled(active.map(async (h) => {
         while (!failed && next < tasks.length) {
           const k = next++;
           try {
@@ -350,10 +361,15 @@ function helperPool(n) {
             onDone(k, out);
           } catch (err) {
             failed = true;
+            failedHelpers.add(h);
+            h.terminate();
             throw err;
           }
         }
       }));
+      // Let outstanding tasks finish before a failed batch falls back locally or reuses the helpers for another stage.
+      const error = settled.find((s) => s.status === "rejected");
+      if (error) throw error.reason;
     },
     close() {
       for (const h of helpers) h.terminate();
@@ -374,11 +390,28 @@ const SAVED_MARGIN = 0.95;
 // difference 0.3%, so RANK_RUNS rank them, and the scores shown take SHOW_RUNS (±3% on one song).
 const RANK_RUNS = 5;
 const SHOW_RUNS = 10;
+// Exact replay samples shared by ranking, comparisons and subsequent calculations. The init message clears them
+// when the master/replay changes; keys include the play assumptions, power and every performer effect. Bounded LRU.
+const savedSamples = new Map();
+const SAVED_SAMPLE_LIMIT = 4096;
+const savedResults = new Map(); // last four complete, successfully simulated calculations
 
 async function savedDecks(msg) {
   let helpers = null;
   try {
     const t0 = Date.now();
+    // Key the clock by playable chart IDs, rather than by the click's timestamp: a newly released song invalidates
+    // the result immediately, while identical settings can reuse it. All other data are fixed until init clears us.
+    const available = battle && battle.power ? new Map([...perPower, ...[...battle.byScore.keys()].map((sid) => [sid, 1])]) : perPower;
+    const chartIds = Engine.charts(master, available, { ...msg.input, now: new Date(msg.now) }).map((c) => c.scoreId);
+    const resultKey = JSON.stringify([msg.eventId, msg.input, chartIds]);
+    const cached = savedResults.get(resultKey);
+    if (cached) {
+      savedResults.delete(resultKey);
+      savedResults.set(resultKey, cached);
+      self.postMessage({ ...cached, id: msg.id, stats: { ms: Date.now() - t0, runs: 0, cached: true } });
+      return;
+    }
     helpers = replay ? helperPool(HELPERS) : null;
     let input = await engineInput(msg, helpers);
     input = { ...input, multi: { ...input.multi, pickSong: false } };
@@ -400,19 +433,46 @@ async function savedDecks(msg) {
     }
     const progress = (stage, done, total) => self.postMessage({ type: "progress", id: msg.id, stage, done, total });
     progress("search", 0, groups.length + 2);
+    const allIds = groups.flatMap((g) => g.musicIds);
+    const queries = [
+      ...groups.map((g) => ({ musicIds: g.musicIds, compareSongs: false, topK: SAVED_POOL })),
+      { musicIds: allIds, compareSongs: false, topK: 1 },
+      { musicIds: allIds, multi: { ...input.multi, pickSong: true }, compareSongs: true, topK: 1 },
+    ];
+    const searched = new Array(queries.length);
+    let searchedCount = 0;
+    const finishSearch = (i, out) => {
+      searched[i] = out;
+      progress("search", ++searchedCount, queries.length);
+    };
+    if (helpers) {
+      const { master: _master, ...serialInput } = input;
+      // The two whole-roster comparisons first; each query keeps its full original song scope, so the per-character
+      // four-card pruning is unchanged. Limit concurrent searches to two: all-card set buffers are large.
+      const order = [groups.length + 1, groups.length, ...groups.map((_, i) => i)];
+      try {
+        await helpers.run(
+          order.map((i) => ({ type: "search", master: { raw: master.t, lang: masterLang }, input: { ...serialInput, ...queries[i] } })),
+          (k, out) => finishSearch(order[k], out),
+          () => {},
+          2,
+        );
+      } catch (err) {
+        console.warn("search helpers failed", err);
+      }
+    }
+    for (let i = 0; i < queries.length; i++) {
+      if (!searched[i]) finishSearch(i, Engine.search({ ...input, ...queries[i] }));
+    }
     const pools = groups.map((g, i) => {
-      const out = Engine.search({ ...input, musicIds: g.musicIds, compareSongs: false, topK: SAVED_POOL });
-      progress("search", i + 1, groups.length + 2);
+      const out = searched[i];
       if (out.error || !out.results.length) return { ...g, error: out.error || "no-results", pool: [] };
       const top = out.results[0].score;
       const pool = out.results.map((deck, k) => ({ deck, perSong: out.perSong[k] })).filter((x) => x.deck.score >= top * SAVED_MARGIN);
       return { ...g, pool, gekisou: out.gekisou };
     });
-    const allIds = groups.flatMap((g) => g.musicIds);
-    const allOut = Engine.search({ ...input, musicIds: allIds, compareSongs: false, topK: 1 });
-    progress("search", groups.length + 1, groups.length + 2);
-    const bestOut = Engine.search({ ...input, musicIds: allIds, multi: { ...input.multi, pickSong: true }, compareSongs: true, topK: 1 });
-    progress("search", groups.length + 2, groups.length + 2);
+    const allOut = searched[groups.length];
+    const bestOut = searched[groups.length + 1];
     const bestBySong = new Map();
     for (const d of bestOut.songs || []) {
       const cur = bestBySong.get(d.chart.musicId);
@@ -450,12 +510,29 @@ async function savedDecks(msg) {
         const from = r.from || 0;
         return { ...r, sid, total, from, kept: r.prev !== undefined && from >= total };
       });
-      const rest = new Array(items.length);
+      const unique = new Map();
+      let requested = 0;
+      for (const it of items) {
+        if (it.kept) continue;
+        requested += it.total - it.from;
+        const perf = perfOf(it.d);
+        const key = JSON.stringify([gkOut, it.sid, it.d.displayPower, perf]);
+        if (!unique.has(key)) {
+          const scores = savedSamples.get(key) || [];
+          savedSamples.delete(key);
+          savedSamples.set(key, scores);
+          if (savedSamples.size > SAVED_SAMPLE_LIMIT) savedSamples.delete(savedSamples.keys().next().value);
+          unique.set(key, { sid: it.sid, power: it.d.displayPower, perf, scores, total: it.total, from: scores.length });
+        }
+        it.job = unique.get(key);
+        it.job.total = Math.max(it.job.total, it.total);
+      }
+      const jobs = [...unique.values()].filter((it) => it.from < it.total);
+      runsTotal -= requested - jobs.reduce((n, it) => n + it.total - it.from, 0);
       const bySid = new Map();
-      items.forEach((it, i) => {
-        if (it.kept) return;
+      jobs.forEach((it) => {
         if (!bySid.has(it.sid)) bySid.set(it.sid, []);
-        bySid.get(it.sid).push(i);
+        bySid.get(it.sid).push(it);
       });
       const tasks = [...bySid];
       if (helpers && tasks.length) {
@@ -470,14 +547,14 @@ async function savedDecks(msg) {
         };
         try {
           await helpers.run(
-            tasks.map(([sid, idx]) => ({
-              type: "mean", scoreId: sid, gekisou: gkRun(sid),
-              items: idx.map((i) => ({ power: items[i].d.displayPower, perf: perfOf(items[i].d), seeds: seedsOf(sid), total: items[i].total, from: items[i].from })),
+            tasks.map(([sid, js]) => ({
+              type: "samples", scoreId: sid, gekisou: gkRun(sid),
+              items: js.map((it) => ({ power: it.power, perf: it.perf, seeds: seedsOf(sid), total: it.total, from: it.from })),
             })),
             (k, out) => {
-              tasks[k][1].forEach((i, t) => (rest[i] = out[t]));
+              tasks[k][1].forEach((it, t) => it.scores.push(...out[t]));
               busy[k] = 0;
-              for (const i of tasks[k][1]) runs += items[i].total - items[i].from;
+              for (const it of tasks[k][1]) runs += it.total - it.from;
               report();
             },
             (k, n) => {
@@ -489,18 +566,24 @@ async function savedDecks(msg) {
           console.warn("simulation helpers failed", err);
         }
       }
-      for (const [sid, idx] of tasks) {
-        if (idx.every((i) => rest[i] !== undefined)) continue;
+      for (const [sid, js] of tasks) {
+        if (js.every((it) => it.scores.length >= it.total)) continue;
         const run = runnerOf(sid);
         const counted = (power, perf, order, seed) => {
           if (++runs % 25 === 0) progress("simulate", runs, runsTotal);
           return run(power, perf, order, seed);
         };
-        for (const i of idx) {
-          if (rest[i] === undefined) rest[i] = Simulate.meanScore(counted, items[i].d.displayPower, perfOf(items[i].d), seedsOf(sid), items[i].total, items[i].from);
+        for (const it of js) {
+          if (it.scores.length < it.total) it.scores.push(...Simulate.sampleScores(counted, it.power, it.perf, seedsOf(sid), it.total, it.scores.length));
         }
       }
-      return items.map((it, i) => (it.kept ? it.prev : it.prev === undefined ? rest[i] : (it.prev * it.from + rest[i] * (it.total - it.from)) / it.total));
+      return items.map((it) => {
+        if (it.kept) return it.prev;
+        let sum = 0;
+        for (let t = it.from; t < it.total; t++) sum += it.job.scores[t];
+        const mean = sum / (it.total - it.from);
+        return it.prev === undefined ? mean : (it.prev * it.from + mean * (it.total - it.from)) / it.total;
+      });
     };
     const valueOf = (d, score) => {
       if (scoreMode) return { value: score * d.accuracy, score };
@@ -578,10 +661,15 @@ async function savedDecks(msg) {
       for (const s of songs) s.all = bySong.get(s.musicId) || null;
       all = { deck: slim(allOut.results[0]), value: vals.reduce((a, v) => a + v.value, 0) / vals.length };
     }
-    self.postMessage({
+    const result = {
       type: "saved", id: msg.id, groups: outGroups, songs, all, gekisou: gkOut, simulated: !!sim, snapSkills: !!input.snapSkill, snapError,
       runs: { rank: RANK_RUNS, show: SHOW_RUNS }, stats: { ms: Date.now() - t0, runs },
-    });
+    };
+    if (sim && !snapError && !input.prepareFailed && pools.every((p) => !p.error)) {
+      savedResults.set(resultKey, result);
+      if (savedResults.size > 4) savedResults.delete(savedResults.keys().next().value);
+    }
+    self.postMessage(result);
   } catch (err) {
     self.postMessage({ type: "error", id: msg.id, message: String((err && err.stack) || err) });
   } finally {
