@@ -191,10 +191,10 @@ assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]
   const sv = two.map((o) => E.snapView(m, o));
   const ctx = E.makeContext(m, roster.player, null, mv, sv, "normal");
   const charts = songIds.map((id) => E.charts(m, bt.perPower, { musicIds: [id], difficulties: ["expert"], maxLevel: 40, now: input.now })[0]);
-  const valueOf = (order, sn) => {
+  const valueOf = (order, sn, selected = charts) => {
     const gauge = Math.max(...order.map((v) => v.luckGauge));
     let sum = 0;
-    for (const c of charts) {
+    for (const c of selected) {
       let r = c.perPower;
       order.forEach((v, i) => {
         r += E.liveSkillRate(m, [v], c.scoreId, swG) + E.gekisouSkillRate(m, battle, bt, v, c.scoreId, null);
@@ -204,11 +204,12 @@ assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]
       });
       sum += E.deckPower(m, order, sn, E.musicView(m, c.musicId), ctx) * r;
     }
-    return sum / charts.length;
+    return sum / selected.length;
   };
   const places = [];
   for (let a = -1; a < 5; a++) for (let b = -1; b < 5; b++) if (a < 0 || a !== b) places.push([a, b]);
   let best = -Infinity;
+  const bestByChart = charts.map(() => -Infinity);
   const pick = (from, acc) => {
     if (acc.length === 5) {
       for (let L = 0; L < 5; L++) {
@@ -219,6 +220,7 @@ assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]
           if (a >= 0) sn[a] = sv[0];
           if (b >= 0) sn[b] = sv[1];
           best = Math.max(best, valueOf(order, sn));
+          charts.forEach((c, i) => { bestByChart[i] = Math.max(bestByChart[i], valueOf(order, sn, [c])); });
         }
       }
       return;
@@ -232,6 +234,15 @@ assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]
   assert.ok(top.random && !top.chart && out.songs.length === songIds.length);
   assert.ok(Math.abs(top.score - best) < 1e-9 * best, `${top.score} vs ${best}`);
   assert.ok(Math.abs(out.songs.reduce((a, d) => a + d.score, 0) / out.songs.length - top.score) < 1e-6 * top.score);
+  // The per-chart score search also uses product bounds (AM-GM), before and after enforcing unique snaps.
+  // Check them against exhaustive member/leader/snap assignments, including empty slots and several range types.
+  const individual = E.search({ ...base, multi: { ...multi, pickSong: true } });
+  for (const d of individual.songs) {
+    const i = charts.findIndex((c) => c.scoreId === d.chart.scoreId);
+    assert.ok(Math.abs(d.score - bestByChart[i]) < 1e-9 * bestByChart[i], `product bound ${d.chart.scoreId}: ${d.score} vs ${bestByChart[i]}`);
+  }
+  assert.strictEqual(individual.songs.length, charts.length);
+  console.log("per-chart score bounds: exhaustive member/leader/snap assignments agree");
 }
 
 (async () => {

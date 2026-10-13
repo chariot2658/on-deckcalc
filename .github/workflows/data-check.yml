@@ -94,6 +94,10 @@ jobs:
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc
         run: node test/skills.test.js
+      - name: replay-runner.test.js（精簡傳輸與完整模擬一致）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/replay-runner.test.js
       - name: gekisou.test.js（激奏）
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc

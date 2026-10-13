@@ -178,6 +178,13 @@
     let tpl = JSON.parse(session.template(scoreId, 1e6, FPS));
     if (gekisou) tpl = gekisouRequest(session, tpl, scoreId, gekisou);
     const { performers: _p, skillOrder: _o, seed: _s, power: _w, ...rest } = tpl;
+    // ReplayFrame defaults these fields to [] and false. Most 60 Hz frames have no judgement; omitting the defaults
+    // cuts repeated JS -> WASM JSON transfer and deserialisation without changing the simulator's clock or inputs.
+    rest.frames = rest.frames.map(({ judgements, liveFinished, ...frame }) => {
+      if (judgements && judgements.length) frame.judgements = judgements;
+      if (liveFinished) frame.liveFinished = true;
+      return frame;
+    });
     const body = JSON.stringify(rest).slice(0, -1);
     return (power, perf, order, seed) =>
       scoreOf(JSON.parse(session.run(`${body},"power":${power},"performers":${JSON.stringify(perf)},"skillOrder":${JSON.stringify(order)},"seed":${seed || 0}}`)), gekisou);
@@ -194,6 +201,15 @@
     let sum = 0;
     for (let t = from; t < runs; t++) sum += run(power, perf, [0, 1, 2, 3, 4].map((i) => (i + t) % 5), seeds[t % seeds.length]);
     return sum / (runs - from);
+  }
+
+  // Keep individual runs for reuse across overlapping requests (ranking five runs, then showing ten, or the same
+  // deck appearing in several comparisons). Callers sum the requested range in its original order, preserving the
+  // rounding of meanScore, including when a previous mean is extended.
+  function sampleScores(run, power, perf, seeds, runs, from = 0) {
+    const out = [];
+    for (let t = from; t < runs; t++) out.push(run(power, perf, [0, 1, 2, 3, 4].map((i) => (i + t) % 5), seeds[t % seeds.length]));
+    return out;
   }
 
   /**
@@ -221,9 +237,9 @@
   }
 
   function measureSnapJobs(session, scoreId, jobs, gekisou, progress, power = 1e6) {
-    let tpl = JSON.parse(session.template(scoreId, power, FPS));
-    if (gekisou) tpl = gekisouRequest(session, tpl, scoreId, gekisou);
-    const run = (p) => scoreOf(JSON.parse(session.run(JSON.stringify({ ...tpl, performers: [p, p, p, p, p] }))), gekisou);
+    const replay = chartRunner(session, scoreId, gekisou);
+    const seed = (gekisou && gekisou.seeds && gekisou.seeds[0]) || 0;
+    const run = (p) => replay(power, [p, p, p, p, p], [0, 1, 2, 3, 4], seed);
     const without = new Map(); // member side -> score of five copies without snap skills
     const out = new Map();
     jobs.forEach((job, i) => {
@@ -508,7 +524,7 @@
   }
 
   const api = {
-    ORDERS, performers, gekisouRequest, gekisouPlay, scoreOf, orderScores, chartRunner, meanScore, snapSkillRates, snapSkillJobs, measureSnapJobs,
+    ORDERS, performers, gekisouRequest, gekisouPlay, scoreOf, orderScores, chartRunner, meanScore, sampleScores, snapSkillRates, snapSkillJobs, measureSnapJobs,
     gekisouLevelFactors, gekisouSupportLevelFactors,
     comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay,
   };

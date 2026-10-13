@@ -139,12 +139,16 @@
   也因此「JUST 獲得量 UP」「LUCK pt 獲得」這類只加任務分數、只影響名次的激奏技能，在搜尋裡算 0：要算就得假設其他玩家的任務分數，而工具的原則是只把自己的部分做到最好（「COMBO 激奏數獲得量 UP」本身會加分，也會讓快照的 COMBO 累積加分疊得更快，這兩部分都有算）。
 - 對手「不確定」時，名次是先把分數平均再算評級（不是每個名次各算評級再平均）；其他玩家的分數分布是假設的，不是統計來的。
 - 激奏的 LUCK 區間：量條成員讓 RUSH 快照多拿的比例用 37 首的平均（見上方），單首歌可能差 ±7 個百分點，RUSH 快照多的隊伍在個別 LUCK 歌上可能差幾 %。最高分數模式和預存隊伍最後都用模擬排名。
-- 預存隊伍第一次計算要先量 COMBO 激奏數的加成，最高分數還要量每首歌的快照技能，最後逐首模擬比較；這些模擬會分給多個核心同時跑（最多 6 個）。全部約 20 秒（2026-10-08 的卡池）；擁有全部卡片時約 50 秒，多出來的主要是搜尋「每首歌的最佳隊」。量過的資料保留到重新整理頁面。
+- 預存隊伍第一次計算要先量 COMBO 激奏數的加成，最高分數還要量每首歌的快照技能，最後逐首模擬比較；這些模擬會分給多個核心同時跑（最多 6 個）。
+  2026-10-13 實測：同步卡池 Chrome 活動點數約 12 秒、最高分數約 15 秒；全卡池 Node 最高分數約 27 秒（87 首、6 個輔助 worker、全 Perfect、對手不確定）。
+  不同環境與設定耗時會不同，完整條件見 [驗證紀錄](docs/validation-history.md)。同設定重算可直接用完整結果快取；量過的資料保留到重新整理頁面。
 - 演出技能和激奏技能等級要自己在「成員卡」分頁設定，預設 1。
 - 新歌如果還沒有計分資料（music-data.json 尚未收錄），就不會出現在推薦裡。
 - 模型結果只是預估。建議先用推薦隊伍打一場，確認評級。
 
 ## 開發
+
+待處理項目見 [TODO.md](TODO.md)；已完成項目、驗證結果與歷史實測見 [驗證與開發紀錄](docs/validation-history.md)。
 
 沒有建置步驟，也沒有 npm 套件。測試要用 Node.js，並且需要在 deckcalc 的上一層準備兩份資料：
 
@@ -163,7 +167,11 @@ node test/fetch-replay.js  # 下載模擬用的 WASM 引擎與譜面資料到 ..
 node test/skills.test.js   # 演出技能估計與整場模擬 vs 結算畫面
 node test/gekisou.test.js  # 多人激奏：開激奏的分數、名次、JUST 率、激奏技能、量條與 COMBO 激奏數的交互作用 vs 整場模擬，公開房（一隊打全部、預存隊伍的分組）vs 暴力搜尋
 node test/score.test.js    # 最高分數：快照技能的量法，最佳隊伍 vs ournotes-deck 的精確搜尋結果
+node test/replay-runner.test.js # 精簡模擬傳輸 vs 完整模板：整份結果、60 Hz 時鐘、種子、快照技能率
 node test/coverage.test.js # 四個區服的每張卡的技能都有算到（新卡用了新技能時會失敗）
+node test/speed.js --helpers --repeat # 預存隊伍完整效能與同設定快取；--all --score 測全卡池最高分數
+node test/speed.js --helpers --repeat --changed # 分階段計時；另量 Perfect 率改為 98% 的重算
+node test/speed.js --quick --helpers --check-cache # 小卡池驗證平行搜尋、快取和設定變更時失效
 ```
 
 GitHub Actions 的「資料檢查」（`.github/workflows/data-check.yml`）用最新的 masterdata 和 music-data 跑上面全部的測試：
