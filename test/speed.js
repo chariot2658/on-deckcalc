@@ -1,9 +1,11 @@
 // Saved-deck benchmark, including replay preparation and simulation; --helpers uses real Node worker threads.
 // node test/speed.js [--all] [--score] [--fixed] [--breaks=2] [--repeat] [--helpers] [--quick] [--check-cache]
 //   [--helper-count=6] [--changed] [--roster=path] [--engine=path] [--worker=path] [--simulate=path] [--simworker=path] [--out=path] [--compare=path]
+//   [--songs=100003,100094,100087] [--max-level=27] [--difficulties=hard,expert] [--now=2026-10-18T00:00:00Z]
 // --fixture=path writes the init/request (tagged Map/Set JSON) for a browser test instead of running it.
 // --out saves the complete result (without timings) for an exact before/after comparison.
 // --changed also compares a recalculation at 98% Perfect (saved as <out>.changed); use node --cpu-prof for profiles.
+// --baseline skips the new candidate guarantees when measuring an older --worker/--engine implementation.
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -97,9 +99,9 @@ const snaps = all ? master.t.MasterSupportCard.map((s) => ({ id: s._id, level: E
     replay: { musicDataUrl: "local", pointer: md.replay } };
   context.init.skillWeights.byScore = [...context.init.skillWeights.byScore];
   vm.runInContext("self.onmessage({data: init})", context);
-  context.msg = { type: "saved", id: 1, eventId: 2, now: "2026-10-12T00:00:00Z", input: {
+  context.msg = { type: "saved", id: 1, eventId: 2, now: option("now") || "2026-10-12T00:00:00Z", input: {
     mode: "normal", objective: args.includes("--score") ? "score" : "points", members, snaps, player: roster.player,
-    maxLevel: 40, boosts: 3, difficulties: ["easy", "normal", "hard", "expert"],
+    maxLevel: Number(option("max-level") || 40), boosts: 3, difficulties: option("difficulties") ? option("difficulties").split(",") : ["easy", "normal", "hard", "expert"],
     accuracy: { perfectRate: 1, breaks: Number(option("breaks") || 0) },
     multi: { players: 5, auto: !args.includes("--fixed"), othersScore: 4 * 5e6, gekisouRank: 3, justRate: 0.5 },
   } };
@@ -109,6 +111,7 @@ const snaps = all ? master.t.MasterSupportCard.map((s) => ({ id: s._id, level: E
     context.msg.input.musicIds = E.gekisouSongGroups({ ...context.msg.input, master, battle: context.init.battle,
       perPowerByScore: E.perPowerFromMusicData(md), now: new Date(context.msg.now) }).map((g) => g.musicIds[0]);
   }
+  if (option("songs")) context.msg.input.musicIds = option("songs").split(",").map(Number);
   console.log("fixture", { node: process.version, members: context.msg.input.members.length, snaps: context.msg.input.snaps.length,
     objective: context.msg.input.objective, helpers: args.includes("--helpers") ? context.self.navigator.hardwareConcurrency - 1 : 0,
     master: crypto.createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
@@ -128,6 +131,19 @@ const snaps = all ? master.t.MasterSupportCard.map((s) => ({ id: s._id, level: E
   };
   await recalc("first");
   if (!result || result.error) throw new Error(JSON.stringify(result));
+  for (const s of args.includes("--baseline") ? [] : result.songs) {
+    assert.ok(s.best.simPay.value >= s.saved.simPay.value, "per-song best must include the saved formation at identical samples");
+    if (s.all) assert.ok(s.best.simPay.value >= s.all.value, "per-song best must include the universal formation");
+    const group = result.groups.find((g) => g.type === s.type);
+    for (const d of [s.saved, s.best]) {
+      assert.strictEqual(d.chart.musicId, s.musicId);
+      assert.ok(context.msg.input.difficulties.includes(d.chart.difficulty));
+      assert.ok(d.chart.level <= context.msg.input.maxLevel);
+      assert.ok(Number.isFinite(d.simPay.value));
+    }
+    assert.strictEqual(JSON.stringify(s.saved.members), JSON.stringify(group.deck.members), "song difficulty changes must retain the saved formation");
+    assert.strictEqual(JSON.stringify(s.saved.snaps), JSON.stringify(group.deck.snaps));
+  }
   console.log("total", result.stats);
   const withoutStats = (out) => { const { stats, ...rest } = out; return JSON.stringify(rest); };
   const json = withoutStats(result);

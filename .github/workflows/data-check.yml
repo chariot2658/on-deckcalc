@@ -106,6 +106,10 @@ jobs:
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc
         run: node test/score.test.js
+      - name: saved.test.js（預存隊伍候選與難度）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/saved.test.js
 
       # Remembered whether the tests passed or not, so a failure mails once per combination, not hourly.
       - name: 記下測過的資料
