@@ -1401,6 +1401,8 @@
    *         boosts, objective: "points"|"items"|"score", topK, musicIds, fixed: {memberIds, excludeMemberIds},
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
    *         compareSongs: also return `songs`, the best deck of every song, lengthByScore: scoreId -> seconds,
+   *         songTopK: also return up to this many `songCandidates` per song (same full-roster pruning scope),
+   *         chartCandidateMargin: attach nearby `chartCandidates` to random perSong and songCandidates for replay,
    *         multi: {players, othersScore, gekisouRank, justRate, pickSong} for a multiplayer (激奏) normal live: the rank is the
    *         room's, reached when the player's score plus othersScore (the other players' total) meets the battle
    *         threshold; with `battle` (battleFromMusicData) the player's score is the Gekisou score at gekisouRank in
@@ -1420,6 +1422,8 @@
     const scoreMode = input.objective === "score";
     const player = input.player || {};
     const topK = input.topK || 5;
+    const songTopK = input.songTopK || 1;
+    const searchK = input.compareSongs ? Math.max(topK, songTopK) : topK;
     const accuracy = input.accuracy || null;
     // A room whose others are unknown (multi.auto): the payoff is the expected one over opponentLevels.
     const oppLevels = !scoreMode && mode === "normal" && input.multi && input.multi.players >= 1 && input.multi.auto ? opponentLevels(input.multi) : null;
@@ -1479,7 +1483,8 @@
     const pairX = !!snapSkill || gkSup || roughSnaps;
     // The score objective plays one chart per group with pair rates; without measured snap skill rates, the charts
     // scoreScope would measure (a random song: one chart per song).
-    const scope = scoreMode && gkSup && !snapSkill ? new Set(scoreScope(input, randomSong ? 0 : undefined).scoreIds) : null;
+    const scope = scoreMode && gkSup && !snapSkill
+      ? new Set(scoreScope(input, input.chartCandidateMargin ?? (randomSong ? 0 : undefined)).scoreIds) : null;
     const chartList = snapSkill ? playable.filter((c) => snapSkill.byScore.has(c.scoreId)) : scope ? playable.filter((c) => scope.has(c.scoreId)) : playable;
     if (chartList.length === 0) return { error: "no-charts", results: [] };
 
@@ -2412,6 +2417,25 @@
       return deck;
     }
 
+    // Replay candidates keep the formation fixed while comparing allowed charts of the same song. This is opt-in:
+    // ordinary searches retain their original result shape and chart selection. Never re-search a narrowed roster
+    // here: that would change the four-card pruning and could move the leader or snap assignments.
+    function withChartCandidates(d) {
+      if (input.chartCandidateMargin === undefined) return d;
+      const candidates = chartList.filter((c) => c.musicId === d.chart.musicId).map((c) => {
+        if (c.scoreId === d.chart.scoreId) return d;
+        const skill = d.members.reduce((n, v) => n + skillRateOf(v, c), 0);
+        const pair = pairX ? deckSupport(d.members, d.snaps, c, pairOf) : 0;
+        const rt = rankTable([c], [skill + (scoreMode ? 0 : pair)], false);
+        const v = choose(rt, d.power, d.pointBonus, d.itemBonus, scoreMode ? pair : 0);
+        return deckOf(d.members, d.snaps, { ...v, power: d.power, pb: d.pointBonus, ib: d.itemBonus }, rt, d.music);
+      });
+      // Payoff has wide plateaus: several much lower-scoring charts can pay the same estimated rank. Use expected
+      // own score to keep nearby difficulties, always retaining choose's original (important with combo breaks).
+      const floor = Math.max(...candidates.map((c) => c.estScore)) * (1 - input.chartCandidateMargin);
+      return { ...d, chartCandidates: candidates.filter((c) => c === d || c.estScore >= floor) };
+    }
+
     // Live skill score per unit of power of each candidate on each chart of `list`; a set adds its five. The bound takes,
     // per chart, the five largest gains of any candidates.
     // With Gekisou, a member's Gekisou skill adds its own gain (whatever the performance order).
@@ -2799,7 +2823,7 @@
         if (bt) deck.gekisouScore = Math.round(mean((d) => d.gekisouScore));
         if (gkSup) deck.gekisouSupportScore = Math.round(mean((d) => d.gekisouSupportScore));
         perSong.sort((a, b2) => b2.score - a.score || b2.power - a.power);
-        return { deck, perSong };
+        return { deck, perSong: perSong.map(withChartCandidates) };
       };
       const built = found.map(build);
       return {
@@ -3155,7 +3179,7 @@
           deck.snapRough = true;
         }
         perSong.sort((a, b) => b.score - a.score || b.power - a.power);
-        return { deck, perSong };
+        return { deck, perSong: perSong.map(withChartCandidates) };
       };
       const built = found.map(build);
       return {
@@ -3342,15 +3366,15 @@
       const groupFound = [];
       let kth = -Infinity;
       // walkScore visits a set only when its own bound (ubOf) reaches the threshold.
-      walk(rt, bMax, powBound, ubOf, () => (groupFound.length >= topK ? kth : -Infinity), (s) => {
+      walk(rt, bMax, powBound, ubOf, () => (groupFound.length >= searchK ? kth : -Infinity), (s) => {
         const so = setOf(s);
         const bf = bestF(s);
         const t = anySkill || stochastic ? tables(so.vs) : { bound: rt, mean: null };
-        if (!scoreMode && anySkill && groupFound.length >= topK && upperBound(so, bf, t.bound) < kth) return;
+        if (!scoreMode && anySkill && groupFound.length >= searchK && upperBound(so, bf, t.bound) < kth) return;
         groupFound.push(evaluate(so, bf, t.mean || t.bound, music, Xm, t.px));
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
-        if (groupFound.length > topK) groupFound.length = topK;
-        if (groupFound.length >= topK) kth = groupFound[topK - 1].score;
+        if (groupFound.length > searchK) groupFound.length = searchK;
+        if (groupFound.length >= searchK) kth = groupFound[searchK - 1].score;
       }, refine);
       foundBy[gi].push(...groupFound);
 
@@ -3365,7 +3389,7 @@
         for (const idx of bySong.values()) {
           // A group of one song (the score objective with pair rates: one chart per group): the group's walk found it.
           if (bySong.size === 1 && groupFound.length) {
-            songsBy[gi].push(groupFound[0]);
+            songsBy[gi].push(...groupFound.slice(0, songTopK));
             continue;
           }
           const list = idx.map((i) => gc[i]);
@@ -3379,16 +3403,19 @@
             const b = anySkill ? rankTable(list, sk) : srt;
             return { bound: b, mean: b };
           };
-          let best = null;
-          walk(srt, bMax, powBound, ubOf, () => (best ? best.score : -Infinity), (s) => {
+          const best = [];
+          const threshold = () => best.length >= songTopK ? best[best.length - 1].score : -Infinity;
+          walk(srt, bMax, powBound, ubOf, threshold, (s) => {
             const so = setOf(s);
             const bf = bestF(s);
             const ti = songTables(so.vs);
-            if (!scoreMode && best && (anySkill || stochastic) && upperBound(so, bf, ti.bound) < best.score) return;
+            if (!scoreMode && (anySkill || stochastic) && upperBound(so, bf, ti.bound) < threshold()) return;
             const d = evaluate(so, bf, ti.mean || ti.bound, music, Xm, ti.px);
-            if (!best || d.score > best.score || (d.score === best.score && d.power > best.power)) best = d;
+            best.push(d);
+            best.sort((a, b) => b.score - a.score || b.power - a.power);
+            if (best.length > songTopK) best.length = songTopK;
           });
-          songsBy[gi].push(best);
+          songsBy[gi].push(...best);
         }
       }
     }
@@ -3405,8 +3432,21 @@
       if (results.length >= topK) break;
     }
     songs.sort((a, b) => b.score - a.score || b.power - a.power);
+    const songCandidates = [];
+    if (songTopK > 1) {
+      const kept = new Map();
+      for (const d of songs) {
+        const id = d.chart.musicId;
+        if (!kept.has(id)) kept.set(id, new Set());
+        const keys = kept.get(id);
+        const key = d.members.map((v, i) => v.id + ":" + (d.snaps[i] ? d.snaps[i].id : "")).join(",");
+        if (keys.size >= songTopK || keys.has(key)) continue;
+        keys.add(key);
+        songCandidates.push(withChartCandidates(d));
+      }
+    }
     // With one chart per group a song can appear once per difficulty: keep its best.
-    if (snapSkill) {
+    if (snapSkill || songTopK > 1) {
       const seenSong = new Set();
       for (let i = 0; i < songs.length; i++) {
         if (seenSong.has(songs[i].chart.musicId)) songs.splice(i--, 1);
@@ -3414,7 +3454,8 @@
       }
     }
     const gekisou = bt ? gekisouOut(bt) : null;
-    return { results, songs, rate, gekisou, payoff: pay, ctx, stats: { sets: nSets, evaluated, groups: groups.size, ms: Date.now() - t0 } };
+    return { results, songs, ...(songTopK > 1 ? { songCandidates } : {}), rate, gekisou, payoff: pay, ctx,
+      stats: { sets: nSets, evaluated, groups: groups.size, ms: Date.now() - t0 } };
   }
 
   /**

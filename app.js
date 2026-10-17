@@ -1157,6 +1157,7 @@
     const notes = [
       `公開房的歌是抽出來的，但抽完歌後大約有 10 秒可以換隊：來得及換成存好的編組，來不及重排卡片。遊戲可以存 50 組編組，同一張卡可以放在好幾組，所以這裡依<b>激奏三段的種類</b>把歌分成 ${groups.length} 組（全 COMBO、全 LUCK、全 JUST、混合），每組各找一隊。抽到歌時看三段激奏的種類，換成那組的隊伍。`,
       `每組先用搜尋找出該組歌曲平均最好的幾隊（估計值在第 1 名 5% 以內，最多 8 隊），再逐首用 ournotes-deck 的整場模擬比較，取平均最高的：每首歌模擬 ${out.runs ? out.runs.rank : 5} 局，每局換出場順序（5 局剛好每人每個位置各一次）；有 LUCK 區間的歌每局換抽選的種子，所有隊伍用同一批種子，所以兩隊的差距只差約 0.3%（單一隊伍每局差約 10%）。顯示的分數在 LUCK 歌用 ${out.runs ? out.runs.show : 10} 局（單首約 ±3%）。`,
+      `每隊也會模擬估計分數接近的可玩難度，再依目前目標選分數或收益較好的。「該歌最佳隊」會比較最多 8 支估計接近的候選，並納入該歌的預存隊與一隊打全部；表示這批候選中最好，候選以外仍可能有更好的隊伍。`,
       `激奏${score ? "分數" : ""}的條件：每段${rankText(gk, out.input.multi)}、JUST 率 ${Math.round((gk ? gk.justRate : s.multiJustRate / 100) * 100)}%${score ? `，依你的準度（Perfect 率 ${s.perfectRate}%、斷 combo ${s.comboBreaks} 次）打折` : `；收益看房間評級（自己的模擬分數＋${othersText(out.input.multi)}），依你的準度算各評級的機率`}。${out.input.multi.auto ? `對手不確定：選的是在各種對手和名次下平均最好的隊伍，不會因為猜錯一個數字而偏掉。` : ""}`,
       `搜尋的估計已包含兩種成員激奏技能和快照激奏技能的交互作用：成員的 LUCK 量條技能讓 RUSH 變多，快照的 LUCKY RUSH 分數 UP 跟著多（全 LUCK 歌約 +17%、混合歌約 +32%）；成員的 COMBO 激奏數 UP 讓快照的激奏 COMBO 分數 UP 更快疊滿（依譜面逐首模擬量，可達 +30%～+190%）。`,
     ];
@@ -1246,7 +1247,7 @@
       })
       .join("");
     el.innerHTML = `<h2>抽到的歌 → 用哪一隊</h2>
-      <p class="note">每首歌用哪一組的預存隊，以及${out.simulated ? "模擬" : "估計"}的${out.input.objective === "score" ? "激奏分數（依你的準度）" : "每場收益"}。「該歌最佳隊」是只打這首歌時搜尋出來最好的隊伍；差距大的歌可以多存一隊。點一列可看兩支隊伍打這首歌的細節。</p>
+      <p class="note">每首歌用哪一組的預存隊，以及${out.simulated ? "模擬" : "估計"}的${out.input.objective === "score" ? "激奏分數（依你的準度）" : "每場收益"}。「該歌最佳隊」是候選隊伍與難度比較後最好的結果（包含預存隊）；差距大的歌可以多存一隊。點一列可看兩支隊伍打這首歌的細節。</p>
       <div class="row" style="margin-bottom:8px">
         <label class="field"><span>搜尋歌名</span><input type="text" id="savedQ" value="${esc(savedView.q)}" placeholder="歌名" style="width:180px"></label>
         <div class="field"><span>排序</span><div class="chips">
