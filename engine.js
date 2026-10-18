@@ -43,7 +43,7 @@
     "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterLiveSkillEffect", "MasterText",
     "MasterBandItem", "MasterBandItemSkillEffect", "MasterLiveComboScoreBonus", "MasterGekisouSkill",
     "MasterGekisouSkillEffect", "MasterGekisouSupportSkill", "MasterGekisouSupportSkillEffect", "MasterLiveJudgementTiming",
-    "MasterSupportSkillEffect", "MasterLiveNoteParameter",
+    "MasterSupportSkillEffect", "MasterLiveNoteParameter", "MasterLiveSettings",
   ];
 
   function rows(table) {
@@ -1510,26 +1510,26 @@
     // deck acts in (luckGaugeBoost), and a member's COMBO count-up skill makes every COMBO-stacking support skill of the
     // deck stack sooner (comboBoost). A deck's boost profile `g` (boostOf; null without any) gives, per chart of
     // chartList, the share each kind of support gain grows by: `rush`, and `combo` by member match. Bounds and card
-    // pruning use the largest, `gMax` (the strongest gauge owned and each chart's saturation).
+    // pruning use the largest, `gMax` (each chart's largest gauge gain and COMBO saturation).
     const comboData = gkSup && input.comboBoost ? input.comboBoost : null;
     const comboOf = (c) => (comboData ? comboData.byScore.get(c.scoreId) || (comboData.byMusic && comboData.byMusic.get(c.musicId)) || null : null);
     const comboCharts = chartList.map(comboOf);
     const boosts = new Map(); // profile key -> profile
     const boostOf = (vs) => {
       if (!gkSup) return null;
-      let gauge = 0;
+      const gauges = new Set();
       const keys = [];
       for (const v of vs) {
-        if (v.luckGauge > gauge) gauge = v.luckGauge;
+        if (v.luckGauge) gauges.add(v.gekisouSkillId + ":" + v.gekisouSkillLevel);
         if (comboData && v.comboCount) keys.push(v.comboCount);
       }
-      if (!gauge && !keys.length) return null;
+      if (!gauges.size && !keys.length) return null;
       keys.sort();
-      const key = gauge + "|" + keys.join(",");
+      const key = [...gauges].sort().join(",") + "|" + keys.join(",");
       if (!boosts.has(key)) {
         boosts.set(key, {
           key,
-          rush: Float64Array.from(chartList, (c) => luckGaugeBoost(battle, gauge, c.scoreId)),
+          rush: Float64Array.from(chartList, (c) => luckGaugeBoost(m, battle, bt, vs, c.scoreId)),
           combo: [0, 1].map((match) => Float64Array.from(comboCharts, (cb) => (cb ? comboCountBoost(cb, keys, match) : 0))),
         });
       }
@@ -1538,12 +1538,17 @@
     const gMax = gkSup
       ? {
           key: "max",
-          rush: Float64Array.from(chartList, (c) => luckGaugeBoost(battle, Math.max(0, ...members.map((v) => v.luckGauge)), c.scoreId)),
+          rush: Float64Array.from(chartList, (c) => luckGaugeBoost(m, battle, bt, members, c.scoreId)),
           combo: [0, 1].map((match) => Float64Array.from(comboCharts, (cb) => (cb && members.some((v) => v.comboCount) ? cb.s[match] : 0))),
         }
       : null;
     // A larger single-skill gain does not prove dominance beside other COMBO skills: gates can open earlier.
     const comboAsGood = (b, a) => !comboData || !a.comboCount || a.comboCount === b.comboCount;
+    // Gauge gains depend on the chart, not just the LIFE skill's activation chance.
+    const gaugeAsGood = (b, a) => {
+      const x = boostOf([b])?.rush, y = boostOf([a])?.rush;
+      return !y || y.every((v, i) => (x ? x[i] : 0) >= v);
+    };
     // Gekisou support gain of snap j beside member v on each chart of chartList (Float64Array), or null, in a deck of
     // boost profile g. Members that meet the same member conditions share it.
     const supKeys = new Map(); // member view -> cache key per snap
@@ -1687,13 +1692,13 @@
       if (b.cardType !== a.cardType || !sameList(b.tags, a.tags) || !sameList(b.liveSkillCategories, a.liveSkillCategories) ||
         !sameList(b.gekisouSkillCategories, a.gekisouSkillCategories) || b.gekisouMissionType !== a.gekisouMissionType) return false;
       if (b.musicTypeRate < a.musicTypeRate || b.musicTagRate < a.musicTagRate || !leaderAsGood(b, a) || !skillAsGood(b, a)) return false;
-      if (gMax && (b.luckGauge < a.luckGauge || !comboAsGood(b, a))) return false;
+      if (gMax && (!gaugeAsGood(b, a) || !comboAsGood(b, a))) return false;
       const ea = ctx.memberBonus.get(a), eb = ctx.memberBonus.get(b);
       const sa = statBase.get(a), sb = statBase.get(b);
       if (eb.point < ea.point || eb.item < ea.item || sb.some((x, i) => x < sa[i])) return false;
       const gt = eb.point > ea.point || eb.item > ea.item || sb.some((x, i) => x > sa[i]) ||
         b.musicTypeRate > a.musicTypeRate || b.musicTagRate > a.musicTagRate || b.leaderSkillLevel > a.leaderSkillLevel ||
-        (!!gMax && (b.luckGauge > a.luckGauge || (!!comboData && !!b.comboCount && !a.comboCount)));
+        (!!gMax && (!gaugeAsGood(a, b) || (!!comboData && !!b.comboCount && !a.comboCount)));
       return gt || !leaderAsGood(a, b) || !skillAsGood(a, b) || b.id < a.id;
     };
     const byChar = new Map();
@@ -3849,18 +3854,12 @@
     return gekisouSupportTerms(m, battle, bt, v, s, scoreId, levels).reduce((a, [, x]) => a + x, 0);
   }
 
-  // A member's LUCK gauge Gekisou skill brings more lucky rushes, and every LUCKY RUSH 分數UP of the deck (whoever holds
-  // it) gains in proportion. Measured 2026-10-07 on every chart with a LUCK range (32 seeds, rank 3, five rush snaps on
-  // members whose own Gekisou skill does nothing, with and without one gauge member): gauge accumulation up (11001) adds
-  // 17% to the rush snaps' gain on all-LUCK charts (14–20% by skill, ±7 points chart to chart) and 32% on charts with one
-  // LUCK range, at any level (Lv1 acts 2 s at the range's start, but an early rush chains); the LIFE version (11003) acts
-  // with a chance (condition 4011, at full LIFE) and adds in proportion to it, 50% ≈ 11001. A second gauge member adds
-  // little, so a deck takes its strongest. Per-chart values were too noisy to use (±5 points with 64 seeds).
-  const LUCK_GAUGE_BOOST = { allLuck: 0.17, mixed: 0.32 };
+  // Retained as a gauge-skill flag and, for 11003, the relative full-LIFE activation chance between levels.
+  // It is not a strength ordering between different skills; luckGaugeBoost uses their chart measurements.
   const LUCK_GAUGE_CHANCE = 0.5;
 
   /**
-   * The strength of the LUCK gauge Gekisou skill `id` at `level` (1 = gauge accumulation up, 11001; the LIFE version,
+   * The LUCK gauge Gekisou skill `id` at `level` (1 = gauge accumulation up, 11001; the LIFE version,
    * 11003, its chance at full LIFE over LUCK_GAUGE_CHANCE), or 0 for any other skill.
    */
   function luckGaugeOf(m, id, level) {
@@ -3885,14 +3884,51 @@
   }
 
   /**
-   * The share a deck's LUCK gauge (its members' strongest luckGauge) adds to its LUCKY RUSH 分數UP gains on chart
-   * `scoreId` (see LUCK_GAUGE_BOOST); 0 on a chart without a LUCK range.
+   * Approximate share the deck's gauge skills add to RUSH support gains, using music-data's per-chart expectations.
+   * A pure gauge skill's own score gain is the extra RUSH exposure times the game's native RUSH score bonus. A
+   * reference RUSH support gain / its effect value gives the original exposure. Their ratio estimates the extra
+   * share, including this rank's range bonuses. Native and support activation frames differ, so this remains an
+   * estimate; final deck comparisons use replay. Taking the largest single avoids adding overlapping gauge gains.
+   * Lower levels use the LIFE probability ratio (11003) or the top-level exposure (11001). The latter approximates
+   * the shorter activation window. Single-seed member level factors are too noisy to scale RUSH interactions.
    */
-  function luckGaugeBoost(battle, gauge, scoreId) {
-    const b = gauge > 0 && battle && battle.byScore.get(scoreId);
+  function luckGaugeBoost(m, battle, bt, members, scoreId) {
+    const b = battle && battle.byScore.get(scoreId);
     if (!b || !b.luck) return 0;
-    const allLuck = !!b.missions && b.missions.length > 0 && b.missions.every((x) => x === 2);
-    return gauge * (allLuck ? LUCK_GAUGE_BOOST.allLuck : LUCK_GAUGE_BOOST.mixed);
+    const scaleKey = "luck-scale|" + scoreId;
+    if (!bt.memo.has(scaleKey)) {
+      const native = Number(m.t.MasterLiveSettings.find((r) => r._key === "gekisou_luck_rush_score_bonus_percent")?._value) / 100;
+      let scale = 0;
+      if (native > 0) for (const [id] of m.gekisouSupportSkills) {
+        if (gekisouSupportKind(m, id) !== "rush") continue;
+        const top = m.gekisouSupportSkillMaxLevel.get(id) || 1;
+        const shape = battle.supportShapes.get(id + ":" + top);
+        const gain = bt.aptSupport.get(scoreId)?.get(shape + ":0");
+        if (!(gain > 0)) continue;
+        let value = 0;
+        for (const e of m.gekisouSupportSkillEffects.get(id + ":" + top) || []) {
+          const conditions = (m.conditionSets.get(e._skillConditionGroup) || []).flatMap((cs) => cs._conditionIds.map((cid) => m.skillConditions.get(cid)));
+          if (!conditions.some((c) => c && c._conditionType === 5000 && c._isPositive)) value += e._effectValue / 10000;
+        }
+        if (value > 0) { scale = value / native / gain; break; }
+      }
+      bt.memo.set(scaleKey, scale);
+    }
+    const scale = bt.memo.get(scaleKey);
+    if (!scale) return 0;
+    let best = 0;
+    for (const v of members) {
+      if (!v.luckGauge) continue;
+      const id = v.gekisouSkillId, level = v.gekisouSkillLevel;
+      const top = m.gekisouSkillMaxLevel.get(id) || 1;
+      const effects = m.gekisouSkillEffects.get(id + ":" + top) || [];
+      // Only a pure gauge gain can be attributed to RUSH exposure.
+      if (!effects.length || effects.some((e) => e._skillEffectType !== 11001 && e._skillEffectType !== 11003)) continue;
+      const factor = level >= top ? 1 : v.luckGauge / luckGaugeOf(m, id, top);
+      const a = bt.apt.get(scoreId)?.get(battle.shapes.get(id + ":" + top));
+      if (a) best = Math.max(best, factor * (a.tail + a.ranges.reduce((s, x) => s + x, 0)) * scale);
+    }
+    return best;
   }
 
   /** A song's Gekisou range type from its range missions: 1 all COMBO, 2 all LUCK, 3 all JUST, 0 mixed; null without. */

@@ -192,14 +192,13 @@ if (!process.argv.includes("--replay-only")) {
   const ctx = E.makeContext(m, roster.player, null, mv, sv, "normal");
   const charts = songIds.map((id) => E.charts(m, bt.perPower, { musicIds: [id], difficulties: ["expert"], maxLevel: 40, now: input.now })[0]);
   const valueOf = (order, sn, selected = charts) => {
-    const gauge = Math.max(...order.map((v) => v.luckGauge));
     let sum = 0;
     for (const c of selected) {
       let r = c.perPower;
       order.forEach((v, i) => {
         r += E.liveSkillRate(m, [v], c.scoreId, swG) + E.gekisouSkillRate(m, battle, bt, v, c.scoreId, null);
         for (const [, x, kind] of sn[i] ? E.gekisouSupportTerms(m, battle, bt, v, sn[i], c.scoreId, null) : []) {
-          r += x * (kind === "rush" ? 1 + E.luckGaugeBoost(battle, gauge, c.scoreId) : 1);
+          r += x * (kind === "rush" ? 1 + E.luckGaugeBoost(m, battle, bt, order, c.scoreId) : 1);
         }
       });
       sum += E.deckPower(m, order, sn, E.musicView(m, c.musicId), ctx) * r;
@@ -513,8 +512,8 @@ if (!process.argv.includes("--replay-only")) {
     assert.ok(rush.length >= 3);
     assert.ok(d.gekisouSupportScore > 0.3 * d.estScore);
     // The score objective has no snap skills without measured rates. The gauge members bring more rushes, which every
-    // LUCKY RUSH 分數UP acts in: the search adds LUCK_GAUGE_BOOST's mean share (17% on all-LUCK charts), 6–7 points more
-    // than this chart's (it was 4% low without it); the worker ranks a pool of decks by the simulation.
+    // LUCKY RUSH 分數UP acts in: the search derives the share from this chart's gauge and RUSH support expectations.
+    // This still approximates multiple gauges and activation frames; the worker ranks a pool by the simulation.
     assert.ok(Math.abs(d.estScore / simG.mean - 1) < 0.06);
   }
   console.log("ok");
