@@ -2001,8 +2001,9 @@
     // `skill` (aligned with `list`, or null) adds the deck's live skill score per unit of power to each chart's.
     // `optimistic` takes each chart's best play share instead of its mean: a bound on the expected payoff. With combo
     // breaks, a mean table also lists the candidate charts for the expected payoff (`cands`): per rank the three
-    // needing the least power, or per minute the frontier charts.
-    function rankTable(list, skill, optimistic) {
+    // needing the least power, or per minute the frontier charts; `allCands` lists every chart, so that choose bounds the
+    // expected payoff of any deck whose power and chart rates are at most the table's (expBound).
+    function rankTable(list, skill, optimistic, allCands = false) {
       const rateP = new Map(list.map((c, i) => [c, c.perPower + (skill ? skill[i] : 0)]));
       const rate = new Map(list.map((c) => [c, rateP.get(c) * (optimistic ? shares(c).max : shares(c).mean)]));
       // Score mode: the chart of the highest expected score per unit of power (the same for every power).
@@ -2032,7 +2033,8 @@
       let cands = null;
       if (stochastic && !optimistic) {
         const picked = new Set();
-        if (frontier) for (const kept of frontier.values()) for (const o of kept) picked.add(o.chart);
+        if (allCands) for (const c of list) picked.add(c);
+        else if (frontier) for (const kept of frontier.values()) for (const o of kept) picked.add(o.chart);
         else {
           for (const r of rankList) {
             const needOf = (c) => {
@@ -2251,6 +2253,16 @@
       return best;
     }
     const upperBound = (s, bf, rt) => choose(rt, bf.f + s.g, s.pt + maxSnapPoint, s.it + maxSnapItem).sc;
+    // Whether set s (best leader bf, bound table `bound`) can enter a full top list whose last deck is `kd`: its bound
+    // must reach kd's payoff, and pass it unless it has more power (ties go to power). With combo breaks (one level of
+    // the others' total) it must also reach it in expectation over the play's shares on some chart of `list`, at the
+    // set's bound skill rates `sk` (the optimistic table plays every chart at its best share: with 2 breaks 6% above the
+    // mean, which let half the sets of event 3 through for nothing).
+    const canEnter = (s, bf, bound, list, sk, kd) => {
+      let ub = upperBound(s, bf, bound);
+      if (ub >= kd.score && stochastic && !oppLevels) ub = Math.min(ub, upperBound(s, bf, rankTable(list, sk, false, true)));
+      return ub > kd.score || (ub === kd.score && bf.f + s.g > kd.power);
+    };
 
     // Points with pair gains (pairOf: Gekisou support skills, rough snap skills): a snap assignment's gains differ by chart,
     // so each assignment the snap DP keeps plays a rank table of its own (pairTable). The DP ranks a pairing by its gain
@@ -3218,6 +3230,8 @@
       const pairPoints = pairPts;
       const rt = rankTable(gc, anySkill ? maxSkill : null, stochastic);
       const gcIdx = Int32Array.from(gc, (c) => chartIdx.get(c));
+      // A set's skill rates on gc for bounds: with pair rates each member's best pairing too.
+      const boundSkill = (vs) => (pairPoints ? setBound(vs) : anySkill ? setSkill(vs) : null);
       const tables = (vs) => {
         const skill = anySkill ? setSkill(vs) : null;
         if (pairPoints) return { bound: rankTable(gc, setBound(vs), stochastic), mean: null, px: pairsOn(gc, gcIdx, skill) };
@@ -3369,7 +3383,7 @@
         const so = setOf(s);
         const bf = bestF(s);
         const t = anySkill || stochastic ? tables(so.vs) : { bound: rt, mean: null };
-        if (!scoreMode && anySkill && groupFound.length >= searchK && upperBound(so, bf, t.bound) < kth) return;
+        if (!scoreMode && groupFound.length >= searchK && !canEnter(so, bf, t.bound, gc, boundSkill(so.vs), groupFound[searchK - 1])) return;
         groupFound.push(evaluate(so, bf, t.mean || t.bound, music, Xm, t.px));
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
         if (groupFound.length > searchK) groupFound.length = searchK;
@@ -3408,7 +3422,10 @@
             const so = setOf(s);
             const bf = bestF(s);
             const ti = songTables(so.vs);
-            if (!scoreMode && (anySkill || stochastic) && upperBound(so, bf, ti.bound) < threshold()) return;
+            if (!scoreMode && best.length >= songTopK) {
+              const sk = boundSkill(so.vs);
+              if (!canEnter(so, bf, ti.bound, list, sk && pick(sk), best[best.length - 1])) return;
+            }
             const d = evaluate(so, bf, ti.mean || ti.bound, music, Xm, ti.px);
             best.push(d);
             best.sort((a, b) => b.score - a.score || b.power - a.power);
