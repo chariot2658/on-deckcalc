@@ -268,7 +268,7 @@ async function scoreInput(base, id, every, pool = null) {
     approx = pre.songs.filter((d) => !picked.includes(d.chart.musicId));
   }
   const gkKey = gk ? Engine.gekisouKey(gk) : "solo";
-  const scope = Engine.scoreScope(input, every ? 0 : undefined);
+  const scope = Engine.scoreScope(input, every ? (input.chartCandidateMargin || 0) : undefined);
   const todo = scope.scoreIds.map((sid) => {
     const k = sid + "|" + gkKey;
     if (!snapRates.has(k)) snapRates.set(k, new Map());
@@ -382,9 +382,10 @@ function helperPool(n) {
 // several). So one deck is found per Gekisou range type (Engine.gekisouSongGroups: all COMBO, all LUCK, all JUST, mixed)
 // by the mean over that type's songs: the search's best decks within SAVED_MARGIN of its best estimate (at most
 // SAVED_POOL) are simulated on every song of the type and ranked by the simulated mean. For comparison, each song's own
-// best deck (the search's, by its estimate) and the best deck for every song alike are simulated too.
+// candidates and the best deck for every song alike are simulated too, including their nearby chart choices.
 const SAVED_POOL = 8;
 const SAVED_MARGIN = 0.95;
+const SAVED_CHART_MARGIN = 0.10;
 // Runs per deck and chart (Simulate.meanScore): five put every member at every position once. A chart with a LUCK range
 // plays a new seed each run, the same seeds for every deck: one deck varies 10% from seed to seed but two decks' paired
 // difference 0.3%, so RANK_RUNS rank them, and the scores shown take SHOW_RUNS (±3% on one song).
@@ -414,7 +415,7 @@ async function savedDecks(msg) {
     }
     helpers = replay ? helperPool(HELPERS) : null;
     let input = await engineInput(msg, helpers);
-    input = { ...input, multi: { ...input.multi, pickSong: false } };
+    input = { ...input, multi: { ...input.multi, pickSong: false }, chartCandidateMargin: SAVED_CHART_MARGIN };
     const scoreMode = input.objective === "score";
     const groups = Engine.gekisouSongGroups(input);
     if (!groups.length) {
@@ -437,7 +438,7 @@ async function savedDecks(msg) {
     const queries = [
       ...groups.map((g) => ({ musicIds: g.musicIds, compareSongs: false, topK: SAVED_POOL })),
       { musicIds: allIds, compareSongs: false, topK: 1 },
-      { musicIds: allIds, multi: { ...input.multi, pickSong: true }, compareSongs: true, topK: 1 },
+      { musicIds: allIds, multi: { ...input.multi, pickSong: true }, compareSongs: true, topK: 1, songTopK: SAVED_POOL },
     ];
     const searched = new Array(queries.length);
     let searchedCount = 0;
@@ -474,9 +475,14 @@ async function savedDecks(msg) {
     const allOut = searched[groups.length];
     const bestOut = searched[groups.length + 1];
     const bestBySong = new Map();
-    for (const d of bestOut.songs || []) {
-      const cur = bestBySong.get(d.chart.musicId);
-      if (!cur || d.score > cur.score) bestBySong.set(d.chart.musicId, d);
+    for (const d of bestOut.songCandidates || bestOut.songs || []) {
+      const id = d.chart.musicId;
+      if (!bestBySong.has(id)) bestBySong.set(id, []);
+      bestBySong.get(id).push(d);
+    }
+    for (const [id, list] of bestBySong) {
+      const top = Math.max(...list.map((d) => d.score));
+      bestBySong.set(id, list.filter((d) => d.score >= top * SAVED_MARGIN));
     }
     const gkOut = allOut.gekisou || (pools.find((p) => p.gekisou) || {}).gekisou || null;
 
@@ -504,6 +510,7 @@ async function savedDecks(msg) {
     // Simulated means of per-song decks, reqs [{d, n, prev, from}]: over `n` runs (5 off LUCK charts), added to `prev`
     // (the deck's mean over `from` runs). On the helpers one task per chart (its runner built once), else here.
     const simulateAll = async (reqs) => {
+      runsTotal += reqs.reduce((n, r) => n + runsFor(r.d.chart.scoreId, r.n) - (r.from || 0), 0);
       const items = reqs.map((r) => {
         const sid = r.d.chart.scoreId;
         const total = luckOf(sid) ? r.n : RANK_RUNS;
@@ -593,46 +600,49 @@ async function savedDecks(msg) {
     const runsFor = (sid, n) => (luckOf(sid) ? n : RANK_RUNS);
     // Without the replay: the search's estimate (all Perfect for `score`).
     const estOf = (d) => ({ value: d.score, score: d.estScore / (d.accuracy || 1), points: d.points, items: d.items, cp: d.cp });
-    if (sim) {
-      for (const p of pools) for (const x of p.pool) for (const d of x.perSong) runsTotal += runsFor(d.chart.scoreId, RANK_RUNS);
-      for (const p of pools) for (const d of (p.pool[0] || { perSong: [] }).perSong) runsTotal += runsFor(d.chart.scoreId, SHOW_RUNS) - runsFor(d.chart.scoreId, RANK_RUNS);
-      for (const d of bestBySong.values()) runsTotal += runsFor(d.chart.scoreId, SHOW_RUNS);
-      for (const d of (allOut.perSong && allOut.perSong[0]) || []) runsTotal += runsFor(d.chart.scoreId, SHOW_RUNS);
-    }
+    const choices = (d) => d.chartCandidates || [d];
+    // Each list is one song, with a fixed formation or a pool of formations. All choices use the same sample count;
+    // picking the chart after replay also respects the payoff objective, accuracy and uncertain opponents.
+    const rankChoices = async (lists, n) => {
+      const ds = lists.flat();
+      const scores = sim ? await simulateAll(ds.map((d) => ({ d, n }))) : null;
+      let q = 0;
+      return lists.map((list) => list.map((d) => ({ d, pay: sim ? valueOf(d, scores[q++]) : estOf(d) }))
+        .sort((a, b) => b.pay.value - a.pay.value || b.d.score - a.d.score || b.d.power - a.d.power));
+    };
 
     // Rank each group's pool by the simulated mean over the group's songs (the estimate without the replay).
     const live = pools.filter((p) => p.pool.length);
-    const first = sim ? await simulateAll(live.flatMap((p) => p.pool.flatMap((x) => x.perSong.map((d) => ({ d, n: RANK_RUNS }))))) : null;
+    const first = await rankChoices(live.flatMap((p) => p.pool.flatMap((x) => x.perSong.map(choices))), RANK_RUNS);
     let q = 0;
     for (const p of live) {
       for (const x of p.pool) {
-        x.sims = x.perSong.map(() => (sim ? first[q++] : null));
-        x.vals = x.perSong.map((d, k) => (sim ? valueOf(d, x.sims[k]) : estOf(d)));
+        x.vals = x.perSong.map(() => first[q++][0].pay);
         x.mean = x.vals.reduce((a, v) => a + v.value, 0) / x.vals.length;
       }
       p.order = p.pool.slice().sort((a, b) => b.mean - a.mean);
     }
     // Then on SHOW_RUNS: the winners, each song's own best deck and one deck for every song, on the same seeds.
-    const bests = live.flatMap((p) => p.order[0].perSong.map((d) => bestBySong.get(d.chart.musicId) || null));
     const allPer = allOut.results && allOut.results.length ? allOut.perSong[0] : [];
-    const second = sim
-      ? await simulateAll([
-        ...live.flatMap((p) => p.order[0].perSong.map((d, k) => ({ d, n: SHOW_RUNS, prev: p.order[0].sims[k], from: RANK_RUNS }))),
-        ...bests.filter(Boolean).map((d) => ({ d, n: SHOW_RUNS })),
-        ...allPer.map((d) => ({ d, n: SHOW_RUNS })),
-      ])
-      : null;
+    const allBySong = new Map(allPer.map((d) => [d.chart.musicId, d]));
+    const winningSongs = live.flatMap((p) => p.order[0].perSong);
+    // Include the saved and universal formations even if the estimate excluded them. Their same charts and samples
+    // participate in the final comparison, so the displayed best can never be worse than either included formation.
+    const bestLists = winningSongs.map((d) => [
+      ...(bestBySong.get(d.chart.musicId) || []), d, allBySong.get(d.chart.musicId),
+    ].filter(Boolean).flatMap(choices));
+    const second = await rankChoices([
+      ...winningSongs.map(choices), ...bestLists, ...allPer.map(choices),
+    ], SHOW_RUNS);
     q = 0;
     const outGroups = pools.map((p) => {
       if (!p.pool.length) return { type: p.type, musicIds: p.musicIds, error: p.error };
       const order = p.order;
       const win = order[0];
-      if (sim) {
-        win.sims = win.perSong.map(() => second[q++]);
-        win.vals = win.perSong.map((d, k) => valueOf(d, win.sims[k]));
-        win.mean = win.vals.reduce((a, v) => a + v.value, 0) / win.vals.length;
-      }
-      const songs = win.perSong.map((d, k) => ({ musicId: d.chart.musicId, deck: { ...slim(d), simPay: win.vals[k] } }));
+      const selected = win.perSong.map(() => second[q++][0]);
+      win.vals = selected.map((x) => x.pay);
+      win.mean = win.vals.reduce((a, v) => a + v.value, 0) / win.vals.length;
+      const songs = selected.map(({ d, pay }) => ({ musicId: d.chart.musicId, deck: { ...slim(d), simPay: pay } }));
       const meanOf = (f) => win.vals.reduce((a, v) => a + (f(v) || 0), 0) / win.vals.length;
       return {
         type: p.type,
@@ -646,17 +656,15 @@ async function savedDecks(msg) {
       };
     });
     const songs = [];
-    let bi = 0;
     for (const g of outGroups) {
       for (const s of g.songs || []) {
-        const best = bests[bi++];
-        const b = best ? (sim ? valueOf(best, second[q++]) : estOf(best)) : null;
-        songs.push({ musicId: s.musicId, type: g.type, saved: s.deck, best: best ? { ...slim(best), simPay: b } : null });
+        const best = second[q++][0];
+        songs.push({ musicId: s.musicId, type: g.type, saved: s.deck, best: { ...slim(best.d), simPay: best.pay } });
       }
     }
     let all = null;
     if (allPer.length) {
-      const vals = allPer.map((d) => (sim ? valueOf(d, second[q++]) : estOf(d)));
+      const vals = allPer.map(() => second[q++][0].pay);
       const bySong = new Map(allPer.map((d, k) => [d.chart.musicId, vals[k]]));
       for (const s of songs) s.all = bySong.get(s.musicId) || null;
       all = { deck: slim(allOut.results[0]), value: vals.reduce((a, v) => a + v.value, 0) / vals.length };
