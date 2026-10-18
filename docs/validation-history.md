@@ -4,6 +4,44 @@
 2026-10-07～13 的舊紀錄保留當時的資料、假設和量測結果；歌曲數、誤差與耗時不代表目前每種設定都成立。
 目前使用的 `music-data` 已是 `/2` 格式，搜尋讀取機率期望值；舊版按種子量得的數字不可直接當成新版基準。
 
+## 2026-10-18 LUCK 量條交互作用高估修正
+
+10/18 的資料檢查在 `gekisou.test.js` 全 LUCK 隊案例失敗：成員 52、54、69、61、68，快照 28、51、71、55、59，
+譜面 10000303、名次 3、JUST 率 20%、綜合力 953137。搜尋估分 24535678，移除一般快照技能、保留激奏支援技能的
+64 種子 replay 為 22224057，高估 10.40%。包含一般快照技能的 24761273 不是這項搜尋估計的比較基準。
+
+舊模型把全 LUCK／混合任務的固定平均增益 17%／32%，再乘上 LIFE 型的發動機率 ÷ 50%。新卡 68 的 GK21 Lv5
+在滿 LIFE 時有 87% 機率，因而被估成全 LUCK 的 RUSH 快照增益 +29.58%，超過這張譜面的實際增益。
+
+改為使用 music-data 各譜面的期望值：
+
+- 純量條技能的自身分數增益，除以 `MasterLiveSettings.gekisou_luck_rush_score_bonus_percent`，估計額外 RUSH 的分數權重。
+- RUSH 支援技能的原有分數增益，除以它的效果值，估計原有 RUSH 的分數權重；兩者相比得到該譜面的支援增益比例。
+  使用同一名次、JUST 率的量測值，包含區間名次加成，不新增瀏覽器 replay 量測。
+- 同隊取各譜面最大的單技能增益；快取改用技能 ID／等級組合，上界取逐譜面最大值，淘汰成員也逐譜面比較。
+- LIFE 型低等級按滿 LIFE 發動機率相對於滿級的比例換算；一般量條低等級暫用滿級值。
+  不使用 `gekisouLevelFactors` 的單種子倍率放大這項交互作用：本次資料的 GK9 Lv1 倍率達 2.61，GK20／21 Lv1 為 0，
+  不適合作為 RUSH 曝光比例的估計。
+
+同一隊伍修正後估分 **22450475**，對照相同 replay 為 **+1.02%**；原有 6% 斷言維持不變。
+這仍是搜尋近似：遊戲原生 RUSH 與快照技能的發動幀不同，低等級持續時間、多個量條技能同時使用也未精確合成。
+最高分數與預存隊伍仍透過 replay 比較候選，以上誤差不能當作所有隊伍的保證。
+
+驗證：
+
+- 完整 `gekisou.test.js` 通過，包含公開房暴力搜尋與最後的全 LUCK 隊案例。
+- 新增 `luck.test.js`：1,705 種成員／隊長／快照配置，公開房與指定歌曲的搜尋結果都與窮舉相同；瀏覽器 UMD、raw master 與 battle 的 structured clone 通過。
+- GK7／9／20／21 的 Lv1、Lv5，以及新舊量條混合；全 LUCK 與混合任務各一首，HARD／EXPERT 共 48 個 replay 案例，
+  每個 256 個種子，最大總分誤差 4.32%（10000302，GK20 Lv1 + GK21 Lv1），全部低於既有 6% 門檻。
+- `power.test.js`、`search.test.js`、四區 `coverage.test.js`、`score.test.js`、`saved.test.js`、`skills.test.js`、
+  `replay-runner.test.js`、`combo-search.test.js` 通過。
+- `speed.js --quick --helpers --score --check-cache --fail-search` 通過，包含 worker 故障退回及快取失效。
+- CI 加入 LUCK 專項回歸；`node test/luck.test.js --extended` 可擴展到全部含 LUCK 的 EXPERT 譜面，驗證 GK21 與 GK9 組合。
+
+資料：masterdata `afe0f81f9fde53512febd37c5ec7702c766aee48`；music-data SHA-256
+`06fd87a02abd755fa974aa9693888277601d3fbc43ea76ef1aae28945f4bd0d1`；replay engine `f9168679aad82f97e8557d42b23b3b37f692c54b`，
+deck-data SHA-256 `9205b734ff0ae10e628ffe931ef3c4d655a571f02e740645ec3a7b2be7a22d3d`。
+
 ## 2026-10-18 逐首候選隊伍與難度比較
 
 完成原 TODO 第 2、3 項，沒有更改遊戲公式：
