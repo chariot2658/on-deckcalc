@@ -43,7 +43,7 @@
     "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterLiveSkillEffect", "MasterText",
     "MasterBandItem", "MasterBandItemSkillEffect", "MasterLiveComboScoreBonus", "MasterGekisouSkill",
     "MasterGekisouSkillEffect", "MasterGekisouSupportSkill", "MasterGekisouSupportSkillEffect", "MasterLiveJudgementTiming",
-    "MasterSupportSkillEffect",
+    "MasterSupportSkillEffect", "MasterLiveNoteParameter",
   ];
 
   function rows(table) {
@@ -1350,9 +1350,8 @@
 
   /**
    * What Simulate.comboBoosts measures before a multiplayer search (input as for search): the owned members' COMBO
-   * count-up skills (comboCountOf keys), and per song with a COMBO range among the allowed charts its hardest one
-   * (another difficulty of the song takes its shares), with the support skill and idle Gekisou skill to measure them
-   * with. null when there is nothing to measure.
+   * count-up skills (comboCountOf keys), and every allowed chart with a COMBO range, with the support skill and idle
+   * Gekisou skill to measure them with. null when there is nothing to measure.
    */
   function comboScope(input) {
     const m = input.master;
@@ -1370,18 +1369,17 @@
       return rows.length > 0 && rows.every((e) => e._skillEffectType === 13000);
     });
     if (!keys.size || !support || !idle) return null;
-    const bySong = new Map();
+    const scoreIds = [];
     for (const c of chartList) {
       const b = battle.byScore.get(c.scoreId);
       if (!b || !(b.missions || []).includes(1)) continue;
-      const cur = bySong.get(c.musicId);
-      if (!cur || c.level > cur.level) bySong.set(c.musicId, c);
+      scoreIds.push(c.scoreId);
     }
-    if (!bySong.size) return null;
+    if (!scoreIds.length) return null;
     return {
       keys: [...keys].sort(),
-      scoreIds: [...bySong.values()].map((c) => c.scoreId),
-      byMusic: new Map([...bySong].map(([id, c]) => [id, c.scoreId])),
+      scoreIds,
+      byMusic: new Map(), // Keep the transport shape; timelines must never be borrowed from another difficulty.
       support,
       idle: idle._id,
     };
@@ -1544,12 +1542,8 @@
           combo: [0, 1].map((match) => Float64Array.from(comboCharts, (cb) => (cb && members.some((v) => v.comboCount) ? cb.s[match] : 0))),
         }
       : null;
-    // A card's COMBO count-up is at least another's on every chart and member match.
-    const comboAsGood = (b, a) => {
-      if (!comboData || !a.comboCount || a.comboCount === b.comboCount) return true;
-      if (!b.comboCount) return false;
-      return comboCharts.every((cb) => !cb || [0, 1].every((k) => comboCountBoost(cb, [b.comboCount], k) >= comboCountBoost(cb, [a.comboCount], k)));
-    };
+    // A larger single-skill gain does not prove dominance beside other COMBO skills: gates can open earlier.
+    const comboAsGood = (b, a) => !comboData || !a.comboCount || a.comboCount === b.comboCount;
     // Gekisou support gain of snap j beside member v on each chart of chartList (Float64Array), or null, in a deck of
     // boost profile g. Members that meet the same member conditions share it.
     const supKeys = new Map(); // member view -> cache key per snap
@@ -3978,21 +3972,68 @@
 
   /**
    * The share the COMBO count-up skills `keys` of a deck add to its COMBO-stacking support gains on a chart, for a
-   * member that does (`match` 1) or does not meet the support skill's member condition: `cb` (Simulate.comboBoosts) =
-   * {b: Map(key -> [share alone by match]), s: [share at saturation by match]}. The Gekisou combo adds up over the
-   * members, but the stacks reach their cap, so the shares combine as s * (1 - prod(1 - b / s)) (within 6% of the
-   * simulation on (1 + share) on the charts checked; a count-up triggered by the combo itself, 12 and 13, gains more
-   * beside another).
+   * member that does (`match` 1) or does not meet the support skill's member condition. Singles retain the replay
+   * measurement; combinations use the chart's count/score timeline, including thresholds, duration and ramp caps.
+   * The bound `s` is independent of the owned skills; it is never used to combine their gains.
    */
+  const comboTimelineCache = new WeakMap();
   function comboCountBoost(cb, keys, match) {
-    const s = cb.s[match];
-    if (!(s > 0) || !keys.length) return 0;
-    let p = 1;
-    for (const k of keys) {
-      const b = cb.b.get(k);
-      if (b) p *= Math.max(0, 1 - Math.min(s, Math.max(0, b[match])) / s);
+    if (!keys.length) return 0;
+    if (keys.length === 1) return (cb.b.get(keys[0]) || [0, 0])[match];
+    const tl = cb.timeline;
+    if (!(tl.base[match] > 0)) return 0;
+    if (!comboTimelineCache.has(tl)) comboTimelineCache.set(tl, new Map());
+    const cache = comboTimelineCache.get(tl), key = keys.slice().sort().join(",");
+    if (!cache.has(key)) cache.set(key, comboTimelineGain(tl, keys).map((gain, i) => tl.base[i] > 0 ? Math.max(0, gain / tl.base[i] - 1) : 0));
+    return cache.get(key)[match];
+  }
+
+  // Full-Perfect COMBO timeline. Counts are shared by the deck; gated rows read the previous play frame.
+  // A lone threshold backdates its bonus to the last judgement; an AND condition (GK18/19's LIFE) does not.
+  // Score COMBO reads the previous 40 ms score frame. Per-note score flooring is left to the full replay.
+  function comboTimelineGain(tl, keys, match) {
+    const rows = keys.flatMap((k) => tl.rows.get(k) || []);
+    const gains = [0, 0];
+    for (const r of tl.ranges) {
+      const starts = new Float64Array(rows.length).fill(Infinity);
+      const counts = new Float64Array(r.notes.length);
+      const steps = [];
+      let count = 0, n = 0, lastSupportCount = 0;
+      for (const f of r.frames) {
+        // All threshold conditions read the same state before this frame's count recalculation.
+        const before = count;
+        let added = 0;
+        for (let k = 0; k < rows.length; k++) {
+          const row = rows[k];
+          if (starts[k] === Infinity && before >= row.threshold) {
+            starts[k] = row.backdate ? (row.threshold > 0 && n ? r.notes[n - 1].time : r.start) : f.time;
+            if (row.backdate && row.threshold > 0 && n) added += row.value;
+          }
+        }
+        // The support ramp reads before the recount, even when a member's gate opens in this frame.
+        if (before !== lastSupportCount) { steps.push([f.time, before]); lastSupportCount = before; }
+        if (added) { count += added; counts[n - 1] = count; }
+        for (const note of f.notes) {
+          let active = 0;
+          for (let k = 0; k < rows.length; k++) if (note.time >= starts[k] && (!rows[k].duration || note.time < starts[k] + rows[k].duration)) active += rows[k].value;
+          count += 1 + active;
+          counts[n++] = count;
+        }
+      }
+      let p = 0, q = 0;
+      for (const note of r.notes) {
+        while (p < r.notes.length && r.notes[p].time <= note.cutoff) p++;
+        while (q < steps.length && steps[q][0] <= note.time) q++;
+        const c = p ? counts[p - 1] : 0;
+        let factor = 1;
+        for (const [threshold, value] of tl.combo) { if (threshold > c) break; factor = value; }
+        for (let i = 0; i < 2; i++) {
+          const sup = tl.support[i], count = q ? steps[q - 1][1] : 0;
+          gains[i] += note.weight * factor * Math.min(sup.max, Math.floor(count / sup.unit) * sup.value);
+        }
+      }
     }
-    return s * (1 - p);
+    return match === undefined ? gains : gains[match];
   }
 
   const api = {
@@ -4002,7 +4043,7 @@
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
     battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
     gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, snapSkillClass, skillGaps, scoreScope, roughSnapRate,
-    luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, gekisouSongType, gekisouSongGroups, roomPayoff, opponentLevels, gekisouRanks, gekisouKey, gekisouOut, OPPONENT_RANGE,
+    luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, comboTimelineGain, gekisouSongType, gekisouSongGroups, roomPayoff, opponentLevels, gekisouRanks, gekisouKey, gekisouOut, OPPONENT_RANGE,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Engine = api;

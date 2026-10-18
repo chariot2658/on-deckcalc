@@ -5,7 +5,7 @@
 //   {type: "combo", scoreId, ctx, bt: {rank, justRate}, keys, entry}: COMBO count-up shares (Simulate.comboBoostsWith)
 //   {type: "search", master: {raw, lang}, input}: one complete Engine.search (no song splitting)
 // Replies {type: "done", out}, {type: "progress", done} (jobs or runs) meanwhile, or {type: "error", message}.
-importScripts("simulate.js");
+importScripts("engine.js", "simulate.js");
 
 let session = null; // Promise of a ReplaySession
 let master = null; // lazily indexed for whole-scope searches
@@ -16,7 +16,6 @@ self.onmessage = async (e) => {
   try {
     if (msg.type === "search") {
       if (!master) {
-        importScripts("engine.js");
         master = Engine.buildMaster(msg.master.raw, msg.master.lang);
       }
       const { ctx, payoff, ...out } = Engine.search({ ...msg.input, master });

@@ -3,7 +3,7 @@
 // replay simulation, the room rank of results/IMG_0030–31, public rooms (one deck for every song in points and in the
 // score objective against brute forces, the Gekisou range types of saved decks) and Simulate.meanScore.
 // The simulation part needs ../data/replay (node test/fetch-replay.js) and is skipped without it.
-// Run: node test/gekisou.test.js
+// Run: node test/gekisou.test.js [--replay-only (skip the two exhaustive search sections)]
 const fs = require("fs");
 const path = require("path");
 const assert = require("assert");
@@ -55,7 +55,7 @@ assert.strictEqual(E.search({ ...input, multi: { players: 2, othersScore: 0, gek
 // Random song: the best deck by the mean payoff over every song (each on its best chart) against a brute force over
 // member sets, leaders and the placements of two snaps (no skills, all Perfect), with others' scores that leave some
 // songs' ranks to the deck.
-{
+if (!process.argv.includes("--replay-only")) {
   const few = roster.members.slice(0, 14);
   const two = roster.snaps.filter((s) => E.snapView(m, s)).slice(0, 2);
   const multi = { players: 5, othersScore: 4 * 1.2e6 };
@@ -170,12 +170,12 @@ assert.strictEqual(E.luckGaugeOf(m, 4, 1), 0);
 assert.strictEqual(E.comboCountOf(m, 6, 1), "6:1");
 assert.strictEqual(E.comboCountOf(m, 1, 1), null);
 assert.deepStrictEqual([41, 27, 1, 86].map((id) => E.gekisouSupportKind(m, id)), ["rush", "combo", null, null]);
-assert.ok(Math.abs(E.comboCountBoost({ s: [1, 2], b: new Map([["6:1", [0.5, 0.5]], ["4:1", [0.5, 0.5]]]) }, ["6:1", "4:1"], 0) - 0.75) < 1e-12);
+assert.strictEqual(E.comboCountBoost({ b: new Map([["6:1", [0.5, 0.3]]]) }, ["6:1"], 0), 0.5);
 
 // Score objective in a public room: the best deck by the mean expected score over the songs (one chart each), with
 // Gekisou support skills and the LUCK gauge's share, against a brute force over member sets, leaders and the placements
 // of a LUCKY RUSH and a COMBO-stacking snap.
-{
+if (!process.argv.includes("--replay-only")) {
   const few = roster.members.slice(0, 10);
   const two = roster.snaps.filter((s) => s.id === 51 || s.id === 53);
   const songIds = ["222", "222", "213", "111"].map((p, i, a) => md.songs.filter((s) => s.gekisouMissions.join("") === p)[a.slice(0, i).filter((x) => x === p).length].id);

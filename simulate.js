@@ -394,11 +394,11 @@
   /**
    * What COMBO count-up Gekisou skills (Engine.comboCountOf keys "skillId:level") add to the COMBO-stacking support
    * gains (Engine.gekisouSupportKind "combo") on chart `scoreId`, for Engine.comboCountBoost: `entry` ({b: Map(key ->
-   * [share by match]), s: [share by match], sKey}, new or measured before, updated for the keys it lacks) with each
+   * [share by match]), s: [upper bound by match], timeline}, new or measured before, updated for the keys it lacks) with each
    * share = the support skills' gain with the count-up over their gain without, minus 1. Five hosts whose own Gekisou
    * skill (`idle`, a skill id) adds no score hold the support skill `support` at its top level, beside a member of its
-   * condition's band (match 1) or not (0); one host takes the count-up for `b`, all five the strongest for the
-   * saturation `s`. COMBO ranges do not depend on the seed, so one run each, at bt's rank and Just rate (`bt`: {rank,
+   * condition's band (match 1) or not (0); one host takes the count-up for `b`. Combinations use a shared COMBO
+   * timeline instead of a saturation fit. COMBO ranges do not depend on the seed, so one run each, at bt's rank and Just rate (`bt`: {rank,
    * ranks, justRate, percents}, the chart's percents for averaged ranks, see gekisouPlay).
    */
   function comboBoosts(session, m, bt, scoreId, keys, support, idle, entry) {
@@ -415,16 +415,90 @@
       const row = m.gekisouSkills.get(id);
       rows[id] = { missionType: row._gekisouMissionType, categories: row._skillCategories || [] };
     }
+    const conditions = (group) => (m.conditionSets.get(group) || []).flatMap((s) => s._conditionIds.map((id) => m.skillConditions.get(id)));
+    const countRows = new Map();
+    for (const k of keys) {
+      const compiled = [];
+      for (const e of m.gekisouSkillEffects.get(k) || []) {
+        const cs = conditions(e._skillTriggerConditionGroup);
+        // Full Perfect keeps LIFE at its initial value. The supported rows are timed range-start, sustained
+        // range-playing, or a COMBO threshold (optionally ANDed with LIFE). Reject a new shape, never guess it.
+        if (e._skillEffectType !== 12000 || e._skillConditionGroup || e._skillReleaseConditionGroup ||
+            (m.conditionSets.get(e._skillTriggerConditionGroup) || []).length !== 1 ||
+            cs.some((c) => ![2001, 7005, 7010, 7020].includes(c._conditionType) || (c._conditionType !== 2001 && !c._isPositive))) {
+          throw new Error("Unsupported COMBO count skill " + k);
+        }
+        if (cs.some((c) => c._conditionType === 2001 && ((1000 >= c._conditionValues[0]) !== c._isPositive))) continue;
+        const gate = cs.find((c) => c._conditionType === 7005);
+        compiled.push({ threshold: gate ? gate._conditionValues[0] : 0, value: e._effectValue,
+          backdate: cs.length === 1, duration: Math.round(e._activationTimeSecond * 1000) });
+      }
+      countRows.set(k, compiled);
+    }
+    const ramps = [];
+    for (const e of m.gekisouSupportSkillEffects.get(support + ":" + top) || []) {
+      const c = m.cumulative.get(e._skillCumulativeConditionID);
+      const member = conditions(e._skillConditionGroup).find((c) => c._conditionType === 5000);
+      if (e._skillEffectType !== 2001 || !c || c._skillCumulativeConditionType !== 7001 || !member) throw new Error("Unsupported COMBO support " + support);
+      ramps[Number(member._isPositive)] = { unit: c._conditionValues[0], value: e._effectValue,
+        max: Math.min(e._maxEffectValue || Infinity, (c._maxCumulativeCount || Infinity) * e._effectValue) };
+    }
+    if (!ramps[0] || !ramps[1]) throw new Error("Missing COMBO support member conditions " + support);
     return {
       justTypes: m.justTypes, support, top, idle, rows,
       bandId: target ? target._bandID || 0 : 0, characterId: target ? target._characterID || 0 : 0,
+      countRows, ramps,
+      comboTable: m.t.MasterLiveComboScoreBonus,
+      noteWeights: new Map(m.t.MasterLiveNoteParameter.map((r) => [r._noteOperateType, r._scorePercent])),
     };
   }
 
+  function comboTimeline(session, ctx, bt, scoreId) {
+    const d = JSON.parse(session.describeChart(scoreId));
+    const tpl = JSON.parse(session.template(scoreId, 1e6, FPS));
+    const judged = d.notes.filter((n) => n.defaultJudgement >= 3 && n.defaultJudgement <= 6).sort((a, b) => a.noteMs - b.noteMs);
+    const table = (kind) => {
+      let sum = 0;
+      return ctx.comboTable.filter((r) => r._comboBonusType === kind).sort((a, b) => a._requiredComboCount - b._requiredComboCount)
+        .map((r) => [r._requiredComboCount, 1 + Math.min(1, sum = Math.fround(sum + r._bonusFactor))]);
+    };
+    const ordinary = table(0), byId = new Map(d.notes.map((n) => [n.noteId, n]));
+    const ranges = [];
+    d.fevers.forEach(([start, end], ri) => {
+      if (d.missions[ri] !== 1) return;
+      const r = { start, notes: [], frames: [] };
+      const percents = bt.percents && bt.percents[ri];
+      const rank = percents ? 1 + (bt.ranks || [bt.rank]).reduce((a, k) => a + percents[k - 1], 0) / (bt.ranks || [bt.rank]).length / 100 : 1;
+      for (const f of tpl.frames) {
+        if (f.timeMs < start || f.timeMs > end + 40) continue;
+        const ns = f.judgements.filter((j) => j.judgement >= 3 && j.judgement <= 6).map((j) => byId.get(j.noteId)).filter((n) => n.noteMs >= start && n.noteMs <= end);
+        const notes = ns.map((n) => {
+          const cutoff = Math.ceil(Math.fround(n.noteMs / 40)) * 40 - 40;
+          let lo = 0, hi = judged.length;
+          while (lo < hi) { const mid = (lo + hi) >>> 1; if (judged[mid].noteMs <= cutoff) lo = mid + 1; else hi = mid; }
+          const count = lo;
+          let factor = 1;
+          for (const [c, v] of ordinary) { if (c > count) break; factor = v; }
+          return { time: n.noteMs, cutoff, weight: (ctx.noteWeights.get(n.opType) || 0) * factor * rank };
+        });
+        r.frames.push({ time: f.timeMs, notes });
+        r.notes.push(...notes);
+      }
+      ranges.push(r);
+    });
+    const tl = { rows: ctx.countRows, support: ctx.ramps, combo: table(1), ranges };
+    const engine = typeof module !== "undefined" && module.exports ? require("./engine.js") : root.Engine;
+    tl.base = engine.comboTimelineGain(tl, []);
+    // Every note at the largest COMBO factor and support cap: a safe, roster-independent search bound.
+    const weight = ranges.reduce((a, r) => a + r.notes.reduce((b, n) => b + n.weight, 0), 0);
+    tl.upper = tl.support.map((sup, match) => tl.base[match] > 0 ? Math.max(0, weight * tl.combo[tl.combo.length - 1][1] * sup.max / tl.base[match] - 1) : 0);
+    return tl;
+  }
+
   function comboBoostsWith(session, ctx, bt, scoreId, keys, entry) {
-    const out = entry || { b: new Map(), s: [0, 0], sKey: null };
+    const out = entry || { b: new Map(), s: [0, 0] };
     const todo = keys.filter((k) => !out.b.has(k));
-    if (!todo.length && out.sKey && keys.every((k) => (out.b.get(k) || [0])[0] <= (out.b.get(out.sKey) || [0])[0])) return out;
+    if (!todo.length && out.timeline) return out;
     const run = chartRunner(session, scoreId, gekisouPlay(bt, bt.percents, ctx.justTypes));
     const { support, top, idle } = ctx;
     const empty = {
@@ -448,13 +522,8 @@
       return [0, 1].map((match) => (s1[match] > s0 ? (score(gks, match, true) - g0 - (s1[match] - s0)) / (s1[match] - s0) : 0));
     };
     for (const k of todo) out.b.set(k, share([key(k)]));
-    let strongest = null;
-    for (const k of out.b.keys()) if (!strongest || out.b.get(k)[0] > out.b.get(strongest)[0]) strongest = k;
-    if (strongest && strongest !== out.sKey) {
-      const k = key(strongest);
-      out.s = share([k, k, k, k, k]).map((x, i) => Math.max(x, ...[...out.b.values()].map((b) => b[i])));
-      out.sKey = strongest;
-    }
+    out.timeline = comboTimeline(session, ctx, bt, scoreId);
+    out.s = out.timeline.upper;
     return out;
   }
 
