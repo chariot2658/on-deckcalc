@@ -1,6 +1,6 @@
 # 待辦
 
-2026-10-18 完成逐首候選隊伍與候選難度的模擬比較，剩下 3 項。候選範圍仍是近似，詳見 README。
+2026-10-18 完成逐首候選隊伍與候選難度的模擬比較，以及 GK12／13 的 COMBO 技能組合修正，剩下 2 項。候選範圍仍是近似，詳見 README。
 已完成內容、測試結果與歷史遊戲實測見 [驗證與開發紀錄](docs/validation-history.md)。
 
 ## 1. 繼續縮短首次預存隊伍計算（原第 1、8 項）
@@ -17,16 +17,7 @@
 - **驗收**：固定設定的完整輸出與改動前相同（`--out`／`--compare`），記錄首次與重算耗時；保留快取失效與輔助 worker 失敗退回測試。
   入口：`worker.js` 的 `savedDecks`、`engine.js` 的 `randomSongSearch`／`randomScoreSearch`、`test/speed.js`。
 
-## 2. 修正 GK12／13 與其他 COMBO 激奏數技能的組合低估（原第 4 項）
-
-- **已重現 GK12**：目前 `comboCountBoost` 用飽和值遞減相加；以 GK4 Lv1＋GK12 Lv1、支援技能 16 滿級測三首全 COMBO EXPERT，皆低估。
-  10000103 不同團條件的快照額外加分提升：模型 +51.8%、模擬 +63.5%（這是快照加分的提升比例，不是整隊總分誤差）。
-  完整測量條件與另兩首結果見 [本次驗證](docs/validation-history.md)。
-- **下一步／驗收**：補 GK12、GK13 和其他 COMBO 激奏數技能的多技能組合、等級、同團／不同團、不同譜面案例，
-  比較「快照加分」與「整隊總分」兩種誤差後修正組合規則。既有 `gekisou.test.js` 通過仍不足以關閉此項。
-  入口：`engine.js` 的 `comboCountBoost`、`simulate.js` 的 `comboBoostsWith`。
-
-## 3. 非全 Perfect 時納入 Great→Perfect 快照（原第 6 項）
+## 2. 非全 Perfect 時納入 Great→Perfect 快照（原第 6 項）
 
 - **已確認**：`roughSnapRate` 只算延長演出技能（15000）；`snapSkillKey` 不把判定轉換（12006）當全 Perfect 的加分。
   模擬以全 Perfect 為底，再套準度係數，因此不會因快照轉換 Great 而增加分數。`coverage.test.js` 的全 Perfect 技能檢查也不涵蓋此缺口。

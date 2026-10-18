@@ -106,6 +106,13 @@ jobs:
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc
         run: node test/score.test.js
+      - name: COMBO 技能組合（精度與搜尋上界）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: |
+          node test/check-combo-interactions.js --extended
+          node test/check-combo-interactions.js --extended --support=27
+          node test/combo-search.test.js
       - name: saved.test.js（預存隊伍候選與難度）
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc
