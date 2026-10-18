@@ -102,6 +102,10 @@ jobs:
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc
         run: node test/gekisou.test.js
+      - name: luck.test.js（LUCK 量條交互作用與搜尋上界）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/luck.test.js
       - name: score.test.js（最高分數）
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc
