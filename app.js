@@ -841,11 +841,23 @@
       ${state.worker && state.replay ? `<div class="small sim" data-sim="${key}">模擬中…</div>` : ""}`;
   }
 
-  // The song side of a deck card for the score objective: the chart, the power and the simulation line.
+  // The song side of a deck card for the score objective: the chart, the power, the song's rank thresholds (solo) and
+  // the simulation line.
   function scoreSide(d, key, out) {
     return `<div><b>${esc(musicTitle(d.chart.musicId))}</b> ${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</div>
       <div class="small">預估綜合力 <b>${fmt(d.displayPower)}</b>${out.input.multi ? "（含歌曲加成；激奏編成畫面不含）" : ""}</div>
+      ${out.input.multi ? "" : scoreRankLine(d)}
       ${state.worker && state.replay ? `<div class="small sim" data-sim="${key}">模擬中…</div>` : ""}`;
+  }
+
+  // The score the deck's rank needs on this song and what the next rank needs (score, and power on the same chart).
+  function scoreRankLine(d) {
+    const th = (r) => (d.chart.thresholds.find((t) => t[0] === r) || [0, 0])[1];
+    const now = th(d.rank) > 0 ? `${esc(d.rankName)} 需要 ${fmt(th(d.rank))} 分` : "";
+    const next = d.nextRankName
+      ? `${esc(d.nextRankName)} 需要 ${fmt(th(d.nextRank))} 分（綜合力約 ${fmt(d.nextNeedDisplayPower)}）`
+      : "已是最高評級";
+    return `<div class="small muted" title="這首歌的評級門檻（每首歌不同，同一首歌各難度相同），和依你的準度的預估分數比">${[now, next].filter(Boolean).join("；")}</div>`;
   }
 
   // A multiplayer deck ranked over random songs: no chart, the formation screen's power (no song bonus).
@@ -1382,6 +1394,7 @@
   // Score objective: each song's highest expected score.
   function renderScoreSongs(out) {
     const el = $("#songs");
+    const multi = out.input.multi;
     const list = out.songs.map((d, k) => ({ d, k })).sort((a, b) => b.d.score - a.d.score);
     const shown = songView.showAll ? list : list.slice(0, SONG_LIMIT);
     if (songView.selected !== null && !shown.some((r) => r.k === songView.selected)) {
@@ -1397,6 +1410,7 @@
             d.approx ? '<span class="song-best muted" title="沒算快照技能，實際約高 5%">粗估</span>' : ""
           }</td>
           <td class="num"><b>${fmt(d.estScore)}</b></td>
+          ${multi ? "" : `<td>${esc(d.rankName)}</td>`}
           <td class="num small">${skillParts(d, true)}</td>
           <td class="num">${fmt(d.displayPower)}</td>
         </tr>`;
@@ -1405,7 +1419,7 @@
     el.innerHTML = `<h2>歌曲比較</h2>
       <p class="note">每首歌各自配出分數最高的隊伍後的預估分數（同一首歌只列分數最高的難度；依你的準度的期望值）。點一列可看那首歌的隊伍和模擬分數。</p>
       <div class="table-scroll"><table class="rules songs">
-        <thead><tr><th>#</th><th>歌曲</th><th class="num">預估分數</th><th class="num">組成</th><th class="num">綜合力</th></tr></thead>
+        <thead><tr><th>#</th><th>歌曲</th><th class="num">預估分數</th>${multi ? "" : `<th title="這首歌的評級門檻和預估分數比">評級</th>`}<th class="num">組成</th><th class="num">綜合力</th></tr></thead>
         <tbody>${body}</tbody></table></div>
       ${list.length > SONG_LIMIT ? `<p><button class="ghost small" id="songMore">${songView.showAll ? `只顯示前 ${SONG_LIMIT} 首` : `顯示全部 ${list.length} 首`}</button></p>` : ""}`;
     const more = $("#songMore");
