@@ -4,8 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
-module.exports = async function loadReplay() {
-  const dir = path.join(__dirname, "..", "..", "data", "replay");
+module.exports = async function loadReplay(dir = path.join(__dirname, "..", "..", "data", "replay")) {
   const manifestFile = path.join(dir, "manifest.json");
   if (!fs.existsSync(manifestFile)) return null;
   const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));

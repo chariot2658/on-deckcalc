@@ -12,6 +12,20 @@ const md = JSON.parse(fs.readFileSync(path.join(root, "data/music-data.json")));
 const battle = E.battleFromMusicData(md);
 const roster = JSON.parse(fs.readFileSync(path.join(__dirname, "../presets/my-roster.json")));
 
+// Unknown/reordered frame schemas must keep named fields, so a replay update cannot silently drop a new input.
+for (const frame of [
+  { timeMs: 0, deltaSeconds: 1 / 60, judgements: [], liveFinished: false, futureInput: 7 },
+  { deltaSeconds: 1 / 60, timeMs: 0, judgements: [], liveFinished: false },
+]) {
+  let request;
+  const session = {
+    template: () => JSON.stringify({ frames: [frame] }),
+    run: (json) => { request = JSON.parse(json); return '{"score":0}'; },
+  };
+  S.chartRunner(session, 1, null)(1, [], [], 0);
+  assert.deepStrictEqual({ judgements: [], liveFinished: false, ...request.frames[0] }, frame);
+}
+
 (async () => {
   const session = await loadReplay();
   if (!session) throw new Error("Missing replay: run node test/fetch-replay.js");
@@ -42,7 +56,8 @@ const roster = JSON.parse(fs.readFileSync(path.join(__dirname, "../presets/my-ro
         const score = run(power, perf, order, seed);
         let tpl = JSON.parse(session.template(sid, power, 60));
         if (g) tpl = S.gekisouRequest(session, tpl, sid, g);
-        assert.deepStrictEqual(compact.frames.map((f) => [f.timeMs, Math.fround(f.deltaSeconds), f.judgements || [], f.liveFinished || false]),
+        assert.ok(compact.frames.every(Array.isArray), "use replay's ordered frame transport");
+        assert.deepStrictEqual(compact.frames.map(([time, delta, judgements = [], finished = false]) => [time, Math.fround(delta), judgements, finished]),
           tpl.frames.map((f) => [f.timeMs, Math.fround(f.deltaSeconds), f.judgements, f.liveFinished]), "clock and judgements must be unchanged");
         const expected = JSON.parse(session.run(JSON.stringify({ ...tpl, performers: perf, skillOrder: order, seed })));
         assert.deepStrictEqual(result, expected, `complete replay result ${sid}, power ${power}, seed ${seed}`);

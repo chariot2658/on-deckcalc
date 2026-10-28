@@ -178,11 +178,20 @@
     let tpl = JSON.parse(session.template(scoreId, 1e6, FPS));
     if (gekisou) tpl = gekisouRequest(session, tpl, scoreId, gekisou);
     const { performers: _p, skillOrder: _o, seed: _s, power: _w, ...rest } = tpl;
-    // ReplayFrame defaults these fields to [] and false. Most 60 Hz frames have no judgement; omitting the defaults
-    // cuts repeated JS -> WASM JSON transfer and deserialisation without changing the simulator's clock or inputs.
-    rest.frames = rest.frames.map(({ judgements, liveFinished, ...frame }) => {
-      if (judgements && judgements.length) frame.judgements = judgements;
-      if (liveFinished) frame.liveFinished = true;
+    // ReplayFrame's serde decoder also accepts fields in declaration order: timeMs, deltaSeconds, judgements,
+    // liveFinished. Trailing fields default to [] and false. Arrays avoid repeating field names at every 60 Hz tick
+    // on every run, cutting JSON transfer/parsing without dropping frames or changing the binary32 clock.
+    rest.frames = rest.frames.map((f) => {
+      // A later replay may add/reorder fields. Its template exposes the declaration order; keep named fields then.
+      const { judgements, liveFinished, ...named } = f;
+      if (Object.keys(f).join(",") !== "timeMs,deltaSeconds,judgements,liveFinished") {
+        if (judgements && judgements.length) named.judgements = judgements;
+        if (liveFinished) named.liveFinished = true;
+        return named;
+      }
+      const frame = [f.timeMs, f.deltaSeconds];
+      if ((judgements && judgements.length) || liveFinished) frame.push(judgements || []);
+      if (liveFinished) frame.push(true);
       return frame;
     });
     const body = JSON.stringify(rest).slice(0, -1);
