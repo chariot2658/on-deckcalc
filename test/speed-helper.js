@@ -6,7 +6,7 @@ const { parentPort, workerData } = require("worker_threads");
 const S = require(path.resolve(workerData.simulate || path.join(__dirname, "../simulate.js")));
 const loadReplay = require("./replay.js");
 const context = vm.createContext({
-  Simulate: { ...S, loadReplay },
+  Simulate: { ...S, loadReplay: () => loadReplay(workerData.replayDir) },
   Engine: require(path.resolve(workerData.engine || path.join(__dirname, "../engine.js"))),
   importScripts() {},
   self: { postMessage: (msg) => parentPort.postMessage(msg) },

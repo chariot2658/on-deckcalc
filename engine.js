@@ -1602,6 +1602,9 @@
     };
     // Points: a pairing's whole gain (Gekisou support skills and rough snap skills) in a deck of boost profile g, or null.
     const pairCache = new Map(); // member view -> profile key -> per snap
+    // Different members/profiles often resolve to the same two immutable source arrays. Share their sum as well,
+    // instead of retaining another whole-chart array for every view/profile/snap combination.
+    const combinedPairs = new Map(); // support array -> rough-skill array -> combined rates
     const pairOf = (v, j, g = null) => {
       if (!pairCache.has(v)) pairCache.set(v, new Map());
       const byG = pairCache.get(v);
@@ -1611,7 +1614,12 @@
       if (row[j] === undefined) {
         const a = gkSup ? supOf(v, j, g) : null;
         const b = roughOf(v, j);
-        row[j] = a && b ? a.map((x, i) => x + b[i]) : a || b;
+        if (a && b) {
+          if (!combinedPairs.has(a)) combinedPairs.set(a, new Map());
+          const byRough = combinedPairs.get(a);
+          if (!byRough.has(b)) byRough.set(b, a.map((x, i) => x + b[i]));
+          row[j] = byRough.get(b);
+        } else row[j] = a || b;
       }
       return row[j];
     };
@@ -1629,16 +1637,29 @@
       return snapX.get(v);
     };
     const supportOf = (v, j, g) => (pairPts ? pairOf(v, j, g) : gkSup ? supOf(v, j, g) : null);
+    // Score searches revisit a member/profile on many single-chart groups. The support arrays already cover every
+    // chart: retain their references once, rather than repeating the nested support-cache lookups for every chart.
+    // Do not cache all combined chart/snap rows here; those stay local to each group to bound memory use.
+    const supportSources = new Map();
+    const sourcesOf = (v, g) => {
+      const key = g ? g.key : "";
+      if (!supportSources.has(key)) supportSources.set(key, new Map());
+      const byV = supportSources.get(key);
+      if (!byV.has(v)) byV.set(v, snaps.map((_, j) => supportOf(v, j, g)));
+      return byV.get(v);
+    };
     // Member v's pair rates (per snap) on the charts of chartList at indices idx, in a deck of boost profile g.
     const snapRatesOf = (v, idx, g = null) => {
       const xs = snapXOf(v);
+      const sources = scoreMode ? sourcesOf(v, g) : null;
       const out = idx.map(() => new Float64Array(snaps.length));
       for (let j = 0; j < snaps.length; j++) {
-        const sup = supportOf(v, j, g);
-        idx.forEach((i, k) => {
+        const sup = sources ? sources[j] : supportOf(v, j, g);
+        for (let k = 0; k < idx.length; k++) {
+          const i = idx[k];
           const x = xs ? xs[i][j] : 0;
           out[k][j] = sup ? x + sup[i] : x;
-        });
+        }
       }
       return out;
     };
@@ -1651,8 +1672,9 @@
       if (!byV.has(v)) {
         const out = new Float64Array(chartList.length);
         const xs = snapXOf(v);
+        const sources = scoreMode ? sourcesOf(v, g) : null;
         for (let j = 0; j < snaps.length; j++) {
-          const sup = supportOf(v, j, g);
+          const sup = sources ? sources[j] : supportOf(v, j, g);
           for (let i = 0; i < out.length; i++) {
             const x = xs ? xs[i][j] : 0;
             const r = sup ? x + sup[i] : x;
@@ -1740,10 +1762,12 @@
     const maxSnapItem = topSum(snapItem, 5);
     const Gm = new Map();
     const bestG = new Map();
+    const snapPowerOrder = new Map();
     for (const v of allCand) {
       const row = snaps.map((s) => slotG(m, v, s, ctx));
       Gm.set(v, row);
       bestG.set(v, row.length ? Math.max(0, ...row) : 0);
+      if (scoreMode && pairX) snapPowerOrder.set(v, row.map((_, j) => j).sort((a, b) => row[b] - row[a]));
     }
     // Leader terms for simple leaders: leaderTerm.get(L).get(v) = whole points L's skill adds to v's slot.
     const leaders = allCand.filter((v) => simpleLeader(m, v));
@@ -2454,6 +2478,9 @@
     // at its own boost profile (`setBound`), `maxSkill` at the largest. `snapRates(c, g)` gives member view -> rates per
     // snap on chart c in a deck of boost profile g.
     function skillRates(list) {
+      // Per-song points queries visit few members of each boost profile too. Public-room mean searches still
+      // benefit from eager rows; keep that path while avoiding unused whole-roster bounds in individual searches.
+      const lazyBounds = scoreMode || !randomSong;
       const skillOf = new Map();
       if (sw) {
         for (const v of allCand) {
@@ -2471,9 +2498,18 @@
       }
       // Pair rates per chart of list (member view -> rates per snap) in a deck of boost profile g; bounds take gMax.
       const listIdx = list.map((c) => chartIdx.get(c));
+      const profileKeys = new Map();
+      const profileKey = (g) => {
+        if (!g) return "";
+        if (randomSong) return g.key;
+        // Different skill combinations often give exactly the same boosts on these charts (e.g. LUCK skills on
+        // an all-COMBO chart). Only those numeric boosts feed the pair rates; share rows/bounds for equal vectors.
+        if (!profileKeys.has(g)) profileKeys.set(g, JSON.stringify(listIdx.map((i) => [g.rush[i], g.combo[0][i], g.combo[1][i]])));
+        return profileKeys.get(g);
+      };
       const ratesAt = new Map();
       const snapRatesAt = (g) => {
-        const gk = g ? g.key : "";
+        const gk = profileKey(g);
         if (!ratesAt.has(gk)) {
           // Payoff queries reuse most candidates: keep their eager maps and reserve lazy rows for score searches.
           if (!scoreMode) {
@@ -2496,9 +2532,9 @@
       // Member view -> skill rates plus the best pairing per chart, in a deck of boost profile g.
       const boundAt = new Map();
       const boundsAt = (g) => {
-        const gk = g ? g.key : "";
+        const gk = profileKey(g);
         if (!boundAt.has(gk)) {
-          if (!scoreMode) {
+          if (!lazyBounds) {
             const out = new Map();
             for (const v of allCand) {
               const a = Float64Array.from(skillOf.get(v) || new Float64Array(list.length));
@@ -2524,10 +2560,10 @@
         return boundAt.get(gk);
       };
       const bounds = pairX ? boundsAt(gMax) : skillOf;
-      const anySkill = pairX && scoreMode ? true : bounds.size > 0;
+      const anySkill = pairX && lazyBounds ? true : bounds.size > 0;
       const maxSkill = new Float64Array(list.length);
       if (anySkill) {
-        const all = pairX && scoreMode ? allCand.map((v) => bounds.get(v)) : [...bounds.values()];
+        const all = pairX && lazyBounds ? allCand.map((v) => bounds.get(v)) : [...bounds.values()];
         for (let i = 0; i < list.length; i++) {
           const top = all.map((a) => a[i]).sort((a, b) => b - a);
           for (let k = 0; k < 5 && k < top.length; k++) maxSkill[i] += top[k];
@@ -2545,7 +2581,7 @@
       const setBound = !pairX ? sum(skillOf) : scoreMode
         ? (vs, g = boostOf(vs)) => sum(boundsAt(g))(vs)
         : (vs) => sum(boundsAt(boostOf(vs)))(vs);
-      return { anySkill, maxSkill, setSkill: sum(skillOf), setBound, snapRates };
+      return { anySkill, maxSkill, setSkill: sum(skillOf), setBound, snapRates, profileKey };
     }
 
     let evaluated = 0;
@@ -3222,7 +3258,7 @@
       lastMusic = group.musicKey;
       const music = group.music;
       const gc = group.charts;
-      const { anySkill, maxSkill, setSkill, setBound, snapRates } = skillRates(gc);
+      const { anySkill, maxSkill, setSkill, setBound, snapRates, profileKey } = skillRates(gc);
       // The score objective with pair rates plays one chart per group: a pairing's rate is one number. Points with
       // Gekisou support skills bound a set by each member's best pairing and give each snap assignment a table of its own
       // (`px`, see pairTable).
@@ -3294,25 +3330,38 @@
       // arithmetic at the power bound).
       const gcIndex = new Map(gc.map((c, i) => [c, i]));
       const balancedRows = new Map(); // boost profile -> balance k -> member -> max_j(k*G + X)
+      const balancedPairs = new Map(); // profile -> member -> non-dominated [G, max(0, X)] pairs on this chart
       const balanceStep = gc[0].perPower * 1e-7;
       const productBound = (so, bf, rate, profile) => {
         const mult = bf.f + so.g;
         // Quantisation only shares work; AM-GM is an upper bound at every positive k.
         const k = Math.round(rate / mult / balanceStep) * balanceStep;
         if (!(k > 0) || !Number.isFinite(k)) return Infinity;
-        const key = profile ? profile.key : "";
+        const key = profileKey(profile);
         if (!balancedRows.has(key)) balancedRows.set(key, new Map());
         const byK = balancedRows.get(key);
         if (!byK.has(k)) byK.set(k, new Map());
         const byV = byK.get(k);
         const xm = Xm(profile);
+        if (!balancedPairs.has(key)) balancedPairs.set(key, new Map());
+        const pairsByV = balancedPairs.get(key);
         let z = k * bf.f + gc[0].perPower + (anySkill ? setSkill(so.vs)[0] : 0);
         for (const v of so.vs) {
           if (!byV.has(v)) {
-            const g = Gm.get(v);
-            const x = xm.get(v);
+            if (!pairsByV.has(v)) {
+              const g = Gm.get(v), x = xm.get(v);
+              const pairs = [];
+              let high = -Infinity;
+              // Descending G: a previous pair with X >= this X dominates it for every positive k. This only
+              // accelerates the bound's maximum; the actual snap assignment retains all snaps and its tie order.
+              for (const j of snapPowerOrder.get(v)) {
+                const gain = Math.max(0, x[j]);
+                if (gain > high) { pairs.push([g[j], gain]); high = gain; }
+              }
+              pairsByV.set(v, pairs);
+            }
             let best = 0;
-            for (let j = 0; j < snaps.length; j++) best = Math.max(best, k * g[j] + Math.max(0, x[j]));
+            for (const [power, gain] of pairsByV.get(v)) best = Math.max(best, k * power + gain);
             byV.set(v, best);
           }
           z += byV.get(v);

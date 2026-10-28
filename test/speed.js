@@ -1,10 +1,11 @@
 // Saved-deck benchmark, including replay preparation and simulation; --helpers uses real Node worker threads.
 // node test/speed.js [--all] [--score] [--fixed] [--breaks=2] [--repeat] [--helpers] [--quick] [--check-cache]
-//   [--helper-count=6] [--changed] [--roster=path] [--engine=path] [--worker=path] [--simulate=path] [--simworker=path] [--out=path] [--compare=path]
+//   [--helper-count=6] [--changed] [--data-root=path] [--roster=path] [--engine=path] [--worker=path] [--simulate=path] [--simworker=path] [--out=path] [--compare=path]
 //   [--songs=100003,100094,100087] [--max-level=27] [--difficulties=hard,expert] [--now=2026-10-18T00:00:00Z]
 // --fixture=path writes the init/request (tagged Map/Set JSON) for a browser test instead of running it.
 // --out saves the complete result (without timings) for an exact before/after comparison.
 // --changed also compares a recalculation at 98% Perfect (saved as <out>.changed); use node --cpu-prof for profiles.
+// --data-root pins moenotes-masterdata/hk-tw-mo, data/music-data.json and data/replay, including helper workers.
 // --baseline skips the new candidate guarantees when measuring an older --worker/--engine implementation.
 const fs = require("fs");
 const path = require("path");
@@ -17,7 +18,7 @@ const args = process.argv.slice(2);
 const option = (name) => (args.find((a) => a.startsWith(`--${name}=`)) || "").slice(name.length + 3);
 const E = require(path.resolve(option("engine") || path.join(__dirname, "../engine.js")));
 const S = require(path.resolve(option("simulate") || path.join(__dirname, "../simulate.js")));
-const root = path.join(__dirname, "../..");
+const root = path.resolve(option("data-root") || path.join(__dirname, "../.."));
 const raw = {};
 for (const t of E.TABLES) raw[t] = JSON.parse(fs.readFileSync(path.join(root, "moenotes-masterdata/hk-tw-mo", t + ".json"), "utf8"));
 const md = JSON.parse(fs.readFileSync(path.join(root, "data/music-data.json"), "utf8"));
@@ -33,7 +34,7 @@ const members = all ? master.t.MasterMemberCard.map((c) => {
 const snaps = all ? master.t.MasterSupportCard.map((s) => ({ id: s._id, level: E.snapLimit(master, s, 5), rank: 5 })) : roster.snaps;
 
 (async () => {
-  const replay = await loadReplay();
+  const replay = await loadReplay(path.join(root, "data/replay"));
   if (!replay) throw new Error("Missing replay: run node test/fetch-replay.js");
   let result;
   let stage;
@@ -58,7 +59,7 @@ const snaps = all ? master.t.MasterSupportCard.map((s) => ({ id: s._id, level: E
     Worker: args.includes("--helpers") ? class {
       constructor() {
         this.worker = new Worker(path.join(__dirname, "speed-helper.js"), { workerData: {
-          engine: option("engine"), simulate: option("simulate"), simworker: option("simworker"),
+          engine: option("engine"), simulate: option("simulate"), simworker: option("simworker"), replayDir: path.join(root, "data/replay"),
         } });
         this.worker.on("message", (data) => {
           if (data.type === "done" && this.query) {
