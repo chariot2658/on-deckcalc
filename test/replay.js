@@ -1,10 +1,11 @@
 // Loads the replay engine and deck data that test/fetch-replay.js downloaded to ../data/replay, as its manifest names
-// them. Resolves to a ReplaySession, or null when they are missing.
+// them. Resolves to a ReplaySession (with `patch`, on the deck data Simulate.patchDeck patches), or null when they are
+// missing.
 const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
-module.exports = async function loadReplay(dir = path.join(__dirname, "..", "..", "data", "replay")) {
+module.exports = async function loadReplay(dir = path.join(__dirname, "..", "..", "data", "replay"), patch = null) {
   const manifestFile = path.join(dir, "manifest.json");
   if (!fs.existsSync(manifestFile)) return null;
   const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
@@ -12,5 +13,6 @@ module.exports = async function loadReplay(dir = path.join(__dirname, "..", ".."
   if (![js, wasm, deck].every((f) => fs.existsSync(f))) return null;
   const mod = await import(pathToFileURL(js).href);
   mod.initSync({ module: fs.readFileSync(wasm) });
-  return new mod.ReplaySession(fs.readFileSync(deck, "utf8"));
+  const text = fs.readFileSync(deck, "utf8");
+  return new mod.ReplaySession(patch ? require("../simulate.js").patchDeck(text, patch) : text);
 };

@@ -4,12 +4,14 @@
 //   {type: "samples", ...same as mean}: individual run scores of each -> [[score]]
 //   {type: "combo", scoreId, ctx, bt: {rank, justRate}, keys, entry}: COMBO count-up shares (Simulate.comboBoostsWith)
 //   {type: "search", master: {raw, lang}, input}: one complete Engine.search (no song splitting)
+//   {type: "arena", scoreId, spec}: a chart measured with 激奏舞台's missions (Simulate.measureBattleChart) -> entry
+// A task with `patch` (Simulate.patchDeck: 激奏舞台's missions) plays on a replay of the patched deck data.
 // Replies {type: "done", out}, {type: "progress", done} (jobs or runs) meanwhile, or {type: "error", message}.
 importScripts("engine.js", "simulate.js");
 
-let session = null; // Promise of a ReplaySession
+const sessions = new Map(); // the patch's missions ("" without) -> Promise of a ReplaySession
 let master = null; // lazily indexed for whole-scope searches
-const runners = new Map(); // scoreId and Gekisou -> Simulate.chartRunner
+const runners = new Map(); // missions, scoreId and Gekisou -> Simulate.chartRunner
 
 self.onmessage = async (e) => {
   const msg = e.data;
@@ -22,8 +24,9 @@ self.onmessage = async (e) => {
       self.postMessage({ type: "done", out });
       return;
     }
-    if (!session) session = Simulate.loadReplay(msg.replay.musicDataUrl, msg.replay.pointer);
-    const s = await session;
+    const sk = msg.patch ? msg.patch.missions.join("") : "";
+    if (!sessions.has(sk)) sessions.set(sk, Simulate.loadReplay(msg.replay.musicDataUrl, msg.replay.pointer, msg.patch || undefined));
+    const s = await sessions.get(sk);
     let last = 0;
     const progress = (n) => {
       const now = Date.now();
@@ -37,7 +40,7 @@ self.onmessage = async (e) => {
       self.postMessage({ type: "done", out: [...out] });
     } else if (msg.type === "mean" || msg.type === "samples") {
       const g = msg.gekisou;
-      const key = msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate + (g.mean ? ":" + JSON.stringify(g.mean) : "") : "");
+      const key = sk + "|" + msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate + (g.mean ? ":" + JSON.stringify(g.mean) : "") : "");
       if (!runners.has(key)) runners.set(key, Simulate.chartRunner(s, msg.scoreId, g));
       const run = runners.get(key);
       let runs = 0;
@@ -49,9 +52,11 @@ self.onmessage = async (e) => {
       self.postMessage({ type: "done", out: msg.items.map((it) => measure(counted, it.power, it.perf, it.seeds, it.total, it.from)) });
     } else if (msg.type === "combo") {
       self.postMessage({ type: "done", out: Simulate.comboBoostsWith(s, msg.ctx, msg.bt, msg.scoreId, msg.keys, msg.entry) });
+    } else if (msg.type === "arena") {
+      self.postMessage({ type: "done", out: Simulate.measureBattleChart(s, msg.scoreId, msg.spec, progress) });
     }
   } catch (err) {
-    session = null;
+    sessions.clear();
     self.postMessage({ type: "error", message: String((err && err.message) || err) });
   }
 };
