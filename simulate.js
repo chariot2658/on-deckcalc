@@ -567,10 +567,189 @@
   }
 
   /**
-   * Browser: loads the replay engine and deck data named by music-data.json's `replay` pointer (URLs relative to
-   * the music-data URL), cached with the Cache API under the manifest hash. Returns a ReplaySession.
+   * The replay's deck data (JSON text) for 激奏舞台: `patch.missions` replaces every song's three Gekisou missions (the
+   * day's rule; the replay reads a chart's missions from its song, and its requests take no override), and
+   * `patch.probes` (Engine.kindProbes) adds a live skill of one effect row per music-data kind.
    */
-  async function loadReplay(musicDataUrl, pointer) {
+  function patchDeck(deckText, patch) {
+    const d = JSON.parse(deckText);
+    const t = d.master;
+    if (patch.missions) {
+      const lm = t.MasterLiveMusic;
+      const at = ["_gekisouMission1", "_gekisouMission2", "_gekisouMission3"].map((c) => lm.columns.indexOf(c));
+      if (at.some((i) => i < 0)) throw new Error("replay deck data without Gekisou missions");
+      for (const r of lm.rows) at.forEach((i, k) => (r[i] = patch.missions[k]));
+    }
+    for (const p of patch.probes || []) {
+      const ls = t.MasterLiveSkill;
+      const le = t.MasterLiveSkillEffect;
+      ls.rows.push(ls.columns.map((c) => (c === "_id" ? p.row._liveSkillID : c === "_skillCategories" ? [] : 0)));
+      le.rows.push(le.columns.map((c) => (p.row[c] === undefined ? 0 : p.row[c])));
+    }
+    return JSON.stringify(d);
+  }
+
+  /**
+   * What measureBattleChart plays on a chart whose ranges are all `missions` (plain data, so helpers need no master):
+   * {power, seeds, kindSeeds (how many of the seeds measure the live skill weights), percents, missions, justTypes,
+   * kinds: number of music-data kinds, probes (Engine.kindProbes, live skills patchDeck adds), members: [{shape, perf}]
+   * (each member Gekisou skill shape of a mission the ranges have, alone on one performer),
+   * supports: [{key: "shape:match", host, perf}] (each support skill shape beside a host whose own Gekisou skill is of
+   * another mission, a target of its member condition 5000 (match 1) or not (0)), as nnnotes' aptitude}. `opts`:
+   * {percents (Engine.rankBonusPercents), probes, seeds, kindSeeds}.
+   */
+  function battleSpec(m, battle, missions, opts) {
+    const empty = () => ({
+      liveSkill: null, supportSkills: [], bandId: 0, characterId: 0, cardType: 0, tagIds: [], liveSkillCategories: [],
+      gekisouSkillCategories: [], gekisouMissionType: 0, gekisouSkill: null, gekisouSupportSkills: [],
+    });
+    const members = [];
+    const supports = [];
+    for (const sh of battle.shapeList || []) {
+      // A shape of a mission no range has adds nothing (checked on charts of each type).
+      if (sh.mission && !missions.includes(sh.mission)) continue;
+      const [id, level] = sh.skill;
+      if (sh.source === "member") {
+        const row = m.gekisouSkills.get(id);
+        if (!row) continue;
+        members.push({
+          shape: sh.id,
+          perf: { ...empty(), gekisouSkill: [id, level], gekisouMissionType: row._gekisouMissionType, gekisouSkillCategories: row._skillCategories || [] },
+        });
+        continue;
+      }
+      const row = m.gekisouSupportSkills.get(id);
+      const gk = row && m.t.MasterGekisouSkill.find((g) => g._gekisouMissionType >= 1 && g._gekisouMissionType <= 3 && g._gekisouMissionType !== row._gekisouMissionType);
+      if (!gk) continue;
+      const host = { ...empty(), gekisouSkill: [gk._id, 1], gekisouMissionType: gk._gekisouMissionType, gekisouSkillCategories: gk._skillCategories || [] };
+      const t = conditionTarget(m, id, level);
+      for (const match of t ? [0, 1] : [0]) {
+        const h = match ? { ...host, bandId: t._bandID || 0, characterId: t._characterID || 0, cardType: t._cardType || 0, tagIds: t._tagID > 0 ? [t._tagID] : [] } : host;
+        supports.push({ key: sh.id + ":" + match, host: h, perf: { ...h, gekisouSupportSkills: [[id, level]] } });
+      }
+    }
+    return {
+      power: battle.power, seeds: opts.seeds, kindSeeds: opts.kindSeeds || opts.seeds.length, percents: opts.percents, missions,
+      justTypes: [...m.justTypes], kinds: battle.kinds.length, probes: opts.probes.map(({ q, skill, f }) => ({ q, skill, f })), members, supports,
+    };
+  }
+
+  /**
+   * Gekisou data of chart `scoreId` measured on `session` (whose songs play spec.missions, patchDeck) as
+   * Engine.battleFromMusicData's byScore entry: per seed the no-skill score of the Just play (Just at every Just-able
+   * note of the Just-count ranges) and of the Perfect play at rank 1, each range's score and rank bonus, the live skill
+   * weights (score per unit of power and of factor of each kind at each position, Just play) and their parts in each
+   * range's score (on the first spec.kindSeeds seeds, their mean in every entry: on 4 seeds within 0.4% of 64); the
+   * seed means of each Gekisou skill shape's and support shape's increments (tail: outside the ranges); per
+   * range the Just play's Just count and notes. Without a Just-count range the Perfect play is the Just play.
+   * `progress(runs)`.
+   */
+  function measureBattleChart(session, scoreId, spec, progress) {
+    const P = spec.power;
+    const justTypes = new Set(spec.justTypes);
+    const tpl = JSON.parse(session.template(scoreId, P, FPS));
+    const playOf = (justRate) => {
+      const { performers: _p, skillOrder: _o, seed: _s, ...rest } = gekisouRequest(session, tpl, scoreId, { ranks: [1, 1, 1], justRate, justTypes });
+      const body = JSON.stringify(rest).slice(0, -1);
+      return (perf, order, seed) =>
+        JSON.parse(session.run(`${body},"performers":${JSON.stringify(perf)},"skillOrder":${JSON.stringify(order)},"seed":${seed}}`));
+    };
+    const just = playOf(1);
+    const perfect = spec.missions.includes(3) ? playOf(0) : null;
+    // The Just and the Perfect play of performers `perf` (one run when they are the same).
+    const both = (perf, order, seed) => {
+      const rJ = count(just(perf, order, seed));
+      return [rJ, perfect ? count(perfect(perf, order, seed)) : rJ];
+    };
+    const empty = {
+      liveSkill: null, supportSkills: [], bandId: 0, characterId: 0, cardType: 0, tagIds: [], liveSkillCategories: [],
+      gekisouSkillCategories: [], gekisouMissionType: 0, gekisouSkill: null, gekisouSupportSkills: [],
+    };
+    const alone = (p) => [p, empty, empty, empty, empty];
+    const I = [0, 1, 2, 3, 4];
+    const rs = (r) => r.endScore - r.startScore;
+    const outside = (res) => res.score - res.ranges.reduce((a, r) => a + rs(r) + r.rankBonus, 0);
+    let runs = 0;
+    const count = (res) => {
+      if (progress) progress(++runs);
+      return res;
+    };
+    const inc = () => ({ tail: 0, tailPerfect: 0, ranges: [[0, 0], [0, 0], [0, 0]] });
+    const apt = new Map(spec.members.map((x) => [x.shape, inc()]));
+    const aptSupport = new Map(spec.supports.map((x) => [x.key, inc()]));
+    // An increment over a base play pair (Just, Perfect), added to a's seed sum.
+    const add = (a, [rJ, rP], [baseJ, baseP]) => {
+      a.tail += outside(rJ) - outside(baseJ);
+      a.tailPerfect += outside(rP) - outside(baseP);
+      rJ.ranges.forEach((r, i) => {
+        a.ranges[i][0] += rs(r) - rs(baseJ.ranges[i]);
+        a.ranges[i][1] += rs(rP.ranges[i]) - rs(baseP.ranges[i]);
+      });
+    };
+    const nk = Math.max(1, Math.min(spec.kindSeeds || spec.seeds.length, spec.seeds.length));
+    const weights = new Array(spec.kinds).fill(null);
+    const rangeWeights = new Array(spec.kinds).fill(null);
+    for (const { q } of spec.probes) {
+      weights[q] = [0, 0, 0, 0, 0];
+      rangeWeights[q] = [0, 1, 2, 3, 4].map(() => [0, 0, 0]);
+    }
+    const seeds = [];
+    let justRanges = null;
+    spec.seeds.forEach((seed, n) => {
+      const base = both(alone(empty), I, seed);
+      const [bJ, bP] = base;
+      if (!justRanges) justRanges = bJ.ranges.map((r) => [r.justCount || 0, r.maxCombo || 0]);
+      if (n < nk) {
+        for (const { q, skill, f } of spec.probes) {
+          for (let k = 0; k < 5; k++) {
+            const order = [1, 2, 3, 4];
+            order.splice(k, 0, 0);
+            const res = count(just(alone({ ...empty, liveSkill: skill }), order, seed));
+            weights[q][k] += (res.score - bJ.score) / (P * f) / nk;
+            res.ranges.forEach((r, i) => (rangeWeights[q][k][i] += (rs(r) - rs(bJ.ranges[i])) / (P * f) / nk));
+          }
+        }
+      }
+      for (const x of spec.members) add(apt.get(x.shape), both(alone(x.perf), I, seed), base);
+      const hosts = new Map();
+      for (const x of spec.supports) {
+        const hk = JSON.stringify(x.host);
+        if (!hosts.has(hk)) hosts.set(hk, both(alone(x.host), I, seed));
+        add(aptSupport.get(x.key), both(alone(x.perf), I, seed), hosts.get(hk));
+      }
+      seeds.push({
+        seed,
+        score: bJ.score,
+        scorePerfect: bP.score,
+        ranges: bJ.ranges.map((r, i) => [rs(r), rs(bP.ranges[i]), r.rankBonus, bP.ranges[i].rankBonus]),
+        weights,
+        rangeWeights,
+      });
+    });
+    const mean = (src) => {
+      const out = new Map();
+      const n = spec.seeds.length;
+      for (const [key, a] of src) out.set(key, { tail: a.tail / n, tailPerfect: a.tailPerfect / n, ranges: a.ranges.map(([x, y]) => [x / n, y / n]) });
+      return out;
+    };
+    return {
+      seeds,
+      replaySeeds: spec.seeds.slice(),
+      percents: spec.percents,
+      missions: spec.missions.slice(),
+      luck: spec.missions.includes(2),
+      apt: mean(apt),
+      aptSupport: mean(aptSupport),
+      justRanges,
+    };
+  }
+
+  /**
+   * Browser: loads the replay engine and deck data named by music-data.json's `replay` pointer (URLs relative to
+   * the music-data URL), cached with the Cache API under the manifest hash. Returns a ReplaySession; with `patch`
+   * (patchDeck) one on the patched deck data.
+   */
+  async function loadReplay(musicDataUrl, pointer, patch) {
     const manifestUrl = new URL(pointer.manifestUrl, musicDataUrl).href;
     const cacheName = "deckcalc-replay-" + String(pointer.sha256 || "").slice(0, 16);
     const cache = typeof caches !== "undefined" ? await caches.open(cacheName) : null;
@@ -595,7 +774,7 @@
     try {
       const mod = await import(url);
       mod.initSync({ module: wasm });
-      return new mod.ReplaySession(deck);
+      return new mod.ReplaySession(patch ? patchDeck(deck, patch) : deck);
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -604,7 +783,7 @@
   const api = {
     ORDERS, performers, gekisouRequest, gekisouPlay, scoreOf, orderScores, chartRunner, meanScore, sampleScores, snapSkillRates, snapSkillJobs, measureSnapJobs,
     gekisouLevelFactors, gekisouSupportLevelFactors,
-    comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay,
+    comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay, patchDeck, battleSpec, measureBattleChart,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Simulate = api;

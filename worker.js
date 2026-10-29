@@ -27,6 +27,8 @@ self.onmessage = (e) => {
       battle = msg.battle || null;
       replay = msg.replay || null;
       session = null;
+      arenaSessions.clear();
+      arenaBattles.clear();
       levelFactors.clear();
       supportFactors.clear();
       comboShares.clear();
@@ -52,15 +54,103 @@ const replaySession = () => {
   return session;
 };
 
+// 激奏舞台 (input.arena): replays whose songs all play a day's missions (Simulate.patchDeck, with the live skills that
+// measure music-data's kinds) and the charts measured on them (Simulate.measureBattleChart), by missions ("222").
+const arenaSessions = new Map();
+const arenaBattles = new Map();
+// Seeds a LUCK day's charts are measured on: the LUCKY RUSH support gains, a third of the score, come within about
+// 10% of music-data's expectation on 16 (3% on 64, for 4 times as long); every deck on a chart shares that error. The
+// live skill weights come within 0.4% of music-data's on the first 4.
+const ARENA_LUCK_SEEDS = 16;
+const ARENA_KIND_SEEDS = 4;
+const arenaPatch = (missions) => ({ missions, probes: Engine.kindProbes(battle.kinds) });
+const arenaKey = (missions) => missions.join("");
+function arenaSession(missions) {
+  if (!replay) throw new Error("music-data.json has no replay data");
+  const key = arenaKey(missions);
+  if (!arenaSessions.has(key)) arenaSessions.set(key, Simulate.loadReplay(replay.musicDataUrl, replay.pointer, arenaPatch(missions)));
+  return arenaSessions.get(key);
+}
+
+// The Gekisou data and replay a search plays: music-data's and the published replay, or for 激奏舞台 the charts measured
+// with the day's missions and a replay whose songs play them. `patch` goes to the helpers with each task.
+function gekisouCtx(input) {
+  const missions = input && input.arena ? input.arena.missions : null;
+  if (!missions) return { battle, session: replaySession, patch: null, key: "" };
+  return { battle: arenaBattles.get(arenaKey(missions)) || null, session: () => arenaSession(missions), patch: arenaPatch(missions), key: arenaKey(missions) + "|" };
+}
+
+// Measures the 激奏舞台 pool's charts with the day's missions that are not measured yet (per song its highest allowed
+// chart, the one a random song plays; a lower one seldom scores more), on helpers (`pool`, or its own) when there
+// are two or more. Progress: stage "arena".
+async function arenaBattleOf(msg, pool = null) {
+  const missions = msg.input.arena.missions;
+  const key = arenaKey(missions);
+  if (!arenaBattles.has(key)) {
+    arenaBattles.set(key, {
+      power: battle.power, kinds: battle.kinds, shapes: battle.shapes, supportShapes: battle.supportShapes, shapeList: battle.shapeList,
+      byScore: new Map(),
+    });
+  }
+  const ab = arenaBattles.get(key);
+  const now = new Date(msg.now);
+  const pool0 = Engine.arenaInput({ ...msg.input, master, now });
+  const top = new Map();
+  for (const c of Engine.charts(master, perPower, { maxLevel: msg.input.maxLevel, difficulties: msg.input.difficulties, musicIds: pool0.musicIds, now })) {
+    if (!top.has(c.musicId) || c.level > top.get(c.musicId).level) top.set(c.musicId, c);
+  }
+  const todo = [...top.values()].map((c) => c.scoreId).filter((sid) => !ab.byScore.has(sid));
+  if (!todo.length) return;
+  const spec = Simulate.battleSpec(master, battle, missions, {
+    percents: Engine.rankBonusPercents(master, missions),
+    probes: Engine.kindProbes(battle.kinds),
+    seeds: missions.includes(2) ? Simulate.luckSeeds([], ARENA_LUCK_SEEDS) : [0],
+    kindSeeds: ARENA_KIND_SEEDS,
+  });
+  let done = 0;
+  const report = () => self.postMessage({ type: "progress", id: msg.id, stage: "arena", done, total: todo.length });
+  report();
+  const own = pool ? null : helperPool(todo.length);
+  const helpers = pool || own;
+  try {
+    if (helpers) {
+      await helpers.run(
+        todo.map((sid) => ({ type: "arena", scoreId: sid, spec, patch: arenaPatch(missions) })),
+        (k, out) => {
+          ab.byScore.set(todo[k], out);
+          done++;
+          report();
+        },
+        () => {},
+      );
+    }
+  } catch (err) {
+    console.warn("arena helpers failed", err);
+  } finally {
+    if (own) own.close();
+  }
+  const left = todo.filter((sid) => !ab.byScore.has(sid));
+  if (left.length) {
+    const s = await arenaSession(missions);
+    for (const sid of left) {
+      ab.byScore.set(sid, Simulate.measureBattleChart(s, sid, spec));
+      done++;
+      report();
+    }
+  }
+}
+
 // Level factors of member Gekisou skills and of snaps' Gekisou support skills, by rank and Just rate
 // ("rank:justRate" -> Map), simulated once each.
 const levelFactors = new Map();
 const supportFactors = new Map();
 async function gekisouLevels(input) {
   const multi = input.multi;
+  const cx = gekisouCtx(input);
+  const battle = cx.battle;
   if (!multi || !battle || !battle.power || !replay) return { levels: null, supportLevels: null };
   const bt = Engine.battleRates(battle, Engine.gekisouRanks(multi), multi.justRate);
-  const key = Engine.gekisouKey(bt);
+  const key = cx.key + Engine.gekisouKey(bt);
   if (!levelFactors.has(key)) levelFactors.set(key, new Map());
   if (!supportFactors.has(key)) supportFactors.set(key, new Map());
   const known = levelFactors.get(key);
@@ -85,7 +175,7 @@ async function gekisouLevels(input) {
     }
   }
   if (pairs.length || triples.length) {
-    const s = await replaySession();
+    const s = await cx.session();
     for (const [k, f] of Simulate.gekisouLevelFactors(s, master, battle, bt, pairs)) known.set(k, f);
     for (const [k, f] of Simulate.gekisouSupportLevelFactors(s, master, battle, bt, triples)) knownSupport.set(k, f);
     // A triple the simulation could not measure (no chart where it gains) stays at 0.
@@ -95,22 +185,26 @@ async function gekisouLevels(input) {
 }
 
 // The engine input of a search or saved-deck message, with the Gekisou level factors and the COMBO count-up shares
-// measured first (on `pool`'s helpers, or helpers of its own).
+// measured first (on `pool`'s helpers, or helpers of its own). 激奏舞台 first measures its charts (arenaBattleOf) and
+// becomes a multiplayer score search (Engine.arenaInput) on them.
 async function engineInput(msg, pool = null) {
+  if (msg.input.arena) await arenaBattleOf(msg, pool);
+  const event = master.events.get(msg.eventId) || null;
+  let input = {
+    ...msg.input, master, event, perPowerByScore: perPower, skillWeights, battle: gekisouCtx(msg.input).battle, lengthByScore: lengths, now: new Date(msg.now),
+  };
+  if (input.arena) input = Engine.arenaInput(input);
   let levels = { levels: null, supportLevels: null };
   let prepareFailed = false;
   try {
-    levels = await gekisouLevels(msg.input);
+    levels = await gekisouLevels(input);
   } catch (err) {
     prepareFailed = true;
     session = null;
     console.warn("Gekisou level factors unavailable", err);
   }
-  const event = master.events.get(msg.eventId) || null;
-  const input = {
-    ...msg.input, master, event, perPowerByScore: perPower, skillWeights, battle, gekisouLevels: levels.levels,
-    gekisouSupportLevels: levels.supportLevels, lengthByScore: lengths, now: new Date(msg.now),
-  };
+  input.gekisouLevels = levels.levels;
+  input.gekisouSupportLevels = levels.supportLevels;
   try {
     input.comboBoost = await comboBoostOf(input, msg.id, pool);
   } catch (err) {
@@ -128,12 +222,14 @@ const comboShares = new Map();
 // charts go to helpers (`pool`, or its own) when there are any.
 async function comboBoostOf(input, id, pool = null) {
   const multi = input.mode === "normal" && input.multi && input.multi.players >= 1 ? input.multi : null;
+  const cx = gekisouCtx(input);
+  const battle = cx.battle;
   if (!multi || !battle || !battle.power || !replay) return null;
   const scope = Engine.comboScope(input);
   if (!scope) return null;
   const bt = Engine.battleRates(battle, Engine.gekisouRanks(multi), multi.justRate);
   const byScore = new Map();
-  const keyOf = (sid) => sid + "|" + Engine.gekisouKey(bt);
+  const keyOf = (sid) => cx.key + sid + "|" + Engine.gekisouKey(bt);
   const todo = scope.scoreIds.filter((sid) => {
     const e = comboShares.get(keyOf(sid));
     return !e || scope.keys.some((k) => !e.b.has(k));
@@ -155,7 +251,7 @@ async function comboBoostOf(input, id, pool = null) {
         todo.map((sid) => {
           const entry = comboShares.get(keyOf(sid));
           const ctx = Simulate.comboContext(master, scope.keys.concat(entry ? [...entry.b.keys()] : []), scope.support, scope.idle);
-          return { type: "combo", scoreId: sid, ctx, bt: btOf(sid), keys: scope.keys, entry };
+          return { type: "combo", scoreId: sid, ctx, bt: btOf(sid), keys: scope.keys, entry, patch: cx.patch };
         }),
         (k, out) => finish(todo[k], out),
         () => {},
@@ -167,7 +263,7 @@ async function comboBoostOf(input, id, pool = null) {
     if (own) own.close();
   }
   const left = todo.filter((sid) => !measured.has(sid));
-  const s = left.length ? await replaySession() : null;
+  const s = left.length ? await cx.session() : null;
   for (const sid of left) finish(sid, Simulate.comboBoosts(s, master, btOf(sid), sid, scope.keys, scope.support, scope.idle, comboShares.get(keyOf(sid))));
   for (const sid of scope.scoreIds) byScore.set(sid, comboShares.get(keyOf(sid)));
   return { byScore, byMusic: new Map([...scope.byMusic].map(([mid, sid]) => [mid, byScore.get(sid)])) };
@@ -196,10 +292,11 @@ async function search(msg) {
     const rerank = input.snapSkill && gekisouOn(input) && !randomRoom(input);
     const out = Engine.search(rerank ? { ...input, topK: Math.max(GEKISOU_POOL, input.topK || 5) } : input);
     if (rerank && out.results.length) {
-      const s = await replaySession();
+      const cx = gekisouCtx(input);
+      const s = await cx.session();
       for (const d of out.results) {
         const members = d.members.map((v) => ({ id: v.id, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel }));
-        d.sim = simulateDeck(s, d.chart.scoreId, d.displayPower, members, d.snaps.map((x) => (x ? { id: x.id, rank: x.rank } : null)), out.gekisou);
+        d.sim = simulateDeck(s, d.chart.scoreId, d.displayPower, members, d.snaps.map((x) => (x ? { id: x.id, rank: x.rank } : null)), out.gekisou, cx.battle);
       }
       const mean = (d) => (d.sim ? d.sim.mean * d.accuracy : d.estScore);
       out.results.sort((a, b) => mean(b) - mean(a));
@@ -218,18 +315,22 @@ async function search(msg) {
 
 // Decks simulated whole to rank a multiplayer score search (Gekisou on).
 const GEKISOU_POOL = 15;
-const gekisouOn = (input) => !!(input.mode === "normal" && input.multi && input.multi.players >= 1 && battle && battle.power);
+const gekisouOn = (input) => {
+  const b = gekisouCtx(input).battle;
+  return !!(input.mode === "normal" && input.multi && input.multi.players >= 1 && b && b.power);
+};
 
 // Seeds a chart with a LUCK range is played on (Simulate.luckSeeds): the mean of a strong LUCK deck is then within about
 // 1% (8 seeds: 3%), for about 0.5 s more per deck.
 const LUCK_SEEDS = 64;
 
 // Simulate.orderScores of one deck; gekisou ({rank, ranks, justRate}, a search's) plays with Gekisou on: a chart with a
-// LUCK range on LUCK_SEEDS seeds, others on their first published seed (nothing else draws from the seed).
-function simulateDeck(s, scoreId, power, members, snaps, gekisou) {
+// LUCK range on LUCK_SEEDS seeds, others on their first published seed (nothing else draws from the seed). `bat`: the
+// Gekisou data of the live (gekisouCtx).
+function simulateDeck(s, scoreId, power, members, snaps, gekisou, bat = battle) {
   let gk = null;
   if (gekisou) {
-    const b = battle && battle.byScore.get(scoreId);
+    const b = bat && bat.byScore.get(scoreId);
     const seeds = !b ? [0] : b.luck ? Simulate.luckSeeds(b.replaySeeds, LUCK_SEEDS) : [b.seeds[0].seed];
     gk = Simulate.gekisouPlay(gekisou, b && b.percents, master.justTypes, seeds);
   }
@@ -254,6 +355,8 @@ async function scoreInput(base, id, every, pool = null) {
   let input = base;
   let approx = [];
   const multi = base.mode === "normal" && base.multi && base.multi.players >= 1 ? base.multi : null;
+  const cx = gekisouCtx(base);
+  const battle = cx.battle;
   const gk = multi && battle && battle.power ? Engine.battleRates(battle, Engine.gekisouRanks(multi), multi.justRate) : null;
   if (!every && base.mode !== "challenge" && !(base.musicIds && base.musicIds.length)) {
     const pre = Engine.search({ ...base, compareSongs: true, topK: 1 });
@@ -267,7 +370,7 @@ async function scoreInput(base, id, every, pool = null) {
     input = { ...base, musicIds: picked };
     approx = pre.songs.filter((d) => !picked.includes(d.chart.musicId));
   }
-  const gkKey = gk ? Engine.gekisouKey(gk) : "solo";
+  const gkKey = gk ? cx.key + Engine.gekisouKey(gk) : "solo";
   const scope = Engine.scoreScope(input, every ? (input.chartCandidateMargin || 0) : undefined);
   const todo = scope.scoreIds.map((sid) => {
     const k = sid + "|" + gkKey;
@@ -296,7 +399,7 @@ async function scoreInput(base, id, every, pool = null) {
     try {
       if (helpers) {
         await helpers.run(
-          work.map((w) => ({ type: "rates", scoreId: w.t.sid, jobs: w.jobs, gekisou: w.gekisou })),
+          work.map((w) => ({ type: "rates", scoreId: w.t.sid, jobs: w.jobs, gekisou: w.gekisou, patch: cx.patch })),
           (k, out) => {
             for (const [key, v] of out) work[k].t.have.set(key, v);
             report(work[k], work[k].jobs.length);
@@ -311,7 +414,7 @@ async function scoreInput(base, id, every, pool = null) {
     }
     const left = work.filter((w) => w.t.pairs.some((p) => p.keys.some((k) => !w.t.have.has(k))));
     if (left.length) {
-      const s = await replaySession();
+      const s = await cx.session();
       for (const w of left) {
         for (const [k, v] of Simulate.measureSnapJobs(s, w.t.sid, w.jobs, w.gekisou, (n) => report(w, n))) w.t.have.set(k, v);
       }
@@ -397,6 +500,23 @@ const savedSamples = new Map();
 const SAVED_SAMPLE_LIMIT = 4096;
 const savedResults = new Map(); // last four complete, successfully simulated calculations
 
+// 激奏舞台 also pays event pt, items and CP by the room's rank, as a normal multiplayer live (results/IMG_0153): the
+// expected payoff of `deck` at the boosts set, from its score on each song (`selected`: {d, pay} per song), the
+// opponents as in Engine.roomPayoff. Shown only, decks are ranked by score. Null outside the event's period.
+function arenaEventPay(input, deck, selected) {
+  const b = Engine.deckEventBonus(master, input.event, input.player, deck.members, deck.snaps, input.now);
+  if (!b || !selected.length) return null;
+  const pin = { ...input, objective: "points" };
+  const pays = selected.map(({ d, pay }) => Engine.roomPayoff(pin, d.chart, pay.score, b.point, b.item));
+  const mean = (f) => pays.reduce((a, x) => a + f(x), 0) / pays.length;
+  const dist = new Map();
+  for (const x of pays) for (const [r, p] of x.rankDist) dist.set(r, (dist.get(r) || 0) + p / pays.length);
+  return {
+    pointBonus: b.point, itemBonus: b.item, boosts: input.boosts || 0,
+    points: mean((x) => x.points), items: mean((x) => x.items), cp: mean((x) => x.cp), rankDist: [...dist].sort((a, c) => c[0] - a[0]),
+  };
+}
+
 async function savedDecks(msg) {
   let helpers = null;
   try {
@@ -416,6 +536,8 @@ async function savedDecks(msg) {
     helpers = replay ? helperPool(HELPERS) : null;
     let input = await engineInput(msg, helpers);
     input = { ...input, multi: { ...input.multi, pickSong: false }, chartCandidateMargin: SAVED_CHART_MARGIN };
+    const cx = gekisouCtx(input);
+    const gb = cx.battle;
     const scoreMode = input.objective === "score";
     const groups = Engine.gekisouSongGroups(input);
     if (!groups.length) {
@@ -488,16 +610,16 @@ async function savedDecks(msg) {
 
     // Simulation: the payoff of a deck on one song from its simulated mean (score: times the play's share; points: the
     // room's rank chances, Engine.roomPayoff).
-    const sim = replay && gkOut ? await replaySession() : null;
-    const gkRun = (sid) => (gkOut ? Simulate.gekisouPlay(gkOut, (battle.byScore.get(sid) || {}).percents, master.justTypes) : null);
+    const sim = replay && gkOut ? await cx.session() : null;
+    const gkRun = (sid) => (gkOut ? Simulate.gekisouPlay(gkOut, (gb.byScore.get(sid) || {}).percents, master.justTypes) : null);
     const runners = new Map();
     const runnerOf = (sid) => {
       if (!runners.has(sid)) runners.set(sid, Simulate.chartRunner(sim, sid, gkRun(sid)));
       return runners.get(sid);
     };
-    const luckOf = (sid) => !!(battle.byScore.get(sid) || {}).luck;
+    const luckOf = (sid) => !!(gb.byScore.get(sid) || {}).luck;
     const seedsOf = (sid) => {
-      const b = battle.byScore.get(sid);
+      const b = gb.byScore.get(sid);
       return !b ? [0] : b.luck ? Simulate.luckSeeds(b.replaySeeds, SHOW_RUNS) : [b.seeds[0].seed];
     };
     const perfOf = (d) => Simulate.performers(
@@ -523,7 +645,7 @@ async function savedDecks(msg) {
         if (it.kept) continue;
         requested += it.total - it.from;
         const perf = perfOf(it.d);
-        const key = JSON.stringify([gkOut, it.sid, it.d.displayPower, perf]);
+        const key = JSON.stringify([cx.key, gkOut, it.sid, it.d.displayPower, perf]);
         if (!unique.has(key)) {
           const scores = savedSamples.get(key) || [];
           savedSamples.delete(key);
@@ -555,7 +677,7 @@ async function savedDecks(msg) {
         try {
           await helpers.run(
             tasks.map(([sid, js]) => ({
-              type: "samples", scoreId: sid, gekisou: gkRun(sid),
+              type: "samples", scoreId: sid, gekisou: gkRun(sid), patch: cx.patch,
               items: js.map((it) => ({ power: it.power, perf: it.perf, seeds: seedsOf(sid), total: it.total, from: it.from })),
             })),
             (k, out) => {
@@ -650,6 +772,7 @@ async function savedDecks(msg) {
         deck: {
           ...slim(win.deck),
           simPay: { value: win.mean, score: meanOf((v) => v.score), points: meanOf((v) => v.points), items: meanOf((v) => v.items), cp: meanOf((v) => v.cp) },
+          eventPay: input.arena ? arenaEventPay(input, win.deck, selected) : null,
         },
         songs,
         pool: order.map((x) => ({ members: x.deck.members.map((v) => v.id), snaps: x.deck.snaps.map((s) => s && s.id), est: x.deck.score, sim: sim ? x.mean : null })),
@@ -685,12 +808,16 @@ async function savedDecks(msg) {
   }
 }
 
-// msg.decks: [{scoreId, power, members: [{id, skillLevel, gekisouSkillLevel}], snaps: [{id, rank} | null], gekisou}] ->
-// the order scores of each; gekisou ({rank, justRate}, multiplayer lives) plays with Gekisou on.
+// msg.decks: [{scoreId, power, members: [{id, skillLevel, gekisouSkillLevel}], snaps: [{id, rank} | null], gekisou,
+// arena}] -> the order scores of each; gekisou ({rank, justRate}, multiplayer lives) plays with Gekisou on, `arena`
+// ({missions}, 激奏舞台) with the day's missions on charts measured for them.
 async function simulate(msg) {
   try {
-    const s = await replaySession();
-    const out = msg.decks.map((d) => simulateDeck(s, d.scoreId, d.power, d.members, d.snaps, d.gekisou));
+    const out = [];
+    for (const d of msg.decks) {
+      const cx = gekisouCtx(d);
+      out.push(simulateDeck(await cx.session(), d.scoreId, d.power, d.members, d.snaps, d.gekisou, cx.battle));
+    }
     self.postMessage({ type: "sim", id: msg.id, out });
   } catch (err) {
     session = null;

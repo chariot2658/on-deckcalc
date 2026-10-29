@@ -121,6 +121,10 @@ jobs:
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc
         run: node test/saved.test.js
+      - name: arena.test.js（激奏舞台）
+        if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
+        working-directory: deckcalc
+        run: node test/arena.test.js
 
       # Remembered whether the tests passed or not, so a failure mails once per combination, not hourly.
       - name: 記下測過的資料

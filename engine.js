@@ -43,7 +43,8 @@
     "MasterLiveMusicBoostBonus", "MasterChallengeMusicBoostBonus", "MasterLiveSkill", "MasterLiveSkillEffect", "MasterText",
     "MasterBandItem", "MasterBandItemSkillEffect", "MasterLiveComboScoreBonus", "MasterGekisouSkill",
     "MasterGekisouSkillEffect", "MasterGekisouSupportSkill", "MasterGekisouSupportSkillEffect", "MasterLiveJudgementTiming",
-    "MasterSupportSkillEffect", "MasterLiveNoteParameter", "MasterLiveSettings",
+    "MasterSupportSkillEffect", "MasterLiveNoteParameter", "MasterLiveSettings", "MasterLiveGekisouRankingScoreBonus",
+    "MasterArenaSeason", "MasterArenaLeague", "MasterArenaLeagueRegulation", "MasterArenaRank", "MasterBattleLivePlace",
   ];
 
   function rows(table) {
@@ -529,10 +530,11 @@
   // ---------------------------------------------------------------------------------------------------------------
   // Scores, ranks, event points
 
-  function musicView(m, musicId) {
+  /** A song's power view; `musicType` (激奏舞台's daily song type, 99 = every type) replaces the song's own. */
+  function musicView(m, musicId, musicType) {
     const mu = m.musics.get(musicId);
     if (!mu) return null;
-    return { id: mu._id, musicType: mu._musicType, tags: mu._bestMusicTagIDs || [], typeBonusRate: 0, tagBonusRate: 0 };
+    return { id: mu._id, musicType: musicType || mu._musicType, tags: mu._bestMusicTagIDs || [], typeBonusRate: 0, tagBonusRate: 0 };
   }
 
   const DIFFS = [["_easyID", "easy"], ["_normalID", "normal"], ["_hardID", "hard"], ["_expertID", "expert"]];
@@ -1490,7 +1492,7 @@
     // depend on the chart, one chart per group.
     const groups = new Map();
     for (const c of chartList) {
-      const mv = musicView(m, c.musicId);
+      const mv = musicView(m, c.musicId, input.arena && input.arena.musicType);
       if (mode === "challenge") {
         const row = m.t.MasterChallengeMusic.find((r) => r._eventId === event._id && r._liveMusicId === c.musicId);
         if (row && row._musicType) mv.musicType = row._musicType;
@@ -2613,7 +2615,7 @@
       const gl = [];
       const gOf = new Int32Array(nS);
       list.forEach((c, k) => {
-        const mv = musicView(m, c.musicId);
+        const mv = musicView(m, c.musicId, input.arena && input.arena.musicType);
         const key = mv.musicType + "|" + mv.tags.join(",");
         if (!gKey.has(key)) {
           gKey.set(key, gl.length);
@@ -3588,6 +3590,7 @@
    * the results on the first published seeds, which `seeds` still reads (a cached copy):
    * {power, kinds, shapes: "gekisouSkillId:level" -> aptitude shape of member Gekisou skills (measured at level 5),
    *  supportShapes: "gekisouSupportSkillId:level" -> aptitude shape of snaps' Gekisou support skills (level 5),
+   *  shapeList: [{id, source ("member" | "support"), mission, skill: [id, level]}] (a skill of each shape),
    *  byScore: scoreId -> {seeds: [{seed, score, scorePerfect, ranges: [[rangeScore, rangeScorePerfect, rankBonus, rankBonusPerfect]],
    *  weights, rangeWeights}] (/2: one entry, the expectation), replaySeeds (the seeds to replay it on), percents: rank bonus % per range at ranks 1..5, missions (the song's range missions: 1 COMBO,
    *  2 LUCK, 3 JUST), luck (whether a range is a LUCK one, whose lottery draws from the live's seed), apt: shape -> {tail, tailPerfect, ranges: [[rangeScore, rangeScorePerfect]]}
@@ -3599,12 +3602,16 @@
   function battleFromMusicData(md) {
     const dk = md && md.deck;
     const out = {
-      power: (dk && dk.model && dk.model.power) || 0, kinds: (dk && dk.kinds) || [], shapes: new Map(), supportShapes: new Map(), byScore: new Map(),
+      power: (dk && dk.model && dk.model.power) || 0, kinds: (dk && dk.kinds) || [], shapes: new Map(), supportShapes: new Map(), shapeList: [],
+      byScore: new Map(),
     };
     if (!out.power) return out;
     for (const sh of (dk.gekisouAptitude && dk.gekisouAptitude.shapes) || []) {
       const to = sh.source === "member" ? out.shapes : sh.source === "support" ? out.supportShapes : null;
-      if (to) for (const s of sh.skills) to.set(s.id + ":" + s.level, sh.id);
+      if (!to) continue;
+      for (const s of sh.skills) to.set(s.id + ":" + s.level, sh.id);
+      // What Simulate.measureBattleChart plays for the shape: its first skill, at the level measured.
+      if (sh.skills.length) out.shapeList.push({ id: sh.id, source: sh.source, mission: sh.mission, skill: [sh.skills[0].id, sh.skills[0].level] });
     }
     const inc = (v) => ({ tail: v.tail[0], tailPerfect: v.tailPerfect[0], ranges: v.ranges.map((r) => [r.rangeScore[0], r.rangeScorePerfect[0]]) });
     const est = (x) => (Array.isArray(x) ? x[0] : x);
@@ -4004,12 +4011,143 @@
     return [1, 2, 3, 0].filter((t) => byType.has(t)).map((t) => ({ type: t, musicIds: [...byType.get(t)] }));
   }
 
+  // ---------------------------------------------------------------------------------------------------------------
+  // 激奏舞台 (撃奏アリーナ, from 1.1.0 on 2026-10-28)
+  //
+  // A ranked multiplayer live per band (a league): only that band's members (snaps from any band), a song drawn from
+  // the ones the matched players picked among the band's songs, and a daily rule (MasterArenaLeagueRegulation, from
+  // 4:00) that makes all three Gekisou ranges one mission and sets the song type the type bonus reads (99: every type).
+  // Arena pt go by the place in the room (MasterBattleLivePlace, by the arena rank group and the room size), and the
+  // Gekisou score decides the place, so decks are ranked by the expected Gekisou score. music-data measured each chart
+  // with its own missions only, so the worker measures the pool's charts with the rule's mission on a replay whose
+  // songs all play it (Simulate.patchMissions, Simulate.measureBattleChart) and searches with that `battle`.
+
+  const inPeriod = (row, t) => parseTime(row._startAt) <= t && t <= parseTime(row._endAt);
+
+  /**
+   * The rule of league `leagueId` at `now`: {season, league, regulation, bandId, musicType, missions: [3 missions]},
+   * or null outside a season or a regulation.
+   */
+  function arenaRule(m, leagueId, now) {
+    const t = now || new Date();
+    const season = m.t.MasterArenaSeason.find((r) => inPeriod(r, t)) || null;
+    const league = m.t.MasterArenaLeague.find((r) => r._id === leagueId) || null;
+    const regulation = m.t.MasterArenaLeagueRegulation.find((r) => r._leagueId === leagueId && inPeriod(r, t)) || null;
+    if (!season || !league || !regulation) return null;
+    return {
+      season, league, regulation, bandId: league._bandId, musicType: regulation._liveMusicType,
+      missions: [regulation._gekisouMission1, regulation._gekisouMission2, regulation._gekisouMission3],
+    };
+  }
+
+  /** The songs of band `bandId` released by `now` (the songs its league plays), by id. */
+  function arenaSongs(m, bandId, now) {
+    const t = now || new Date();
+    return m.t.MasterLiveMusic
+      .filter((mu) => (mu._bandIDs || []).includes(bandId) && !(mu._startAt && parseTime(mu._startAt) > t))
+      .map((mu) => mu._id)
+      .sort((a, b) => a - b);
+  }
+
+  /** Arena pt of each place (1st first) in a room of `players` at arena rank group `matchRank` (1 新手 … 5 白金). */
+  function arenaPlacePoints(m, matchRank, players) {
+    return m.t.MasterBattleLivePlace
+      .filter((r) => r._matchRank === matchRank && r._matchPlayers === players)
+      .sort((a, b) => a._place - b._place)
+      .map((r) => r._basePoint);
+  }
+
+  /**
+   * The rank bonus percents [range][rank - 1] of three Gekisou missions (MasterLiveGekisouRankingScoreBonus rows of
+   * their pattern: 1 all the same, 2 all different, 3 otherwise; a later row wins), as nnnotes reads them.
+   */
+  function rankBonusPercents(m, missions) {
+    const [a, b, c] = missions;
+    const pattern = !(a && b && c) ? 0 : a === b ? (a === c ? 1 : 3) : b !== c && a !== c ? 2 : 3;
+    const out = [0, 1, 2].map(() => [0, 0, 0, 0, 0]);
+    for (const r of m.t.MasterLiveGekisouRankingScoreBonus) {
+      const i = r._count - 1;
+      const k = r._rank - 1;
+      if (r._missionPattern === pattern && i >= 0 && i < 3 && k >= 0 && k < 5) out[i][k] = r._scoreBonusPercent;
+    }
+    return out;
+  }
+
+  /**
+   * A search input (as for search) for 激奏舞台 from one with `arena` ({bandId, musicType, missions}) and `multi`
+   * ({players, justRate, pickSong}): the band's members only, the band's songs (within input.musicIds), a public room's
+   * random song (with multi.pickSong each song's own deck) with every rank of the room averaged, scored by the expected
+   * Gekisou score. `battle` must be the arena's (measured with the rule's missions).
+   */
+  function arenaInput(input) {
+    const m = input.master;
+    const a = input.arena;
+    const bandOf = (id) => {
+      const c = m.memberCards.get(Number(id));
+      const ch = c && m.characters.get(c._characterID);
+      return ch ? ch._bandID : 0;
+    };
+    const pool = arenaSongs(m, a.bandId, input.now);
+    const multi = input.multi || {};
+    return {
+      ...input,
+      mode: "normal",
+      objective: "score",
+      members: input.members.filter((o) => bandOf(o.id) === a.bandId),
+      musicIds: input.musicIds && input.musicIds.length ? pool.filter((id) => input.musicIds.includes(id)) : pool,
+      multi: { ...multi, players: Math.min(5, Math.max(2, multi.players || 5)), auto: true, othersScore: 0 },
+      perMinute: null,
+    };
+  }
+
+  // Ids of the live skills Simulate.patchDeck adds to the replay's master, one per music-data kind (PROBE_SKILL + kind id).
+  const PROBE_SKILL = 90000;
+
+  /**
+   * The live skills to measure music-data's kinds with (Simulate.measureBattleChart): many kinds occur only in
+   * skills of several effect rows, so each is a skill of its own with one row of the kind at its largest value. Per
+   * kind {q (its id), skill: [liveSkillId, 1], f (skillFactor of the value), row (MasterLiveSkillEffect fields)}.
+   */
+  function kindProbes(kinds) {
+    return kinds.map((k) => {
+      const value = Math.max(...k.values);
+      return {
+        q: k.id,
+        skill: [PROBE_SKILL + k.id, 1],
+        f: skillFactor(k.effectType, value),
+        row: {
+          _id: PROBE_SKILL + k.id, _liveSkillID: PROBE_SKILL + k.id, _level: 1, _skillConditionGroup: k.skillConditionGroup,
+          _skillReleaseConditionGroup: k.skillReleaseConditionGroup, _skillTargetIDs: k.skillTargetIds || [], _skillEffectType: k.effectType,
+          _activationTimeSecond: k.activationTimeSecond, _effectValue: value, _maxEffectValue: 0, _effectLimitCount: k.effectLimitCount,
+          _skillCumulativeConditionID: 0, _effectExecuteLimitCount: k.effectExecuteLimitCount,
+          _effectExecuteLimitResetConditionGroup: k.effectExecuteLimitResetConditionGroup,
+        },
+      };
+    });
+  }
+
   /**
    * The expected payoff of a multiplayer normal live (input as for search: master, event, boosts, objective, cpValue,
    * accuracy, multi) on `chart` (a charts() entry) when the player's all-Perfect score is `score` and the deck's
    * bonuses are pb/ib: {points, items, cp, sc (what the search ranks by), rankDist: [[rank, p]]}. The play keeps a share
    * of the score as playShares; the room's rank adds multi.othersScore, or with multi.auto each of opponentLevels (E counts as D, as in the search).
    */
+  /**
+   * A deck's event bonuses {point, item} for `event` (members and snaps as views, snaps may be null), as the search sums
+   * them; null outside the event's period. 激奏舞台 ranks by score with the bonuses zeroed, but pays event pt by the room.
+   */
+  function deckEventBonus(m, event, player, members, snaps, now) {
+    if (!event || now < parseTime(event._startAt) || now > parseTime(event._endAt)) return null;
+    const sn = snaps.filter(Boolean);
+    const ctx = makeContext(m, player || {}, event._id, members, sn, "normal");
+    const out = { point: 0, item: 0 };
+    for (const b of [...members.map((v) => ctx.memberBonus.get(v)), ...sn.map((s) => ctx.snapBonus.get(s))]) {
+      out.point += b.point;
+      out.item += b.item;
+    }
+    return out;
+  }
+
   function roomPayoff(input, chart, score, pb, ib) {
     const m = input.master;
     const multi = input.multi;
@@ -4146,6 +4284,7 @@
     battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
     gekisouSupportRate, gekisouSupportJustStack, justStackShare, snapSkillKey, snapSkillClass, skillGaps, scoreScope, roughSnapRate,
     luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, comboTimelineGain, gekisouSongType, gekisouSongGroups, roomPayoff, opponentLevels, gekisouRanks, gekisouKey, gekisouOut, OPPONENT_RANGE,
+    arenaRule, arenaSongs, arenaPlacePoints, rankBonusPercents, arenaInput, kindProbes, deckEventBonus,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Engine = api;

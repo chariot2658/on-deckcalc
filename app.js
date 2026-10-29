@@ -43,6 +43,11 @@
     // (one deck for every song); "pick": a private room choosing its song.
     multiSong: "saved",
     scoreSong: 0, // objective "score": the song to play (live music id), 0 = every song (challenge: every challenge song)
+    // mode "arena" (激奏舞台): the league (MasterArenaLeague id, one per band), the arena rank group the LP table shows
+    // (1 新手 … 5 白金) and the room size.
+    arenaLeague: 1,
+    arenaTier: 1,
+    arenaPlayers: 5,
   };
 
   // Profiles (設定檔) each keep their own settings (region included), roster and backup reminder, under
@@ -320,7 +325,7 @@
 
   // The simulated order scores of decks (worker only), cached per deck and chart. `gekisou` ({rank, justRate}, from a
   // multiplayer search) plays with Gekisou on.
-  async function simulateDecks(decks, gekisou) {
+  async function simulateDecks(decks, gekisou, arena) {
     if (!state.worker || !state.replay) return decks.map(() => null);
     await state.workerReady;
     const reqs = decks.map((d) => ({
@@ -329,6 +334,7 @@
       members: d.members.map((v) => ({ id: v.id, skillLevel: v.skillLevel || 1, gekisouSkillLevel: v.gekisouSkillLevel || 1 })),
       snaps: d.snaps.map((x) => (x ? { id: x.id, rank: x.rank || 1 } : null)),
       gekisou: gekisou || null,
+      arena: arena ? { missions: arena.missions } : null,
     }));
     const keys = reqs.map((r) => JSON.stringify(r));
     const todo = reqs.filter((_, i) => !state.simCache.has(keys[i]));
@@ -485,6 +491,7 @@
     const challengeSongs = state.master.t.MasterChallengeMusic.filter((r) => r._eventId === ev._id).map((r) => musicTitle(r._liveMusicId));
     const randomSong = randomSongOf(s);
     const saved = savedOf(s);
+    const arena = s.mode === "arena";
     const score = s.objective === "score";
     const knownOpp = s.multiOpponents === "known";
     const diffChips = Object.keys(DIFF_NAMES)
@@ -502,6 +509,7 @@
         <h3>活動加成</h3>
         ${renderRules(ev)}
       </div>
+      ${arena ? arenaPanel(s) : ""}
       <div class="panel">
         <h2>計算條件</h2>
         <div class="row">
@@ -509,18 +517,19 @@
             <div class="chips">
               <label><input type="radio" name="mode" value="normal" ${s.mode === "normal" ? "checked" : ""}>一般 Live</label>
               <label><input type="radio" name="mode" value="challenge" ${s.mode === "challenge" ? "checked" : ""}>挑戰 Live</label>
+              <label title="排位對戰（撃奏アリーナ）：依樂團分聯賽，只能用該樂團的成員，每天換激奏種類和歌曲屬性"><input type="radio" name="mode" value="arena" ${arena ? "checked" : ""}>激奏舞台</label>
             </div>
           </div>
-          <div class="field"><span>優先</span>
+          <div class="field" ${arena ? "hidden" : ""}><span>優先</span>
             <div class="chips">
               <label><input type="radio" name="objective" value="points" ${s.objective === "points" ? "checked" : ""}>活動點數</label>
               <label><input type="radio" name="objective" value="items" ${s.objective === "items" ? "checked" : ""}>活動道具</label>
               <label title="不看活動點數和道具，只找分數最高的隊伍（衝分數、排行榜用）"><input type="radio" name="objective" value="score" ${score ? "checked" : ""}>最高分數</label>
             </div>
           </div>
-          <label class="field" ${score && !saved ? "" : "hidden"} title="${s.mode === "challenge" ? "挑戰 Live 每首挑戰曲各有分數排行榜（記錄各難度中最高的一次）" : "不選就從全部歌曲裡找分數最高的"}"><span>歌曲</span>
+          <label class="field" ${score && !saved && !arena ? "" : "hidden"} title="${s.mode === "challenge" ? "挑戰 Live 每首挑戰曲各有分數排行榜（記錄各難度中最高的一次）" : "不選就從全部歌曲裡找分數最高的"}"><span>歌曲</span>
             <select id="scoreSong">${scoreSongOptions(s, ev)}</select></label>
-          <label class="field" ${s.mode === "normal" && !score ? "" : "hidden"}><span>加成道具（LB）用量</span>
+          <label class="field" ${(s.mode === "normal" && !score) || arena ? "" : "hidden"}><span>加成道具（LB）用量</span>
             <input type="number" id="boosts" min="0" max="10" value="${s.boosts}"></label>
           <div class="field" ${s.mode === "normal" ? "" : "hidden"}><span>遊玩方式</span>
             <div class="chips">
@@ -540,7 +549,9 @@
             <input type="number" id="multiOthersAvg" min="0" step="100000" value="${s.multiOthersAvg}" style="width:120px"></label>
           <label class="field" ${s.mode === "normal" && s.multi && knownOpp ? "" : "hidden"} title="激奏的三段任務（連擊／幸運／JUST）各自在房間裡排名，名次越前，該段分數的加成越高（依歌曲，第 1 名 +250%～+370%，第 4、5 名 +100%～+170%）"><span>激奏每段的名次</span>
             <select id="multiGekisouRank">${range(1, 5).map((r) => `<option value="${r}" ${r === s.multiGekisouRank ? "selected" : ""}>第 ${r} 名</option>`).join("")}</select></label>
-          <label class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="JUST 激奏區間裡打出 JUST 的比例（其餘當 PERFECT）。JUST 一個音符算 230%，PERFECT 算 100%"><span>JUST 區間的 JUST 率（%）</span>
+          <label class="field" ${arena ? "" : "hidden"}><span>房間人數</span>
+            <input type="number" id="arenaPlayers" min="2" max="5" value="${s.arenaPlayers}" style="width:70px"></label>
+          <label class="field" ${(s.mode === "normal" && s.multi) || arena ? "" : "hidden"} title="JUST 激奏區間裡打出 JUST 的比例（其餘當 PERFECT）。JUST 一個音符算 230%，PERFECT 算 100%"><span>JUST 區間的 JUST 率（%）</span>
             <input type="number" id="multiJustRate" min="0" max="100" step="5" value="${s.multiJustRate}" style="width:80px"></label>
           <div class="field" ${s.mode === "normal" && s.multi ? "" : "hidden"} title="公開自由對戰的歌是抽出來的（自己選的歌也只是加入抽選），但抽完歌後約 10 秒內還能換成存好的編組：預存隊伍依激奏區間的種類各找一隊。一隊打全部＝不換隊，依所有歌的平均排名。私人房可以指定歌曲，就和單人一樣選最好的歌"><span>激奏的歌</span>
             <div class="chips">
@@ -557,17 +568,17 @@
           <label class="field" title="斷 combo 的只有 MISS 和 BAD（GOOD 不會斷）。斷在曲子中段最傷，可能少 6~7% 分數"><span>每場斷 combo 次數（MISS＋BAD）</span>
             <input type="number" id="comboBreaks" min="0" max="20" step="0.5" value="${s.comboBreaks}" style="width:80px"></label>
           <div class="field"><span>難度</span><div class="chips">${diffChips}</div></div>
-          <div class="field" ${randomSong || saved || score ? "hidden" : ""}><span>選歌</span>
+          <div class="field" ${randomSong || saved || score || arena ? "hidden" : ""}><span>選歌</span>
             <div class="chips">
               <label><input type="radio" name="songPick" value="live" ${s.songPick !== "minute" ? "checked" : ""}>每場收益最高</label>
               <label><input type="radio" name="songPick" value="minute" ${s.songPick === "minute" ? "checked" : ""}>每分鐘收益最高</label>
             </div>
           </div>
-          <label class="field" ${s.songPick === "minute" && !randomSong && !saved && !score ? "" : "hidden"}><span>每場額外時間（載入＋結算，秒）</span>
+          <label class="field" ${s.songPick === "minute" && !randomSong && !saved && !score && !arena ? "" : "hidden"}><span>每場額外時間（載入＋結算，秒）</span>
             <input type="number" id="pickOverhead" min="0" max="300" value="${s.songOverhead}" style="width:80px"></label>
         </div>
         <div class="row" style="margin-top:12px">
-          <button id="run" ${ownedM < 5 ? "disabled" : ""}>${saved ? "計算預存隊伍" : "計算最佳配隊"}</button>
+          <button id="run" ${ownedM < 5 ? "disabled" : ""}>${runLabel(s)}</button>
           <span class="muted small">已登錄 成員卡 ${ownedM} 張 · 快照 ${ownedS} 張${ownedM < 5 ? " — 請先到「成員卡」分頁登錄至少 5 位角色" : ""}</span>
         </div>
       </div>
@@ -638,6 +649,23 @@
       s.multiJustRate = clamp(Number(e.target.value), 0, 100);
       saveSettings();
     };
+    $("#arenaPlayers").onchange = (e) => {
+      s.arenaPlayers = clamp(Math.round(Number(e.target.value)), 2, 5);
+      saveSettings();
+      renderCalc();
+    };
+    if (arena) {
+      $("#arenaLeague").onchange = (e) => {
+        s.arenaLeague = Number(e.target.value);
+        saveSettings();
+        renderCalc();
+      };
+      $("#arenaTier").onchange = (e) => {
+        s.arenaTier = clamp(Math.round(Number(e.target.value)), 1, 5);
+        saveSettings();
+        renderCalc();
+      };
+    }
     $("#boosts").onchange = (e) => {
       s.boosts = clamp(Number(e.target.value), 0, 10);
       saveSettings();
@@ -659,7 +687,9 @@
       saveSettings();
     };
     $("#run").onclick = calculate;
-    if (state.lastResults && state.lastResults.eventId === ev._id) renderResults(state.lastResults);
+    // 激奏舞台 results stay with their league, and other results out of 激奏舞台.
+    const last = state.lastResults;
+    if (last && last.eventId === ev._id && (last.input.arena ? arena && last.input.arena.leagueId === s.arenaLeague : !arena)) renderResults(last);
   }
 
   // A multiplayer live's song: a public room draws it ("saved": a saved deck per Gekisou range type, see the worker's
@@ -672,6 +702,50 @@
   };
   const randomSongOf = (s) => multiSongOf(s) === "random";
   const savedOf = (s) => multiSongOf(s) === "saved";
+  const runLabel = (s) => (s.mode === "arena" ? "計算激奏舞台隊伍" : savedOf(s) ? "計算預存隊伍" : "計算最佳配隊");
+
+  // 激奏舞台: the chosen league's rule (Engine.arenaRule) now and on the coming days, the songs and owned members it
+  // allows, and the arena pt of each place at the chosen rank group and room size.
+  const arenaRuleOf = (s, now = new Date()) => Engine.arenaRule(state.master, s.arenaLeague, now);
+  const arenaTypeText = (t) => (t === 99 ? "全屬性" : typeName(t) || "—");
+  const arenaMissionText = (missions) => (GEKISOU_TYPES[Engine.gekisouSongType(missions)] || { name: missions.join("・") }).name;
+  // Rank group names (新手 … 白金) from the first division of each.
+  function arenaTierNames() {
+    const out = {};
+    for (const r of state.master.t.MasterArenaRank) if (r._division === 1 && !out[r._rank]) out[r._rank] = T(r._nameTextId).replace(/\s*\d+$/, "");
+    return out;
+  }
+  function arenaPanel(s) {
+    const m = state.master;
+    const now = new Date();
+    const leagues = m.t.MasterArenaLeague.filter((l) => !l._startAt || Engine.parseTime(l._startAt) <= now);
+    const league = leagues.find((l) => l._id === s.arenaLeague) || leagues[0];
+    const rule = arenaRuleOf(s, now);
+    const bandId = league ? league._bandId : 0;
+    const songs = bandId ? Engine.arenaSongs(m, bandId, now).length : 0;
+    const chars = new Set(Object.keys(state.roster.members).map((id) => m.memberCards.get(Number(id)))
+      .filter((c) => c && (m.characters.get(c._characterID) || {})._bandID === bandId).map((c) => c._characterID)).size;
+    const days = m.t.MasterArenaLeagueRegulation
+      .filter((r) => r._leagueId === s.arenaLeague && Engine.parseTime(r._endAt) >= now)
+      .sort((a, b) => Engine.parseTime(a._startAt) - Engine.parseTime(b._startAt))
+      .slice(0, 5);
+    const tiers = arenaTierNames();
+    const lp = Engine.arenaPlacePoints(m, s.arenaTier, s.arenaPlayers);
+    const day = (r) => `${esc(r._startAt.replace(/^\d+\//, "").replace(/:00$/, ""))} 起：${esc(arenaMissionText([r._gekisouMission1, r._gekisouMission2, r._gekisouMission3]))}、${esc(arenaTypeText(r._liveMusicType))}`;
+    return `<div class="panel">
+      <h2>激奏舞台</h2>
+      <div class="row">
+        <label class="field"><span>聯賽（樂團）</span><select id="arenaLeague">${leagues.map((l) => `<option value="${l._id}" ${l._id === s.arenaLeague ? "selected" : ""}>${esc(bandName(l._bandId))}</option>`).join("")}</select></label>
+        <div class="field"><span>現在的規則</span><div>${rule
+          ? `${esc(T(rule.season._nameTextId))} · <b>${esc(arenaMissionText(rule.missions))}</b>（三段激奏都是這種）· 歌曲屬性 <b>${esc(arenaTypeText(rule.musicType))}</b>${rule.musicType === 99 ? "（每張卡都吃歌曲屬性加成）" : ""} · 到 ${esc(rule.regulation._endAt)}`
+          : `<span class="warn">現在不在賽季或規則開放時段</span>`}</div></div>
+        <label class="field" title="只用來顯示各名次拿到的 LP"><span>段位</span><select id="arenaTier">${[1, 2, 3, 4, 5].map((t) => `<option value="${t}" ${t === s.arenaTier ? "selected" : ""}>${esc(tiers[t] || t)}</option>`).join("")}</select></label>
+      </div>
+      <p class="note">只能用 ${esc(bandName(bandId))} 的成員（快照不限樂團），歌從 ${esc(bandName(bandId))} 的 ${songs} 首歌裡抽（每個人選的歌一起抽）。你有 ${chars} 位 ${esc(bandName(bandId))} 的角色${chars < 5 ? `，<span class="warn">湊不滿 5 位不同角色，排不出隊伍</span>` : ""}。名次看激奏分數，所以這裡找的是<b>預估激奏分數最高</b>的隊伍：一隊打這個聯賽的全部歌（抽到哪首都用它），也列出每首歌自己的最佳隊。</p>
+      <p class="note">${esc(tiers[s.arenaTier] || "")} · ${s.arenaPlayers} 人房各名次的 LP：${lp.map((p, i) => `第 ${i + 1} 名 ${p > 0 ? "+" : ""}${p}`).join("、") || "—"}</p>
+      ${days.length ? `<details class="small"><summary>接下來的規則</summary><p>${days.map(day).join("<br>")}</p></details>` : ""}
+    </div>`;
+  }
 
   // The score objective's song list: a challenge live's songs (each has its own score ranking), or every song released.
   function scoreSongOptions(s, ev) {
@@ -693,8 +767,16 @@
     const btn = $("#run");
     btn.disabled = true;
     btn.textContent = "計算中…";
-    const score = s.objective === "score";
-    const saved = savedOf(s);
+    const arena = s.mode === "arena";
+    const rule = arena ? arenaRuleOf(s) : null;
+    if (arena && !rule) {
+      $("#results").innerHTML = `<div class="panel warn">這個聯賽現在不在賽季或規則開放時段。</div>`;
+      btn.disabled = false;
+      btn.textContent = runLabel(s);
+      return;
+    }
+    const score = s.objective === "score" || arena;
+    const saved = savedOf(s) || arena;
     const challengeSongs = state.master.t.MasterChallengeMusic.filter((r) => r._eventId === ev._id).map((r) => r._liveMusicId);
     const scoreSong = score && !saved && s.scoreSong && (s.mode !== "challenge" || challengeSongs.includes(s.scoreSong)) ? s.scoreSong : 0;
     const input = {
@@ -720,9 +802,18 @@
         : null,
       perMinute: s.songPick === "minute" && !randomSongOf(s) && !saved && !score ? { overhead: s.songOverhead } : null,
     };
+    // 激奏舞台: a multiplayer score search on the league's songs with the day's rule (the worker measures the charts
+    // with its missions first; Engine.arenaInput keeps the band's members).
+    if (arena) {
+      Object.assign(input, {
+        mode: "normal", objective: "score", boosts: s.boosts, musicIds: null,
+        multi: { players: s.arenaPlayers, justRate: s.multiJustRate / 100, auto: true, pickSong: false, othersScore: 0 },
+        arena: { leagueId: s.arenaLeague, bandId: rule.bandId, musicType: rule.musicType, missions: rule.missions, regulationId: rule.regulation._id },
+      });
+    }
     // The worker measures on the replay first (progress messages by stage): COMBO count-up shares and, for the score
     // objective, snap skills; saved decks then search and simulate.
-    const STAGES = { combo: "量 COMBO 激奏數加成", rates: "模擬快照技能", search: "搜尋預存隊伍", simulate: "模擬預存隊伍" };
+    const STAGES = { arena: "量激奏舞台的譜面", combo: "量 COMBO 激奏數加成", rates: "模擬快照技能", search: arena ? "搜尋隊伍" : "搜尋預存隊伍", simulate: arena ? "模擬隊伍" : "模擬預存隊伍" };
     const progress = (done, total, stage) => {
       if (btn.isConnected) btn.textContent = `${STAGES[stage] || STAGES.rates}… ${Math.floor((done / Math.max(1, total)) * 100)}%`;
     };
@@ -748,7 +839,7 @@
       $("#results").innerHTML = `<div class="panel warn">計算失敗：${esc(e.message)}</div>`;
     } finally {
       btn.disabled = false;
-      btn.textContent = saved ? "計算預存隊伍" : "計算最佳配隊";
+      btn.textContent = runLabel(s);
     }
   }
 
@@ -1109,7 +1200,7 @@
     const entries = [...decks].filter(([, d]) => d.chart).map(([key, d]) => ({ d, box: el.querySelector(`.sim[data-sim="${key}"]`) }));
     try {
       // A multiplayer score search comes with its decks simulated.
-      const sims = entries.every((e) => e.d.sim) ? entries.map((e) => e.d.sim) : await simulateDecks(entries.map((e) => e.d), out.gekisou);
+      const sims = entries.every((e) => e.d.sim) ? entries.map((e) => e.d.sim) : await simulateDecks(entries.map((e) => e.d), out.gekisou, out.input.arena);
       entries.forEach((e, i) => {
         e.d.sim = sims[i];
         const line = out.input.objective === "score" ? scoreSimLine : simLine;
@@ -1131,7 +1222,9 @@
   // Gekisou range types (Engine.gekisouSongType) and missions.
   const GEKISOU_TYPES = { 1: { name: "全 COMBO", badge: "C" }, 2: { name: "全 LUCK", badge: "L" }, 3: { name: "全 JUST", badge: "J" }, 0: { name: "混合", badge: "混" } };
   const MISSION_SHORT = { 1: "COMBO", 2: "LUCK", 3: "JUST" };
-  const missionsOf = (d) => {
+  // A chart's three missions: the song's own, or 激奏舞台's of the day.
+  const missionsOf = (d, out) => {
+    if (out && out.input.arena) return out.input.arena.missions.map((x) => MISSION_SHORT[x] || "?").join("・");
     const b = d && d.chart && state.battle && state.battle.byScore.get(d.chart.scoreId);
     return b && b.missions ? b.missions.map((x) => MISSION_SHORT[x] || "?").join("・") : "—";
   };
@@ -1166,6 +1259,8 @@
     const vAll = mean((x) => savedValue(x.all, out));
     const big = songs.filter((x) => x.best && savedValue(x.best.simPay, out) > 1.03 * savedValue(x.saved.simPay, out)).length;
     const gk = out.gekisou;
+    const arena = out.input.arena;
+    if (arena) return renderArena(out, { vSaved, vBest, big, gk });
     const notes = [
       `公開房的歌是抽出來的，但抽完歌後大約有 10 秒可以換隊：來得及換成存好的編組，來不及重排卡片。遊戲可以存 50 組編組，同一張卡可以放在好幾組，所以這裡依<b>激奏三段的種類</b>把歌分成 ${groups.length} 組（全 COMBO、全 LUCK、全 JUST、混合），每組各找一隊。抽到歌時看三段激奏的種類，換成那組的隊伍。`,
       `每組先用搜尋找出該組歌曲平均最好的幾隊（估計值在第 1 名 5% 以內，最多 8 隊），再逐首用 ournotes-deck 的整場模擬比較，取平均最高的：每首歌模擬 ${out.runs ? out.runs.rank : 5} 局，每局換出場順序（5 局剛好每人每個位置各一次）；有 LUCK 區間的歌每局換抽選的種子，所有隊伍用同一批種子，所以兩隊的差距只差約 0.3%（單一隊伍每局差約 10%）。顯示的分數在 LUCK 歌用 ${out.runs ? out.runs.show : 10} 局（單首約 ±3%）。`,
@@ -1200,6 +1295,41 @@
     renderSavedSongs(out);
   }
 
+  // 激奏舞台's results (a saved-deck calculation with one group, all the league's songs): the deck for every song, then
+  // each song's own best deck in the song table.
+  function renderArena(out, { vSaved, vBest, big, gk }) {
+    const el = $("#results");
+    const s = state.settings;
+    const a = out.input.arena;
+    const m = state.master;
+    const songs = out.songs || [];
+    const band = bandName(a.bandId);
+    const lp = Engine.arenaPlacePoints(m, s.arenaTier, out.input.multi.players);
+    const notes = [
+      `${esc(band)} 聯賽、${esc(arenaMissionText(a.missions))}、歌曲屬性 ${esc(arenaTypeText(a.musicType))}：music-data 只量過每首歌原本的激奏種類，所以先用模擬把這個聯賽的 ${songs.length} 首歌（各取允許的最高難度）改成今天的激奏種類重新量過（LUCK 用 16 個種子，單首的 LUCKY RUSH 加成約 ±10%，同一首歌的每支隊伍誤差相同），再搜尋和模擬。`,
+      `歌是從房間裡每個人選的歌一起抽，事先不知道是哪首，所以主要的隊伍依<b>全部歌的平均激奏分數</b>排名；下表也列出每首歌自己的最佳隊，抽到歌後如果來得及換隊，或自己選歌時可以參考。`,
+      `激奏分數的條件：每段的名次在 ${out.input.multi.players} 人房的各名次平均、JUST 率 ${Math.round((gk ? gk.justRate : s.multiJustRate / 100) * 100)}%，依你的準度（Perfect 率 ${s.perfectRate}%、斷 combo ${s.comboBreaks} 次）打折。名次看分數高低，分數越高名次越前（${esc(arenaTierNames()[s.arenaTier] || "")} ${out.input.multi.players} 人房：${lp.map((p, i) => `第 ${i + 1} 名 ${p > 0 ? "+" : ""}${p} LP`).join("、")}）。`,
+      `激奏舞台也會依房間評級發活動 pt、道具和 CP（可以用加成道具），算法和一般多人 Live 一樣。隊伍只依分數排名，下面另外列出用 ${out.input.boosts || 0} 個加成道具時平均拿到多少（房間評級照其他人分數不確定估計，只供參考）。`,
+    ];
+    if (!out.snapSkills) notes.push(`<span class="warn">這次沒能模擬快照技能${out.snapError ? `（${esc(out.snapError)}）` : ""}，搜尋的估計沒算快照技能。</span>`);
+    if (!out.simulated) notes.push(`<span class="warn">沒有模擬資料，以下是搜尋的估計值，沒有用模擬比較候選。</span>`);
+    const gaps = gapNote(out);
+    if (gaps) notes.push(gaps);
+    const summary = songs.length
+      ? `<p><b>全部 ${songs.length} 首歌的平均${out.simulated ? "（模擬）" : "（估計）"}</b>：一隊打全部 <b>${fmt(Math.round(vSaved))}</b>
+        → 每首都換成該歌的最佳隊 ${fmt(Math.round(vBest))}（${gapPct(vSaved, vBest)}）。${big ? `有 ${big} 首歌換成該歌的最佳隊能多 3% 以上（下表標橘色）。` : ""}</p>`
+      : "";
+    el.innerHTML = `<div class="panel">
+        <h2>激奏舞台：${esc(band)}</h2>
+        <p class="note">${notes.join("<br>")}</p>
+        ${summary}
+        <p class="note muted">耗時 ${out.stats ? Math.round(out.stats.ms / 1000) : "?"} 秒（模擬 ${fmt((out.stats && out.stats.runs) || 0)} 局）。量過的譜面會保留到重新整理頁面，同一天的規則再算會快很多。</p>
+      </div>
+      ${(out.groups || []).map((g) => savedCard(g, out)).join("")}
+      <div class="panel" id="saved-songs"></div><div id="saved-deck"></div>`;
+    renderSavedSongs(out);
+  }
+
   // The deck saved for one Gekisou range type.
   function savedCard(g, out) {
     const t = GEKISOU_TYPES[g.type] || { name: String(g.type), badge: "?" };
@@ -1216,14 +1346,23 @@
     return `<div class="result">
       <div class="result-head">
         <div class="rank-badge" title="${esc(t.name)}">${esc(t.badge)}</div>
-        <div><div class="big">「${esc(t.name)}」的歌（${g.musicIds.length} 首）用這隊</div>
+        <div><div class="big">${out.input.arena ? `抽到哪首都用這隊（${g.musicIds.length} 首）` : `「${esc(t.name)}」的歌（${g.musicIds.length} 首）用這隊`}</div>
           <div class="small">${value}${score ? "（依你的準度）" : "（每場平均，" + what + "）"}；${est}</div>
           ${!score && out.input.objective !== "items" && v.cp && out.input.cpValue ? `<div class="small">CP 換算後合計約 <b class="points">${fmt(Math.round(v.points + v.cp * out.input.cpValue))} pt</b></div>` : ""}
-          <div class="muted small">綜合力 ${fmt(d.displayPower)}（激奏編成畫面，不含歌曲加成）${score ? "" : ` · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}`} · 比較了 ${g.pool.length} 支候選</div></div>
+          ${out.input.arena ? arenaEventLine(d.eventPay) : ""}
+          <div class="muted small">綜合力 ${fmt(d.displayPower)}（${out.input.arena ? "不含歌曲加成，抽到歌後的編成畫面會加上" : "激奏編成畫面，不含歌曲加成"}）${score ? "" : ` · 點數加成 +${pct(d.pointBonus)} · 道具加成 +${pct(d.itemBonus)}`} · 比較了 ${g.pool.length} 支候選</div></div>
       </div>
       <div class="slots">${slotsHtml(d, score)}</div>
       <details class="small"><summary>這組的歌</summary><p>${titles.map(esc).join("、")}</p></details>
     </div>`;
+  }
+
+  // 激奏舞台: what the deck earns in the event per live (worker arenaEventPay), shown under its score.
+  function arenaEventLine(e) {
+    if (!e) return `<div class="small muted">現在不在活動期間，激奏舞台不會拿到活動 pt。</div>`;
+    const rank = e.rankDist.filter(([, p]) => p >= 0.005).map(([rk, p]) => `${RANK_LABEL[rk] || rk}${p < 0.995 ? ` ${Math.round(p * 100)}%` : ""}`).join("、");
+    return `<div class="small">活動（加成道具 ${e.boosts} 個）：每場平均 <span class="points">${fmt(Math.round(e.points))} pt</span> · <span class="cp">${fmt(Math.round(e.cp * 10) / 10)} CP</span> · <span class="items">${fmt(Math.round(e.items))} 道具</span>
+      <span class="muted">（點數加成 +${pct(e.pointBonus)} · 道具加成 +${pct(e.itemBonus)}；房間評級 ${esc(rank)}）</span></div>`;
   }
 
   // Song lookup: the saved deck a drawn song takes, and what the song's own best deck would add.
@@ -1250,7 +1389,7 @@
           : "";
         return `<tr class="song-row ${r.x.musicId === savedView.selected ? "sel" : ""}" data-id="${r.x.musicId}">
           <td><b>${esc(r.title)}</b> <span class="muted small">${DIFF_NAMES[d.chart.difficulty]} Lv${d.chart.level}</span></td>
-          <td class="small">${esc(missionsOf(d))}</td>
+          <td class="small">${esc(missionsOf(d, out))}</td>
           <td>${esc(t.name)}</td>
           <td class="num"><b>${fmt(Math.round(r.sv))}</b>${rank ? `<br><span class="muted small">${esc(rank)}</span>` : ""}</td>
           <td class="num">${fmt(Math.round(r.bv))}</td>
@@ -1258,8 +1397,12 @@
         </tr>`;
       })
       .join("");
-    el.innerHTML = `<h2>抽到的歌 → 用哪一隊</h2>
-      <p class="note">每首歌用哪一組的預存隊，以及${out.simulated ? "模擬" : "估計"}的${out.input.objective === "score" ? "激奏分數（依你的準度）" : "每場收益"}。「該歌最佳隊」是候選隊伍與難度比較後最好的結果（包含預存隊）；差距大的歌可以多存一隊。點一列可看兩支隊伍打這首歌的細節。</p>
+    const intro = out.input.arena
+      ? `<h2>各首歌的分數</h2>
+      <p class="note">共用的隊打每首歌，和該首歌自己的最佳隊（${out.simulated ? "模擬" : "估計"}的激奏分數，依你的準度）。點一列可看兩支隊伍打這首歌的細節。</p>`
+      : `<h2>抽到的歌 → 用哪一隊</h2>
+      <p class="note">每首歌用哪一組的預存隊，以及${out.simulated ? "模擬" : "估計"}的${out.input.objective === "score" ? "激奏分數（依你的準度）" : "每場收益"}。「該歌最佳隊」是候選隊伍與難度比較後最好的結果（包含預存隊）；差距大的歌可以多存一隊。點一列可看兩支隊伍打這首歌的細節。</p>`;
+    el.innerHTML = `${intro}
       <div class="row" style="margin-bottom:8px">
         <label class="field"><span>搜尋歌名</span><input type="text" id="savedQ" value="${esc(savedView.q)}" placeholder="歌名" style="width:180px"></label>
         <div class="field"><span>排序</span><div class="chips">
@@ -1268,7 +1411,7 @@
         </div></div>
       </div>
       <div class="table-scroll"><table class="rules songs">
-        <thead><tr><th>歌曲</th><th>激奏三段</th><th>用哪一隊</th><th class="num">預存隊${savedWhat(out) ? `（${savedWhat(out)}）` : ""}</th><th class="num">該歌最佳隊</th><th class="num">差距</th></tr></thead>
+        <thead><tr><th>歌曲</th><th>激奏三段</th><th>用哪一隊</th><th class="num">${out.input.arena ? "共用的隊" : "預存隊"}${savedWhat(out) ? `（${savedWhat(out)}）` : ""}</th><th class="num">該歌最佳隊</th><th class="num">差距</th></tr></thead>
         <tbody>${body}</tbody></table></div>`;
     const qEl = $("#savedQ");
     qEl.oninput = (e) => {
@@ -1298,7 +1441,7 @@
     const title = musicTitle(x.musicId);
     const t = GEKISOU_TYPES[x.type] || { name: "?" };
     const decks = new Map([["sv", x.saved]]);
-    let html = deckCard(x.saved, `「${t.name}」組的預存隊打 ${title}`, "sv", resultUnit(out), out);
+    let html = deckCard(x.saved, out.input.arena ? `全部歌共用的隊打 ${title}` : `「${t.name}」組的預存隊打 ${title}`, "sv", resultUnit(out), out);
     if (x.best) {
       decks.set("sb", x.best);
       html += deckCard(x.best, `${title} 的最佳隊`, "sb", resultUnit(out), out);
