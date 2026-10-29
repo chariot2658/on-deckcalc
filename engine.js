@@ -801,13 +801,17 @@
    * Live skill weights from nnnotes music-data.json `deck`: {kinds, byScore: scoreId -> Float64Array per kind}. One
    * effect of kind q at factor f at performance position k adds P * f * weights[q][k] (offSeeds: Gekisou off, every
    * note Perfect). The client shuffles the performance order uniformly at the start of every live, so a member's
-   * expected gain uses the mean over the five positions; positions the chart never fires weigh 0.
+   * expected gain uses the mean over the five positions; positions the chart never fires weigh 0. `noteRate`:
+   * scoreId -> judged notes per second from the first note to the last judged one (roughSnapRate's score-up ramps).
    */
   function skillWeightsFromMusicData(md) {
     const kinds = (md && md.deck && md.deck.kinds) || [];
     const byScore = new Map();
+    const noteRate = new Map();
     for (const s of (md && md.songs) || []) {
       for (const c of s.charts || []) {
+        const span = (c.lastJudgedNoteMs - c.firstNoteMs) / 1000;
+        if (c.notes && c.notes.judged > 0 && span > 0) noteRate.set(c.scoreId, c.notes.judged / span);
         const off = c.deck && c.deck.offSeeds && c.deck.offSeeds[0];
         if (!off || !off.weights) continue;
         const w = new Float64Array(kinds.length);
@@ -817,7 +821,7 @@
         byScore.set(c.scoreId, w);
       }
     }
-    return { kinds, byScore };
+    return { kinds, byScore, noteRate };
   }
 
   /** The factor the game's applier makes of an effect value (music-data.json `deck` documentation). */
@@ -1000,10 +1004,10 @@
    * [{part, skillId, effectType, why}]: part "leader" (why "unknown": an effect, condition or cumulative type power
    * does not read), "live" (a live skill row of no music-data kind: "unmeasured"), "gekisou" (a Gekisou skill
    * music-data has not measured: "unmeasured"), "snap" (a snap skill row: "rough", a score-up the points search's
-   * estimate (roughSnapRate, 15000 only) leaves out but the score objective measures; "never", a condition the
-   * simulation holds false; "unknown", an effect type of no known kind) and "gekisouSupport" (a Gekisou support skill
-   * music-data has not measured: "unmeasured"). `data` {skillWeights, battle}: the parts they cover are skipped
-   * without them.
+   * estimate (roughSnapRate: 15000 and score-up ramps) leaves out but the score objective measures; "never", a
+   * condition the simulation holds false; "unknown", an effect type of no known kind) and "gekisouSupport" (a Gekisou
+   * support skill music-data has not measured: "unmeasured"). `data` {skillWeights, battle}: the parts they cover are
+   * skipped without them.
    */
   function skillGaps(m, kind, id, data = {}) {
     const out = [];
@@ -1063,7 +1067,7 @@
         if (NO_SCORE_EFFECTS.has(t)) continue;
         if (!SNAP_SCORE_EFFECTS.has(t)) add("snap", skillId, t, "unknown");
         else if (conditionTypes([e._skillTriggerConditionGroup, e._skillConditionGroup]).some((x) => NEVER_CONDITIONS.has(x))) add("snap", skillId, t, "never");
-        else if (t !== 15000) add("snap", skillId, t, "rough");
+        else if (t !== 15000 && !snapRampOf(m, e)) add("snap", skillId, t, "rough");
       }
     }
     if (battle && battle.power) {
@@ -1236,36 +1240,88 @@
     return acc;
   }
 
+  /** Whether member `v` meets the member conditions (5000) of snap skill row `e`. */
+  function snapRowHolds(m, v, e) {
+    for (const cs of e._skillConditionGroup > 0 ? m.conditionSets.get(e._skillConditionGroup) || [] : []) {
+      for (const cid of cs._conditionIds) {
+        const c = m.skillConditions.get(cid);
+        if (c && c._conditionType === 5000 && matchesAny(v, targetsOf(m, c._conditionTargetIDs)) !== c._isPositive) return false;
+      }
+    }
+    return true;
+  }
+
   /** The seconds snap `s` extends member `v`'s live skill by (15000 rows whose member conditions `v` meets). */
   function snapExtension(m, v, s) {
     let ext = 0;
     for (const [id, level] of (s && s.supportSkills) || []) {
       for (const e of m.supportSkillEffects.get(id + ":" + level) || []) {
-        if (e._skillEffectType !== 15000) continue;
-        let hit = true;
-        for (const cs of e._skillConditionGroup > 0 ? m.conditionSets.get(e._skillConditionGroup) || [] : []) {
-          for (const cid of cs._conditionIds) {
-            const c = m.skillConditions.get(cid);
-            if (c && c._conditionType === 5000 && matchesAny(v, targetsOf(m, c._conditionTargetIDs)) !== c._isPositive) hit = false;
-          }
-        }
-        if (hit) ext += e._effectValue / 1000;
+        if (e._skillEffectType === 15000 && snapRowHolds(m, v, e)) ext += e._effectValue / 1000;
       }
     }
     return ext;
   }
 
   /**
+   * A snap skill row roughSnapRate estimates as a score-up ramp, as {n, max}, or null: a score-up (2001) started by the
+   * paired member's live skill (trigger 4010), of its effect value per n Perfect or Just notes judged while it runs
+   * (cumulative condition 1000), at most `max` times and at most its max effect value (snap 76's skill 74, 2026-10-28).
+   */
+  function snapRampOf(m, e) {
+    if (e._skillEffectType !== 2001 || e._skillReleaseConditionGroup > 0 || e._effectLimitCount || e._effectExecuteLimitCount) return null;
+    const sets = e._skillTriggerConditionGroup > 0 ? m.conditionSets.get(e._skillTriggerConditionGroup) || [] : [];
+    const typeOf = (cid) => (m.skillConditions.get(cid) || {})._conditionType;
+    if (!sets.length || !sets.every((cs) => cs._conditionIds.every((cid) => typeOf(cid) === 4010))) return null;
+    for (const cs of e._skillConditionGroup > 0 ? m.conditionSets.get(e._skillConditionGroup) || [] : []) {
+      if (!cs._conditionIds.every((cid) => typeOf(cid) === 5000)) return null;
+    }
+    const cum = m.cumulative.get(e._skillCumulativeConditionID);
+    const n = cum && (cum._conditionValues || [])[0];
+    const judgements = cum ? (cum._conditionTargetIDs || []).map((t) => (m.skillTargets.get(t) || {})._judgement) : [];
+    if (!cum || cum._skillCumulativeConditionType !== 1000 || !(n > 0) || !judgements.includes(5) || !judgements.includes(6)) return null;
+    return { n, max: cum._maxCumulativeCount };
+  }
+
+  /** Snap `s`'s score-up ramp rows (snapRampOf) whose member conditions member `v` meets. */
+  function snapRamps(m, v, s) {
+    const out = [];
+    for (const [id, level] of (s && s.supportSkills) || []) {
+      for (const e of m.supportSkillEffects.get(id + ":" + level) || []) if (snapRampOf(m, e) && snapRowHolds(m, v, e)) out.push(e);
+    }
+    return out;
+  }
+
+  /**
    * A rough snap skill score per unit of power of a deck (member and snap views, slot by slot) on chart `scoreId`:
-   * each snap's live skill extension (15000) over the live skill's own 5 s, times the member's live skill rate. On the
-   * charts checked it is 8% below the replay's rates (spread ±15%). It picks which songs the score objective measures,
-   * and it is what snap skills add in the points search, which has no measured rates.
+   * each snap's live skill extension (15000) over the live skill's own 5 s, times the member's live skill rate, plus its
+   * score-up ramps (snapRampOf): the mean factor over a run at the chart's mean note rate, times the weight of a plain
+   * score-up of that length (a kind of music-data). The extension is 8% below the replay's rates on the charts checked
+   * (spread ±15%); the ramps are 0.79–1.19 of the replay on charts of 5 notes per second or more and up to 2.3 times
+   * it on sparse easy charts (2026-10-29), where skill windows are denser than the chart. It picks which songs the
+   * score objective measures, and it is what snap skills add in the points search, which has no measured rates.
    */
   function roughSnapRate(m, members, snaps, scoreId, skillWeights) {
     let r = 0;
+    const w = skillWeights && skillWeights.byScore.get(scoreId);
+    const rate = skillWeights && skillWeights.noteRate && skillWeights.noteRate.get(scoreId);
     members.forEach((v, i) => {
       const ext = snapExtension(m, v, snaps[i]);
       if (ext) r += (liveSkillRate(m, [v], scoreId, skillWeights) * ext) / 5;
+      if (!w || !rate || !v.liveSkillId) return;
+      for (const e of snapRamps(m, v, snaps[i])) {
+        const k = skillWeights.kinds.find((k) =>
+          k.effectType === 2000 && k.activationTimeSecond === e._activationTimeSecond && !(k.skillTargetIds || []).length && !k.skillConditionGroup &&
+          !k.skillReleaseConditionGroup && !k.effectLimitCount && !k.effectExecuteLimitCount && !k.effectExecuteLimitResetConditionGroup);
+        if (!k) continue;
+        // The j-th note of the run scores at floor(j / n) steps (the notes judged before it).
+        const { n, max } = snapRampOf(m, e);
+        const notes = rate * e._activationTimeSecond;
+        const step = (j) => Math.min(e._effectValue * Math.min(Math.floor(j / n), max), e._maxEffectValue > 0 ? e._maxEffectValue : Infinity) / 10000;
+        let sum = 0;
+        for (let j = 0; j < Math.floor(notes); j++) sum += step(j);
+        sum += (notes - Math.floor(notes)) * step(Math.floor(notes));
+        r += (sum / notes) * w[k.id];
+      }
     });
     return r;
   }
@@ -1285,7 +1341,7 @@
     const battle = multi && input.battle && input.battle.power ? input.battle : null;
     const bt = battle ? battleRates(battle, gekisouRanks(multi), multi.justRate) : null;
     const sw = bt
-      ? { kinds: battle.kinds, byScore: bt.weights }
+      ? { kinds: battle.kinds, byScore: bt.weights, noteRate: input.skillWeights && input.skillWeights.noteRate }
       : input.skillWeights && input.skillWeights.kinds.length ? input.skillWeights : null;
     const terms = new Map();
     const skillRateOf = (v, scoreId) => {
@@ -1585,14 +1641,15 @@
       return e.by.get(g.key);
     };
     // Rough snap skill gain (roughSnapRate) of snap j beside member v on each chart of chartList, or null; members of
-    // one live skill and level that get the same extension share it.
+    // one live skill and level that get the same extension and score-up ramp rows share it.
     const roughKeys = new Map(); // member view -> cache key per snap
     const roughCache = new Map();
     const roughOf = (v, j) => {
       if (!roughSnaps) return null;
       if (!roughKeys.has(v)) roughKeys.set(v, snaps.map((s) => {
         const ext = v.liveSkillId ? snapExtension(m, v, s) : 0;
-        return ext ? v.liveSkillId + ":" + v.liveSkillLevel + "|" + ext : null;
+        const ramps = v.liveSkillId ? snapRamps(m, v, s).map((e) => e._id).join(",") : "";
+        return ext || ramps ? v.liveSkillId + ":" + v.liveSkillLevel + "|" + ext + "|" + ramps : null;
       }));
       const key = roughKeys.get(v)[j];
       if (!key) return null;

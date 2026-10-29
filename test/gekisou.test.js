@@ -480,7 +480,8 @@ if (!process.argv.includes("--replay-only")) {
   }
 
   // 「愛素 LUCK 隊」: on an all-LUCK chart with every card owned, the score objective pairs LUCKY RUSH 分數UP snaps with
-  // members of their band and keeps 愛音★4 and 爽世★4 (LUCK gauge +300%). The estimate adds pairs up; the simulation (64
+  // members of their band and keeps at least two LUCK gauge members (愛音★4 and 爽世★4, +300%, until cards of 2026-10-18
+  // brought 蕾葉★4 with the same skill and 寧月★4 with a stronger one). The estimate adds pairs up; the simulation (64
   // seeds) plays the gauge skills' extra rushes too.
   {
     const allMembers = m.t.MasterMemberCard.map((c) => {
@@ -508,7 +509,7 @@ if (!process.argv.includes("--replay-only")) {
     const simG = S.orderScores(session, sidL, d.power, perfL.map((p) => ({ ...p, supportSkills: [] })), gkL);
     console.log(`all-LUCK ${sidL}: members ${ids.join(",")} snaps ${d.snaps.map((s) => s && s.id).join(",")}, ${rush.length} band-matched LUCK snaps;`,
       `search ${d.estScore} (snaps' Gekisou skills +${d.gekisouSupportScore}, ${t2 - t1} ms), simulated ${Math.round(simL.mean)}, without the snap skills ${Math.round(simG.mean)} (${Date.now() - t2} ms)`);
-    assert.ok(ids.includes(52) && ids.includes(54));
+    assert.ok(d.members.filter((v) => v.luckGauge >= 1).length >= 2, `LUCK gauge members ${d.members.map((v) => v.luckGauge)}`);
     assert.ok(rush.length >= 3);
     assert.ok(d.gekisouSupportScore > 0.3 * d.estScore);
     // The score objective has no snap skills without measured rates. The gauge members bring more rushes, which every

@@ -297,7 +297,7 @@
       });
       state.worker.postMessage({
         type: "init", raw: slim, lang, perPower: [...state.perPower], lengths: [...state.lengths], replay: state.replay, battle: state.battle,
-        skillWeights: sw ? { kinds: sw.kinds, byScore: [...sw.byScore].map(([k, w]) => [k, Array.from(w)]) } : null,
+        skillWeights: sw ? { kinds: sw.kinds, byScore: [...sw.byScore].map(([k, w]) => [k, Array.from(w)]), noteRate: [...sw.noteRate] } : null,
       });
     } catch (e) {
       console.warn("worker unavailable, searching on the main thread", e);
@@ -1018,7 +1018,7 @@
     el.innerHTML = `<div class="panel">
         <h2>結果</h2>
         ${note || `<p class="note">預估分數＝全 Perfect 的計分資料加上演出技能和快照技能的期望加分（發動順序每場隨機），再依準度（Perfect 率 ${s.perfectRate}%、每場斷 combo ${s.comboBreaks} 次）打折。
-        這裡的快照技能是粗估：快照延長演出技能的秒數 ÷ 5 秒 × 那位成員的演出技能加分，和整場模擬差約 ±15%（換成總分在 1% 以內）。
+        這裡的快照技能是粗估：快照延長演出技能的秒數 ÷ 5 秒 × 那位成員的演出技能加分，和整場模擬差約 ±15%（換成總分在 1% 以內）；隨 Perfect 數疊加的分數 UP（如「鬼魅之瞳」）用譜面平均每秒音符數估算，每秒 5 個音符以上的譜面差約 ±20%（換成總分約 3% 以內）。
         有斷 combo 時分數會隨斷的位置變動（斷在中段最傷），排名改用各評級機率加權的期望收益，餘裕太小、可能掉級的隊伍會排在後面。
         「模擬分數」用 ournotes-deck 的整場模擬算出 120 種發動順序的分數（快照技能逐格計算），評級機率同時考慮發動順序和斷 combo 的位置。
         餘裕小於 3% 的隊伍，實際可能差一級。${

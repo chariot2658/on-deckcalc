@@ -266,9 +266,11 @@
    * each [skillId, level] below the top: the simulated increment of the skill alone at that level over the increment at
    * the top level, summed over up to `sample` charts where the top level gains (spread over them), at rank `rank` in
    * every range and Just rate `justRate`, on each chart's first seed. Returns "skillId:level" -> factor (at least 0).
-   * `bt` is Engine.battleRates(battle, rank, justRate).
+   * `bt` is Engine.battleRates(battle, rank, justRate). The ratio varies a lot by chart (Gekisou skill 4 Lv1: 0.15–0.43
+   * on most charts, 0.28 over all 168 where it gains), so 6 charts were off by up to a quarter (0.21 on 2026-10-28's
+   * charts) and some LUCK skills far more; 24 charts take about 4.6 s for the user's 17 lower levels (Node, 2026-10-29).
    */
-  function gekisouLevelFactors(session, m, battle, bt, pairs, sample = 6) {
+  function gekisouLevelFactors(session, m, battle, bt, pairs, sample = 24) {
     const out = new Map();
     const empty = () => ({
       liveSkill: null, supportSkills: [], bandId: 0, characterId: 0, cardType: 0, tagIds: [], liveSkillCategories: [],

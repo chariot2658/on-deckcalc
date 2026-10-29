@@ -22,7 +22,10 @@ self.onmessage = (e) => {
       perPower = new Map(msg.perPower);
       lengths = new Map(msg.lengths || []);
       skillWeights = msg.skillWeights
-        ? { kinds: msg.skillWeights.kinds, byScore: new Map(msg.skillWeights.byScore.map(([k, w]) => [k, Float64Array.from(w)])) }
+        ? {
+          kinds: msg.skillWeights.kinds, byScore: new Map(msg.skillWeights.byScore.map(([k, w]) => [k, Float64Array.from(w)])),
+          noteRate: new Map(msg.skillWeights.noteRate || []),
+        }
         : null;
       battle = msg.battle || null;
       replay = msg.replay || null;
@@ -362,7 +365,7 @@ async function scoreInput(base, id, every, pool = null) {
     const pre = Engine.search({ ...base, compareSongs: true, topK: 1 });
     if (pre.error || !pre.songs.length) return { input: base, approx: [] };
     // The live skill weights of the live played (with Gekisou, at its rank and Just rate).
-    const sw = gk ? { kinds: battle.kinds, byScore: gk.weights } : skillWeights;
+    const sw = gk ? { kinds: battle.kinds, byScore: gk.weights, noteRate: skillWeights && skillWeights.noteRate } : skillWeights;
     const rough = new Map(pre.songs.map((d) => [d, d.score * (1 + (Engine.roughSnapRate(master, d.members, d.snaps, d.chart.scoreId, sw) * d.accuracy) / d.scoreRate)]));
     const ranked = pre.songs.slice().sort((a, b) => rough.get(b) - rough.get(a));
     const top = rough.get(ranked[0]);
