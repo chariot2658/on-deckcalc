@@ -99,6 +99,28 @@ const REF = [
   assert.ok(checked >= 3);
   console.log(`${checked} pairing keys: same rate for another pairing of the key, five copies = mean over positions`);
 
+  // The points search's rough estimate of snap 76's score-up ramp (Engine.roughSnapRate), beside a member of the band
+  // its condition names (twice the steps) and another, on the top chart of every 6th song with 5 notes per second or
+  // more: 0.79–1.07 of the replay (2026-10-29), so within 25%.
+  {
+    const cards = [...m.memberCards.values()].filter((c) => c._rarity === 4);
+    const viewOf = (c) => E.memberView(m, { id: c._id, level: 1, skillLevel: 5 }, {});
+    const s76 = E.snapView(m, { id: 76, level: 1, rank: 5 });
+    const both = [cards.find((c) => viewOf(c).bandId === 2), cards.find((c) => viewOf(c).bandId !== 2)];
+    const ratios = [];
+    for (const song of md.songs.filter((s, i) => i % 6 === 0)) {
+      const c = song.charts[song.charts.length - 1];
+      if (!(sw.noteRate.get(c.scoreId) >= 5) || !sw.byScore.has(c.scoreId)) continue;
+      for (const card of both) {
+        const v = viewOf(card);
+        const r = S.snapSkillRates(session, m, c.scoreId, [{ key: "k", member: { id: card._id, skillLevel: 5 }, snap: { id: 76, rank: 5 } }], null).get("k");
+        ratios.push(E.roughSnapRate(m, [v], [s76], c.scoreId, sw) / r);
+      }
+    }
+    assert.ok(ratios.length >= 10 && ratios.every((x) => Math.abs(x - 1) < 0.25), ratios.map((x) => x.toFixed(3)).join(" "));
+    console.log(`snap 76's score-up ramp: rough estimate / replay ${Math.min(...ratios).toFixed(3)}–${Math.max(...ratios).toFixed(3)} on ${ratios.length / 2} charts`);
+  }
+
   // Pairing classes (snapSkillClass), every card owned: each key measured alone scores as its class's one measurement,
   // solo and with Gekisou.
   {

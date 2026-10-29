@@ -43,6 +43,17 @@ assert.deepStrictEqual(kinds("snap", -1), ["snap:2000:never"]);
 copySkill(m.supportSkillEffects, 16, -16, { _skillTriggerConditionGroup: 0 });
 m.snaps.set(-2, { ...snap, _supportSkillId01: -16, _supportSkillId02: 0 });
 assert.deepStrictEqual(kinds("snap", -2), ["snap:2000:rough"]);
+// Snap 76's score-up ramp (skill 74) is estimated; the same rows started by anything but the member's live skill, or
+// counting other judgements, are not.
+m.snaps.set(-5, { ...snap, _supportSkillId01: 74, _supportSkillId02: 0 });
+assert.deepStrictEqual(kinds("snap", -5), []);
+copySkill(m.supportSkillEffects, 74, -18, { _skillTriggerConditionGroup: 0 });
+m.snaps.set(-6, { ...snap, _supportSkillId01: -18, _supportSkillId02: 0 });
+assert.deepStrictEqual(kinds("snap", -6), ["snap:2001:rough"]);
+m.cumulative.set(-72, { ...m.cumulative.get(72), _conditionTargetIDs: [42] });
+copySkill(m.supportSkillEffects, 74, -19, { _skillCumulativeConditionID: -72 });
+m.snaps.set(-7, { ...snap, _supportSkillId01: -19, _supportSkillId02: 0 });
+assert.deepStrictEqual(kinds("snap", -7), ["snap:2001:rough"]);
 // An effect type of no known kind.
 copySkill(m.supportSkillEffects, snap._supportSkillId01, -17, { _skillEffectType: 99999 });
 m.snaps.set(-3, { ...snap, _supportSkillId01: -17, _supportSkillId02: 0 });
