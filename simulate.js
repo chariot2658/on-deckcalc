@@ -431,10 +431,17 @@
     for (const k of keys) {
       const compiled = [];
       for (const e of m.gekisouSkillEffects.get(k) || []) {
+        // LIFE damage reduction (3004, GK23's BAD以下LIFE減少減輕): a full-Perfect play takes no damage.
+        if (e._skillEffectType === 3004) continue;
         const cs = conditions(e._skillTriggerConditionGroup);
+        // The replay never asks an untimed sustained row's release: it ends when its trigger turns false, and
+        // range-playing (7020) does at the range's COMPLETE, when range-complete (7013, GK23 Lv5) would.
+        const release = conditions(e._skillReleaseConditionGroup);
+        const idleRelease = e._skillTriggerType === 2 && !e._activationTimeSecond && release.length > 0 &&
+          release.every((c) => c._conditionType === 7013 && c._isPositive);
         // Full Perfect keeps LIFE at its initial value. The supported rows are timed range-start, sustained
         // range-playing, or a COMBO threshold (optionally ANDed with LIFE). Reject a new shape, never guess it.
-        if (e._skillEffectType !== 12000 || e._skillConditionGroup || e._skillReleaseConditionGroup ||
+        if (e._skillEffectType !== 12000 || e._skillConditionGroup || (e._skillReleaseConditionGroup && !idleRelease) ||
             (m.conditionSets.get(e._skillTriggerConditionGroup) || []).length !== 1 ||
             cs.some((c) => ![2001, 7005, 7010, 7020].includes(c._conditionType) || (c._conditionType !== 2001 && !c._isPositive))) {
           throw new Error("Unsupported COMBO count skill " + k);

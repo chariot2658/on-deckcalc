@@ -15,14 +15,14 @@ async function main() {
   const session = await loadReplay();
   assert.ok(session, "Missing replay data; run node test/fetch-replay.js first");
   const extended = process.argv.includes("--extended");
-  const keys = [4, 5, 6, 12, 13, 18, 19].flatMap((id) => (extended ? [1, 2, 3, 4, 5] : [1, 5]).map((lv) => `${id}:${lv}`));
+  const keys = [4, 5, 6, 12, 13, 18, 19, 23].flatMap((id) => (extended ? [1, 2, 3, 4, 5] : [1, 5]).map((lv) => `${id}:${lv}`));
   for (const k of keys) assert.strictEqual(E.comboCountOf(m, ...k.split(":").map(Number)), k);
   const support = Number((process.argv.find((s) => s.startsWith("--support=")) || "--support=16").split("=")[1]);
   const ctx = S.comboContext(m, keys, support, 1);
   const battle = E.battleFromMusicData(JSON.parse(fs.readFileSync(path.join(root, "data/music-data.json"), "utf8")));
   const combos = new Map();
   const add = (ks) => { const sorted = ks.slice().sort(); combos.set(sorted.join("+"), sorted); };
-  for (const id of [12, 13]) for (const other of [4, 5, 6, 12, 13, 18, 19]) {
+  for (const id of [12, 13]) for (const other of [4, 5, 6, 12, 13, 18, 19, 23]) {
     if (id === other) continue;
     for (const lv of [1, 5]) for (const lv2 of [1, 5]) add([`${id}:${lv}`, `${other}:${lv2}`]);
   }
@@ -31,6 +31,7 @@ async function main() {
     add(["12:2", "6:3"]); add(["13:4", "4:2"]); add(["12:3", "13:2", "5:4"]);
     add(["12:5", "12:5", "13:1", "6:3", "19:4"]);
     add(["4:1", "5:3", "6:4", "18:2", "19:5"]);
+    add(["23:5", "5:5"]); add(["23:2", "23:5", "6:1"]); add(["23:1", "23:3", "4:5", "12:5", "19:2"]);
   }
   const rows = [], scope = [];
   for (const sid of extended ? [10000100, 10000101, 10000102, 10000103, 10001303, 10001403, 10001703, 10002003, 10003803] : [10000103, 10001303, 10001403]) {

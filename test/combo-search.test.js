@@ -16,9 +16,10 @@ const battle = E.battleFromMusicData(md);
 (async () => {
   const session = await loadReplay();
   assert.ok(session, "Missing local replay data");
-  const members = [5, 27, 53, 57, 59, 65, 66].map((id) => {
+  // Card 71 (GK23) at Lv5: the sustained row with a range-complete release.
+  const members = [5, 27, 53, 57, 59, 65, 66, 71].map((id) => {
     const L = E.memberLimits(m, m.memberCards.get(id));
-    return { id, level: L.limit(L.maxAwake), awake: L.maxAwake, rank: 1, skillLevel: 1, gekisouSkillLevel: id % 2 ? 1 : 5 };
+    return { id, level: L.limit(L.maxAwake), awake: L.maxAwake, rank: 1, skillLevel: 1, gekisouSkillLevel: id % 2 && id !== 71 ? 1 : 5 };
   });
   const snaps = [5, 53].map((id) => ({ id, rank: 5, level: E.snapLimit(m, m.snaps.get(id), 5) }));
   const input = { master: m, event: null, mode: "normal", objective: "score", members, snaps, player: {},
@@ -40,6 +41,32 @@ const battle = E.battleFromMusicData(md);
   const btChart = { rank: 3, justRate: 0.5, percents: battle.byScore.get(sid).percents };
   const clone = structuredClone(browser.self.Simulate.comboBoostsWith(session, structuredClone(ctx), btChart, sid, scope.keys));
   for (const match of [0, 1]) assert.strictEqual(E.comboCountBoost(clone, scope.keys.slice(0, 3), match), E.comboCountBoost(comboBoost.byScore.get(sid), scope.keys.slice(0, 3), match));
+
+  // GK23 (count-up 2 from a range's start; its LIFE damage reduction does nothing at full Perfect) alone and with each
+  // other count-up of the roster against the replay, on 1 + share (synthetic hosts as in check-combo-interactions.js).
+  const k23 = "23:5";
+  assert.ok(scope.keys.includes(k23));
+  let worst23 = 0;
+  for (const chart of scope.scoreIds) {
+    const btc = { rank: 3, justRate: 0.5, percents: battle.byScore.get(chart).percents };
+    const run = S.chartRunner(session, chart, S.gekisouPlay(btc, btc.percents, m.justTypes));
+    const score = (ks, match, sup) => run(1e6, Array.from({ length: 5 }, (_, i) => {
+      const gk = (ks[i] || `${scope.idle}:1`).split(":").map(Number), row = m.gekisouSkills.get(gk[0]);
+      return { liveSkill: null, supportSkills: [], cardType: 0, tagIds: [], liveSkillCategories: [],
+        bandId: match ? ctx.bandId : 0, characterId: match ? ctx.characterId : 0, gekisouSkill: gk,
+        gekisouMissionType: row._gekisouMissionType, gekisouSkillCategories: row._skillCategories || [],
+        gekisouSupportSkills: sup ? [[ctx.support, ctx.top]] : [] };
+    }), [0, 1, 2, 3, 4], 0);
+    for (const match of [0, 1]) {
+      const gain = score([], match, true) - score([], match, false);
+      for (const ks of [[k23], ...scope.keys.filter((k) => k !== k23).map((k) => [k23, k])]) {
+        const actual = (score(ks, match, true) - score(ks, match, false)) / gain;
+        const err = (1 + E.comboCountBoost(comboBoost.byScore.get(chart), ks, match)) / actual - 1;
+        assert.ok(Math.abs(err) < 0.06, `GK23 ${chart} ${ks.join("+")} match=${match}: ${(100 * err).toFixed(2)}%`);
+        worst23 = Math.max(worst23, Math.abs(err));
+      }
+    }
+  }
 
   const base = { ...input, comboBoost };
   const mv = members.map((o) => E.memberView(m, o, {})), sv = snaps.map((o) => E.snapView(m, o));
@@ -84,5 +111,6 @@ const battle = E.battleFromMusicData(md);
   assert.strictEqual(individual.songs.length, charts.length);
   for (const d of individual.songs) assert.ok(Math.abs(d.score / bestChart.get(d.chart.scoreId) - 1) < 1e-9, `individual search ${d.chart.scoreId}: ${d.score} vs ${bestChart.get(d.chart.scoreId)}`);
   console.log(`${visited} real-card member/leader/snap assignments: random and per-song COMBO bounds match exhaustive search; all difficulties and browser cloning checked`);
+  console.log(`GK23 (card 71) count-up shares within ${(100 * worst23).toFixed(2)}% of the replay on 1 + share`);
   session.free();
 })().catch((e) => { console.error(e); process.exitCode = 1; });
