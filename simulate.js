@@ -69,21 +69,31 @@
    * A Gekisou play of a template (every judged note Perfect): in the Just-count ranges (the fevers whose mission is 3)
    * the notes that can be judged Just (`justTypes`, MasterLiveJudgementTiming) are judged Just at `justRate`, spread
    * evenly; the rank is fixed at `ranks` in the three ranges. Frames and fevers follow ournotes-deck JustRule.
+   * `justBoost` (Engine.justTimeline of the deck's Just windows, or absent): [[untilMs, rate]] by the time since the
+   * range started; each such note then adds the rate at its time, and is judged Just when the sum passes a whole number.
    */
   function gekisouRequest(session, tpl, scoreId, gekisou) {
     const d = JSON.parse(session.describeChart(scoreId));
     const types = new Map(d.notes.map((n) => [n.noteId, n.judgementType]));
     const ranges = d.fevers.filter((_, i) => d.missions[i] === 3);
     const rate = Math.min(1, Math.max(0, gekisou.justRate ?? 1));
+    const boost = gekisou.justBoost && gekisou.justBoost.length ? gekisou.justBoost : null;
     let k = 0;
+    let acc = 0;
     const frames = tpl.frames.map((f) => {
-      if (!f.judgements.length || !ranges.some(([s, e]) => f.timeMs >= s && f.timeMs < e)) return f;
+      const range = f.judgements.length ? ranges.find(([s, e]) => f.timeMs >= s && f.timeMs < e) : null;
+      if (!range) return f;
+      const seg = boost && boost.find(([until]) => f.timeMs - range[0] < until);
+      const r = seg ? seg[1] : rate;
       return {
         ...f,
         judgements: f.judgements.map((j) => {
           if (j.judgement !== 5 || !gekisou.justTypes.has(types.get(j.noteId))) return j;
           k++;
-          return Math.floor(k * rate) > Math.floor((k - 1) * rate) ? { ...j, judgement: 6 } : j;
+          if (!boost) return Math.floor(k * rate) > Math.floor((k - 1) * rate) ? { ...j, judgement: 6 } : j;
+          const before = acc;
+          acc += r;
+          return Math.floor(acc + 1e-9) > Math.floor(before + 1e-9) ? { ...j, judgement: 6 } : j;
         }),
       };
     });

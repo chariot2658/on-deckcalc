@@ -299,7 +299,8 @@ async function search(msg) {
       const s = await cx.session();
       for (const d of out.results) {
         const members = d.members.map((v) => ({ id: v.id, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel }));
-        d.sim = simulateDeck(s, d.chart.scoreId, d.displayPower, members, d.snaps.map((x) => (x ? { id: x.id, rank: x.rank } : null)), out.gekisou, cx.battle);
+        const gekisou = { ...out.gekisou, justBoost: Engine.deckJustBoost(d, out.gekisou.justRate) };
+        d.sim = simulateDeck(s, d.chart.scoreId, d.displayPower, members, d.snaps.map((x) => (x ? { id: x.id, rank: x.rank } : null)), gekisou, cx.battle);
       }
       const mean = (d) => (d.sim ? d.sim.mean * d.accuracy : d.estScore);
       out.results.sort((a, b) => mean(b) - mean(a));
@@ -327,15 +328,16 @@ const gekisouOn = (input) => {
 // 1% (8 seeds: 3%), for about 0.5 s more per deck.
 const LUCK_SEEDS = 64;
 
-// Simulate.orderScores of one deck; gekisou ({rank, ranks, justRate}, a search's) plays with Gekisou on: a chart with a
-// LUCK range on LUCK_SEEDS seeds, others on their first published seed (nothing else draws from the seed). `bat`: the
-// Gekisou data of the live (gekisouCtx).
+// Simulate.orderScores of one deck; gekisou ({rank, ranks, justRate}, a search's, with the deck's `justBoost` when it has
+// Just windows: Engine.deckJustBoost) plays with Gekisou on: a chart with a LUCK range on LUCK_SEEDS seeds, others on
+// their first published seed (nothing else draws from the seed). `bat`: the Gekisou data of the live (gekisouCtx).
 function simulateDeck(s, scoreId, power, members, snaps, gekisou, bat = battle) {
   let gk = null;
   if (gekisou) {
     const b = bat && bat.byScore.get(scoreId);
     const seeds = !b ? [0] : b.luck ? Simulate.luckSeeds(b.replaySeeds, LUCK_SEEDS) : [b.seeds[0].seed];
     gk = Simulate.gekisouPlay(gekisou, b && b.percents, master.justTypes, seeds);
+    if (gekisou.justBoost && gekisou.justBoost.length) gk.justBoost = gekisou.justBoost;
   }
   return Simulate.orderScores(s, scoreId, power, Simulate.performers(master, members, snaps), gk);
 }
@@ -614,11 +616,19 @@ async function savedDecks(msg) {
     // Simulation: the payoff of a deck on one song from its simulated mean (score: times the play's share; points: the
     // room's rank chances, Engine.roomPayoff).
     const sim = replay && gkOut ? await cx.session() : null;
-    const gkRun = (sid) => (gkOut ? Simulate.gekisouPlay(gkOut, (gb.byScore.get(sid) || {}).percents, master.justTypes) : null);
+    // A deck with Just windows plays them (justBoost, Engine.deckJustBoost); runners and tasks go by chart and boost.
+    const boostOf = (d) => (gkOut ? Engine.deckJustBoost(d, gkOut.justRate) : []);
+    const gkRun = (sid, boost = []) => {
+      if (!gkOut) return null;
+      const g = Simulate.gekisouPlay(gkOut, (gb.byScore.get(sid) || {}).percents, master.justTypes);
+      if (boost.length) g.justBoost = boost;
+      return g;
+    };
     const runners = new Map();
-    const runnerOf = (sid) => {
-      if (!runners.has(sid)) runners.set(sid, Simulate.chartRunner(sim, sid, gkRun(sid)));
-      return runners.get(sid);
+    const runnerOf = (sid, boost = []) => {
+      const key = sid + "|" + JSON.stringify(boost);
+      if (!runners.has(key)) runners.set(key, Simulate.chartRunner(sim, sid, gkRun(sid, boost)));
+      return runners.get(key);
     };
     const luckOf = (sid) => !!(gb.byScore.get(sid) || {}).luck;
     const seedsOf = (sid) => {
@@ -648,25 +658,27 @@ async function savedDecks(msg) {
         if (it.kept) continue;
         requested += it.total - it.from;
         const perf = perfOf(it.d);
-        const key = JSON.stringify([cx.key, gkOut, it.sid, it.d.displayPower, perf]);
+        const boost = boostOf(it.d);
+        const key = JSON.stringify([cx.key, gkOut, it.sid, it.d.displayPower, perf, boost]);
         if (!unique.has(key)) {
           const scores = savedSamples.get(key) || [];
           savedSamples.delete(key);
           savedSamples.set(key, scores);
           if (savedSamples.size > SAVED_SAMPLE_LIMIT) savedSamples.delete(savedSamples.keys().next().value);
-          unique.set(key, { sid: it.sid, power: it.d.displayPower, perf, scores, total: it.total, from: scores.length });
+          unique.set(key, { sid: it.sid, boost, power: it.d.displayPower, perf, scores, total: it.total, from: scores.length });
         }
         it.job = unique.get(key);
         it.job.total = Math.max(it.job.total, it.total);
       }
       const jobs = [...unique.values()].filter((it) => it.from < it.total);
       runsTotal -= requested - jobs.reduce((n, it) => n + it.total - it.from, 0);
-      const bySid = new Map();
+      const bySid = new Map(); // chart and boost -> jobs
       jobs.forEach((it) => {
-        if (!bySid.has(it.sid)) bySid.set(it.sid, []);
-        bySid.get(it.sid).push(it);
+        const k = it.sid + "|" + JSON.stringify(it.boost);
+        if (!bySid.has(k)) bySid.set(k, []);
+        bySid.get(k).push(it);
       });
-      const tasks = [...bySid];
+      const tasks = [...bySid.values()].map((js) => [js[0].sid, js]);
       if (helpers && tasks.length) {
         const busy = new Array(tasks.length).fill(0);
         let last = 0;
@@ -680,7 +692,7 @@ async function savedDecks(msg) {
         try {
           await helpers.run(
             tasks.map(([sid, js]) => ({
-              type: "samples", scoreId: sid, gekisou: gkRun(sid), patch: cx.patch,
+              type: "samples", scoreId: sid, gekisou: gkRun(sid, js[0].boost), patch: cx.patch,
               items: js.map((it) => ({ power: it.power, perf: it.perf, seeds: seedsOf(sid), total: it.total, from: it.from })),
             })),
             (k, out) => {
@@ -700,7 +712,7 @@ async function savedDecks(msg) {
       }
       for (const [sid, js] of tasks) {
         if (js.every((it) => it.scores.length >= it.total)) continue;
-        const run = runnerOf(sid);
+        const run = runnerOf(sid, js[0].boost);
         const counted = (power, perf, order, seed) => {
           if (++runs % 25 === 0) progress("simulate", runs, runsTotal);
           return run(power, perf, order, seed);

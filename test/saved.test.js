@@ -65,7 +65,7 @@ async function pipeline(objective, withReplay = true) {
   const context = vm.createContext({
     console, importScripts() {}, prepared: { ...base, objective, multi: { players: 5, auto: true } },
     Engine: {
-      plainDeck: (d) => d, charts: () => charts, gekisouSongGroups: () => [{ type: "luck", musicIds }],
+      plainDeck: (d) => d, charts: () => charts, gekisouSongGroups: () => [{ type: "luck", musicIds }], deckJustBoost: () => [],
       search: (input) => input.multi.pickSong ? { songCandidates: [...perSong(1), ...perSong(3)] } : grouped(input.topK === 1 ? [1] : [1, 2]),
       roomPayoff: (_input, chart, score) => {
         const points = chart.difficulty === "expert" ? 200 : score >= 125 ? 500 : 100;

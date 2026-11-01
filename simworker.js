@@ -1,6 +1,7 @@
 // A helper of worker.js with a replay of its own, so that several charts run at once. Tasks (one chart each):
 //   {type: "rates", scoreId, jobs, gekisou}: snap skill rates (Simulate.measureSnapJobs) -> [[key, rate]]
 //   {type: "mean", scoreId, gekisou, items: [{power, perf, seeds, total, from}]}: Simulate.meanScore of each -> [mean]
+//     (gekisou: Simulate.gekisouPlay, with justBoost for a deck with Just windows)
 //   {type: "samples", ...same as mean}: individual run scores of each -> [[score]]
 //   {type: "combo", scoreId, ctx, bt: {rank, justRate}, keys, entry}: COMBO count-up shares (Simulate.comboBoostsWith)
 //   {type: "search", master: {raw, lang}, input}: one complete Engine.search (no song splitting)
@@ -40,7 +41,7 @@ self.onmessage = async (e) => {
       self.postMessage({ type: "done", out: [...out] });
     } else if (msg.type === "mean" || msg.type === "samples") {
       const g = msg.gekisou;
-      const key = sk + "|" + msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate + (g.mean ? ":" + JSON.stringify(g.mean) : "") : "");
+      const key = sk + "|" + msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate + (g.mean ? ":" + JSON.stringify(g.mean) : "") + (g.justBoost ? ":" + JSON.stringify(g.justBoost) : "") : "");
       if (!runners.has(key)) runners.set(key, Simulate.chartRunner(s, msg.scoreId, g));
       const run = runners.get(key);
       let runs = 0;
