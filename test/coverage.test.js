@@ -66,6 +66,12 @@ const noShapes = { ...data, battle: { ...data.battle, shapes: new Map(), support
 assert.ok(snap._gekisouSupportSkillId01, "the first snap has a Gekisou support skill");
 assert.ok(kinds("snap", snap._id, noShapes).includes("gekisouSupport:null:unmeasured"));
 assert.deepStrictEqual(kinds("snap", snap._id, { skillWeights: data.skillWeights }), []);
+// A JUST 判定範圍 UP (Just window, 4004) row of another trigger: justWindowRows does not read it.
+copySkill(m.gekisouSupportSkillEffects, 46, -46, { _skillTriggerType: 3 });
+m.gekisouSupportSkillMaxLevel.set(-46, m.gekisouSupportSkillMaxLevel.get(46));
+m.snaps.set(-8, { ...snap, _gekisouSupportSkillId01: -46, _gekisouSupportSkillId02: 0 });
+assert.ok(E.justWindowRows(m, 46, m.gekisouSupportSkillMaxLevel.get(46)).rows.length > 0, "skill 46 has Just windows");
+assert.ok(kinds("snap", -8).includes("gekisouSupport:4004:unknown"));
 
 // A leader skill of an effect type power does not read, and one with an unknown formation condition.
 copySkill(m.leaderEffects, member._leaderSkillID, -21, { _skillEffectType: 1004 });

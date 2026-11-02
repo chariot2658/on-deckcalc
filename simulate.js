@@ -69,21 +69,31 @@
    * A Gekisou play of a template (every judged note Perfect): in the Just-count ranges (the fevers whose mission is 3)
    * the notes that can be judged Just (`justTypes`, MasterLiveJudgementTiming) are judged Just at `justRate`, spread
    * evenly; the rank is fixed at `ranks` in the three ranges. Frames and fevers follow ournotes-deck JustRule.
+   * `justBoost` (Engine.justTimeline of the deck's Just windows, or absent): [[untilMs, rate]] by the time since the
+   * range started; each such note then adds the rate at its time, and is judged Just when the sum passes a whole number.
    */
   function gekisouRequest(session, tpl, scoreId, gekisou) {
     const d = JSON.parse(session.describeChart(scoreId));
     const types = new Map(d.notes.map((n) => [n.noteId, n.judgementType]));
     const ranges = d.fevers.filter((_, i) => d.missions[i] === 3);
     const rate = Math.min(1, Math.max(0, gekisou.justRate ?? 1));
+    const boost = gekisou.justBoost && gekisou.justBoost.length ? gekisou.justBoost : null;
     let k = 0;
+    let acc = 0;
     const frames = tpl.frames.map((f) => {
-      if (!f.judgements.length || !ranges.some(([s, e]) => f.timeMs >= s && f.timeMs < e)) return f;
+      const range = f.judgements.length ? ranges.find(([s, e]) => f.timeMs >= s && f.timeMs < e) : null;
+      if (!range) return f;
+      const seg = boost && boost.find(([until]) => f.timeMs - range[0] < until);
+      const r = seg ? seg[1] : rate;
       return {
         ...f,
         judgements: f.judgements.map((j) => {
           if (j.judgement !== 5 || !gekisou.justTypes.has(types.get(j.noteId))) return j;
           k++;
-          return Math.floor(k * rate) > Math.floor((k - 1) * rate) ? { ...j, judgement: 6 } : j;
+          if (!boost) return Math.floor(k * rate) > Math.floor((k - 1) * rate) ? { ...j, judgement: 6 } : j;
+          const before = acc;
+          acc += r;
+          return Math.floor(acc + 1e-9) > Math.floor(before + 1e-9) ? { ...j, judgement: 6 } : j;
         }),
       };
     });
@@ -431,10 +441,17 @@
     for (const k of keys) {
       const compiled = [];
       for (const e of m.gekisouSkillEffects.get(k) || []) {
+        // LIFE damage reduction (3004, GK23's BAD以下LIFE減少減輕): a full-Perfect play takes no damage.
+        if (e._skillEffectType === 3004) continue;
         const cs = conditions(e._skillTriggerConditionGroup);
+        // The replay never asks an untimed sustained row's release: it ends when its trigger turns false, and
+        // range-playing (7020) does at the range's COMPLETE, when range-complete (7013, GK23 Lv5) would.
+        const release = conditions(e._skillReleaseConditionGroup);
+        const idleRelease = e._skillTriggerType === 2 && !e._activationTimeSecond && release.length > 0 &&
+          release.every((c) => c._conditionType === 7013 && c._isPositive);
         // Full Perfect keeps LIFE at its initial value. The supported rows are timed range-start, sustained
         // range-playing, or a COMBO threshold (optionally ANDed with LIFE). Reject a new shape, never guess it.
-        if (e._skillEffectType !== 12000 || e._skillConditionGroup || e._skillReleaseConditionGroup ||
+        if (e._skillEffectType !== 12000 || e._skillConditionGroup || (e._skillReleaseConditionGroup && !idleRelease) ||
             (m.conditionSets.get(e._skillTriggerConditionGroup) || []).length !== 1 ||
             cs.some((c) => ![2001, 7005, 7010, 7020].includes(c._conditionType) || (c._conditionType !== 2001 && !c._isPositive))) {
           throw new Error("Unsupported COMBO count skill " + k);

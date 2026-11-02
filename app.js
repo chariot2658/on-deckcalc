@@ -324,7 +324,7 @@
   }
 
   // The simulated order scores of decks (worker only), cached per deck and chart. `gekisou` ({rank, justRate}, from a
-  // multiplayer search) plays with Gekisou on.
+  // multiplayer search) plays with Gekisou on, and with the deck's Just windows (Engine.deckJustBoost).
   async function simulateDecks(decks, gekisou, arena) {
     if (!state.worker || !state.replay) return decks.map(() => null);
     await state.workerReady;
@@ -333,7 +333,7 @@
       power: d.displayPower,
       members: d.members.map((v) => ({ id: v.id, skillLevel: v.skillLevel || 1, gekisouSkillLevel: v.gekisouSkillLevel || 1 })),
       snaps: d.snaps.map((x) => (x ? { id: x.id, rank: x.rank || 1 } : null)),
-      gekisou: gekisou || null,
+      gekisou: gekisou ? { ...gekisou, justBoost: Engine.deckJustBoost(d, gekisou.justRate) } : null,
       arena: arena ? { missions: arena.missions } : null,
     }));
     const keys = reqs.map((r) => JSON.stringify(r));
@@ -883,6 +883,7 @@
       ? `<div class="rank-badge" title="${multi ? "激奏分數不看評級" : "這個分數在該曲的評級"}">${multi ? "—" : esc(d.rankName)}</div>
         <div><div class="big">預估${out.gekisou ? "激奏" : ""}分數 <span class="points">${fmt(shown)}</span></div>
           <div class="small">${skillParts(d, true)}${d.sim && shown !== d.estScore ? `，模擬的激奏部分 ${shown > d.estScore ? "+" : ""}${fmt(shown - d.estScore)}` : ""}</div>
+          ${justLine(d, out)}
           <div class="muted small">${esc(label)} · 依你的準度的期望值（出場順序隨機）${out.input.mode === "challenge" ? " · 含活動數值加成" : ""}</div></div>`
       : null;
     return `<div class="result">
@@ -892,6 +893,7 @@
           d.cp ? ` · <span class="cp">${fmt(d.cp)} CP</span>` : ""
         } · <span class="items">${fmt(d.items)} 道具</span></div>
           ${rankDistLine(d, out)}
+          ${justLine(d, out)}
           ${
             out.cpPlan && d.cp
               ? `<div class="small">CP 換算約 ${fmt(Math.round(d.cpPoints))} pt，合計約 <b class="points">${fmt(Math.round(d.points + d.cpPoints))} pt</b></div>`
@@ -961,19 +963,29 @@
 
   // What the skills add to the estimated score: live skills, snap skills (measured in the score objective, a rough
   // estimate of the live skill extension in points), and with Gekisou the members' Gekisou skills and the snaps'
-  // Gekisou support skills. `bare`: without the parentheses, after the no-skill score.
+  // Gekisou support skills, and what the snaps' Just windows add to the chart and the members' skills (justScore; their
+  // share of the support skills is in those). `bare`: without the parentheses, after the no-skill score.
   function skillParts(d, bare) {
     const gk = d.gekisouScore || 0;
     const gkSnap = d.gekisouSupportScore || 0;
     const snap = d.snapScore || 0;
-    const live = d.baseScore ? d.estScore - d.baseScore - gk - gkSnap - snap : 0;
+    const just = d.justScore || 0;
+    const live = d.baseScore ? d.estScore - d.baseScore - gk - gkSnap - snap - just : 0;
     const parts = [];
     if (live > 0) parts.push(`演出技能 +${fmt(live)}`);
     if (snap > 0) parts.push(`快照技能${d.snapRough ? "（粗估）" : ""} +${fmt(snap)}`);
     if (gk > 0) parts.push(`激奏技能 +${fmt(gk)}`);
     if (gkSnap > 0) parts.push(`快照激奏技能 +${fmt(gkSnap)}`);
+    if (just > 0) parts.push(`JUST 判定範圍 UP +${fmt(just)}`);
     if (bare) return [`無技能 ${fmt(d.baseScore)}`].concat(parts).join("，");
     return parts.length ? `（${parts.join("，")}）` : "";
+  }
+
+  // Snaps' JUST 判定範圍 UP (Just windows): the Just rate the deck plays the JUST ranges at, from the player's.
+  function justLine(d, out) {
+    if (!d.justWindows || !out.gekisou || !(d.justRate > out.gekisou.justRate)) return "";
+    const pc = (x) => `${Math.round(x * 100)}%`;
+    return `<div class="small">快照的 JUST 判定範圍 UP：JUST 區間的 JUST 率 ${pc(out.gekisou.justRate)} → 約 ${pc(d.justRate)}${d.random ? "（有 JUST 區間的歌平均）" : ""}</div>`;
   }
 
   // With combo breaks or the others unknown the search ranks by the expected payoff: the chance of each rank it may reach.
@@ -1029,7 +1041,7 @@
                   : `這裡假設是<b>私人房，自己指定歌曲</b>，所以和單人一樣挑最划算的歌；公開房的歌是抽出來的，請把「激奏的歌」改成「預存隊伍」或「一隊打全部」。`
               }${
                 out.gekisou
-                  ? `<br>自己的分數用<b>開激奏</b>的分數：JUST 區間打出 JUST（JUST 率 ${Math.round(out.gekisou.justRate * 100)}%）、每段激奏結束時依名次加成（三段都假設${rankText(out.gekisou)}），再加上成員卡的激奏技能和快照的激奏技能。結算畫面大字的 SCORE 是不含激奏的分數（存成最高分），比這裡低很多。激奏技能在搜尋裡是估計值：各技能分開量再相加，未滿級的依模擬換算，JUST 區間「每個 JUST 累積加分」的快照依 JUST 率和上限換算；成員的 LUCK 量條技能讓 RUSH 變多、快照的 RUSH 加分跟著變多（用平均比例，單首歌可能差幾 %），COMBO 激奏數 UP 讓快照的 COMBO 累積加分疊得更快（逐首模擬量）。「模擬分數」逐格模擬，包含成員的激奏技能和快照的激奏技能。`
+                  ? `<br>自己的分數用<b>開激奏</b>的分數：JUST 區間打出 JUST（JUST 率 ${Math.round(out.gekisou.justRate * 100)}%）、每段激奏結束時依名次加成（三段都假設${rankText(out.gekisou)}），再加上成員卡的激奏技能和快照的激奏技能。結算畫面大字的 SCORE 是不含激奏的分數（存成最高分），比這裡低很多。激奏技能在搜尋裡是估計值：各技能分開量再相加，未滿級的依模擬換算，JUST 區間「每個 JUST 累積加分」的快照依 JUST 率和上限換算；成員的 LUCK 量條技能讓 RUSH 變多、快照的 RUSH 加分跟著變多（用平均比例，單首歌可能差幾 %），COMBO 激奏數 UP 讓快照的 COMBO 累積加分疊得更快（逐首模擬量）。「模擬分數」逐格模擬，包含成員的激奏技能和快照的激奏技能。快照的「JUST 判定範圍 UP」讓 JUST 區間開始後幾秒（滿級是整段）的 JUST 判定範圍變寬：假設你按的時間誤差呈常態分佈，判定範圍合計 UP N% 時 JUST 率從 j 變成 erf((1+N%)·erfinv(j))（JUST 率低時約 1+N% 倍），搜尋和模擬都照這個 JUST 率算；這是對打法的假設，實際看你的時機分佈。`
                   : ""
               }`
             : ""
@@ -1057,6 +1069,7 @@
     "snap:never": () => "快照技能的發動條件模擬器不支援，算 0",
     "snap:unknown": (g) => `快照技能有新的效果類型 ${g.effectType}，沒算`,
     "gekisouSupport:unmeasured": () => "快照的激奏技能 music-data 還沒量，算 0",
+    "gekisouSupport:unknown": () => "快照的 JUST 判定範圍 UP 是新的形式，沒算",
   };
   function gapNote(out) {
     const m = state.master;
@@ -1113,6 +1126,7 @@
     if (multi) {
       parts.push(`多人（激奏）：用<b>開激奏</b>的分數（JUST 率 ${Math.round((out.gekisou ? out.gekisou.justRate : multi.justRate) * 100)}%、三段都${rankText(out.gekisou, multi)}），也就是房間合計用的分數。
         成員的激奏技能會觸發搭配快照的激奏技能，而且各成員之間會互相影響、不能逐對相加，所以先估計出 15 支候選隊伍，再逐一完整模擬、依模擬分數排名（候選外的隊伍沒有模擬，少數情況可能漏掉更好的）。
+        快照的「JUST 判定範圍 UP」讓 JUST 區間開始後幾秒（滿級是整段）的 JUST 判定範圍變寬：假設你按的時間誤差呈常態分佈，判定範圍合計 UP N% 時 JUST 率從 j 變成 erf((1+N%)·erfinv(j))（JUST 率低時約 1+N% 倍），搜尋和模擬都照這個 JUST 率算；這是對打法的假設，實際看你的時機分佈。
         結算畫面大字的 SCORE（存成最高分）不含激奏，和單人一樣，請用「單人」計算。`);
     }
     if (out.measuredSongs && out.songs.some((d) => d.approx)) {
@@ -1190,8 +1204,8 @@
     const share = Engine.accuracyFactor(state.master, d.chart.scoreId, out.input.accuracy || null);
     const sc = sim.scores;
     const what = sim.gekisou && out.gekisou ? "開激奏模擬（含快照與激奏技能）" : "模擬（含快照技能）";
-    return `${what}：全 Perfect 平均 <b>${fmt(Math.round(sim.mean))}</b>，最好的出場順序 ${fmt(sc[sc.length - 1])}，` +
-      `一成的順序 ≥ ${fmt(sc[Math.floor(sc.length * 0.9)])}；依你的準度平均 ${fmt(Math.round(sim.mean * share))}`;
+    return `${what}：全 Perfect 平均 <b>${fmt(Math.round(sim.mean))}</b>，最好的出場順序 ${fmt(Math.round(sc[sc.length - 1]))}，` +
+      `一成的順序 ≥ ${fmt(Math.round(sc[Math.floor(sc.length * 0.9)]))}；依你的準度平均 ${fmt(Math.round(sim.mean * share))}`;
   }
 
   // Fills the simulation line of each rendered deck card once the worker answers.

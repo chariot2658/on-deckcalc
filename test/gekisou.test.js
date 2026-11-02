@@ -244,6 +244,105 @@ if (!process.argv.includes("--replay-only")) {
   console.log("per-chart score bounds: exhaustive member/leader/snap assignments agree");
 }
 
+// Just windows (JUST 判定範圍 UP, 4004): a deck plays its JUST ranges at the Just rate its windows give (deckJustProfile,
+// battleRates with it), its members' skills and pairs included. Snaps 64 (level 5: while the range plays), 54 and 63
+// (the range's first seconds) widen the window, 62 stacks a score-up per Just (rises with the Just rate) and 38 is a
+// JUST時機支援 whose gains fall with it. Both score searches against a brute force over member sets, leaders and every
+// placement of the snaps.
+if (!process.argv.includes("--replay-only")) {
+  const card = (id) => {
+    const c = m.memberCards.get(id);
+    const L = E.memberLimits(m, c);
+    return { id, level: L.limit(L.maxAwake), awake: L.maxAwake, rank: 1, skillLevel: m.liveSkillMaxLevel.get(c._liveSkillID) || 1, gekisouSkillLevel: 5 };
+  };
+  const few = [52, 58, 59, 60, 62, 63, 32, 6].map(card);
+  const four = [[64, 5], [54, 1], [62, 3], [38, 1]].map(([id, rank]) => ({ id, level: E.snapLimit(m, m.snaps.get(id), rank), rank }));
+  const songOf = (p, k = 0) => md.songs.filter((s) => s.gekisouMissions.join("") === p)[k].id;
+  const songIds = [songOf("333"), songOf("333", 1), md.songs.find((s) => s.gekisouMissions.includes(3) && s.gekisouMissions.join("") !== "333").id];
+  const j0 = 0.05;
+  const multi = { players: 5, othersScore: 0, gekisouRank: 3, justRate: j0 };
+  const base = {
+    master: m, event: null, mode: "normal", objective: "score", members: few, snaps: four, player: roster.player, perPowerByScore: perPower,
+    skillWeights: sw, battle, maxLevel: 40, difficulties: ["expert"], musicIds: songIds, topK: 3, multi, now: input.now, compareSongs: true,
+  };
+  const bt = E.battleRates(battle, 3, j0);
+  const mv = few.map((o) => E.memberView(m, o, roster.player));
+  const sv = four.map((o) => E.snapView(m, o));
+  const ctx = E.makeContext(m, roster.player, null, mv, sv, "normal");
+  const charts = songIds.map((id) => E.charts(m, bt.perPower, { musicIds: [id], difficulties: ["expert"], maxLevel: 40, now: input.now })[0]);
+  assert.ok(sv.some((s) => mv.some((v) => E.justWindowsOf(m, v, s).some((w) => w.sec === Infinity))), "a window while the range plays");
+  const bts = new Map();
+  const btOf = (prof) => {
+    const k = prof ? prof.key : "";
+    if (!bts.has(k)) bts.set(k, prof ? E.battleRates(battle, 3, j0, prof) : bt);
+    return bts.get(k);
+  };
+  const memo = new Map();
+  const cached = (k, f) => {
+    if (!memo.has(k)) memo.set(k, f());
+    return memo.get(k);
+  };
+  const valueOf = (order, sn, selected) => {
+    const prof = E.deckJustProfile(m, order, sn);
+    const b = btOf(prof);
+    const pk = prof ? prof.key : "";
+    const swP = { kinds: battle.kinds, byScore: b.weights };
+    let sum = 0;
+    for (const c of selected) {
+      let r = b.perPower.get(c.scoreId);
+      order.forEach((v, i) => {
+        r += cached(`m${v.id}|${c.scoreId}|${pk}`, () => E.liveSkillRate(m, [v], c.scoreId, swP) + E.gekisouSkillRate(m, battle, b, v, c.scoreId, null));
+        if (sn[i]) r += cached(`s${v.id}|${sn[i].id}|${c.scoreId}|${pk}`, () => E.gekisouSupportRate(m, battle, b, v, sn[i], c.scoreId, null));
+      });
+      sum += E.deckPower(m, order, sn, E.musicView(m, c.musicId), ctx) * r;
+    }
+    return sum / selected.length;
+  };
+  // Every placement of the four snaps (each in one slot or left out).
+  const places = [];
+  const place = (k, sn) => {
+    if (k === sv.length) return places.push(sn.slice());
+    place(k + 1, sn);
+    for (let i = 0; i < 5; i++) {
+      if (sn[i]) continue;
+      sn[i] = sv[k];
+      place(k + 1, sn);
+      sn[i] = null;
+    }
+  };
+  place(0, [null, null, null, null, null]);
+  let best = -Infinity;
+  const bestByChart = charts.map(() => -Infinity);
+  const pick = (from, acc) => {
+    if (acc.length === 5) {
+      for (let L = 0; L < 5; L++) {
+        const order = acc.slice();
+        [order[L], order[2]] = [order[2], order[L]];
+        for (const sn of places) {
+          best = Math.max(best, valueOf(order, sn, charts));
+          charts.forEach((c, i) => { bestByChart[i] = Math.max(bestByChart[i], valueOf(order, sn, [c])); });
+        }
+      }
+      return;
+    }
+    for (let i = from; i < mv.length; i++) if (!acc.some((v) => v.characterId === mv[i].characterId)) pick(i + 1, acc.concat([mv[i]]));
+  };
+  pick(0, []);
+  const individual = E.search({ ...base, multi: { ...multi, pickSong: true } });
+  assert.strictEqual(individual.songs.length, charts.length);
+  for (const d of individual.songs) {
+    const i = charts.findIndex((c) => c.scoreId === d.chart.scoreId);
+    assert.ok(Math.abs(d.score - bestByChart[i]) < 1e-9 * bestByChart[i], `Just windows ${d.chart.scoreId}: ${d.score} vs ${bestByChart[i]}`);
+  }
+  const won = individual.songs.filter((d) => d.justWindows);
+  assert.ok(won.length, "a best deck plays Just windows");
+  const out = E.search(base);
+  const top = out.results[0];
+  console.log(`Just windows: per song ${individual.songs.map((d) => `${Math.round(d.score)} (${d.snaps.map((s) => s && s.id).join(",")}, Just ${(100 * (d.justRate || j0)).toFixed(1)}%)`).join(", ")};`,
+    `random song best mean ${Math.round(top.score)} (brute force ${Math.round(best)})`);
+  assert.ok(Math.abs(top.score - best) < 1e-9 * best, `Just windows, random song: ${top.score} vs ${best}`);
+}
+
 (async () => {
   const session = await loadReplay();
   if (!session) {
@@ -477,6 +576,57 @@ if (!process.argv.includes("--replay-only")) {
     assert.ok(entry.b.get("6:1")[0] > 0.3 && entry.s[0] >= entry.b.get("6:1")[0]);
     assert.ok(Math.abs(d.estScore / sim.mean - 1) < 0.03);
     assert.ok(without.estScore / sim.mean < 0.95);
+  }
+
+  // Just windows: the estimate at the deck's Just profile (battleRates with it: the chart, the members' skills and the
+  // snaps' Gekisou support skills) against the simulation judging Just at the widened rate (justBoost), at Just rate 5%,
+  // with per-Just stacking snaps (they gain the most) and without; snap skills left out (the estimate has none here).
+  {
+    const ownedOf = (id) => {
+      const c = m.memberCards.get(id);
+      const L = E.memberLimits(m, c);
+      return { id, level: L.limit(L.maxAwake), awake: L.maxAwake, rank: 1, skillLevel: m.liveSkillMaxLevel.get(c._liveSkillID) || 1, gekisouSkillLevel: 5 };
+    };
+    const owned = [6, 32, 58, 59, 60].map(ownedOf);
+    const views = owned.map((o) => E.memberView(m, o, roster.player));
+    const snapOf = ([id, rank]) => (id ? { id, level: E.snapLimit(m, m.snaps.get(id), rank), rank } : null);
+    const decks = [
+      [[21, 5], [56, 5], [64, 5], [7, 5], [62, 5]],
+      [[64, 5], [56, 5], [10, 5], [54, 1], [62, 5]],
+      [[64, 5], [63, 1], [0], [0], [0]],
+    ].map((d) => d.map(snapOf));
+    const j0 = 0.05;
+    const bt0 = E.battleRates(battle, 3, j0);
+    const songs = [md.songs.find((s) => s.gekisouMissions.join("") === "333"), md.songs.find((s) => s.gekisouMissions.includes(3) && s.gekisouMissions.join("") !== "333")];
+    const lines = [];
+    for (const song of songs) {
+      const sid = song.charts.find((c) => c.difficulty === "expert").scoreId;
+      const g = gk(sid, 3, j0, [battle.byScore.get(sid).seeds[0].seed]);
+      for (const snaps of decks) {
+        const sv = snaps.map((o) => (o ? E.snapView(m, o) : null));
+        const prof = E.deckJustProfile(m, views, sv);
+        assert.ok(prof, "the deck has Just windows");
+        const est = (b) => {
+          let r = b.perPower.get(sid) + E.liveSkillRate(m, views, sid, { kinds: battle.kinds, byScore: b.weights });
+          views.forEach((v, i) => {
+            r += E.gekisouSkillRate(m, battle, b, v, sid, null);
+            if (sv[i]) r += E.gekisouSupportRate(m, battle, b, v, sv[i], sid, null);
+          });
+          return r * battle.power;
+        };
+        const perf = S.performers(m, owned.map((o) => ({ id: o.id, skillLevel: o.skillLevel, gekisouSkillLevel: 5 })), snaps)
+          .map((p) => ({ ...p, supportSkills: [] }));
+        const sim0 = S.orderScores(session, sid, battle.power, perf, g).mean;
+        const simW = S.orderScores(session, sid, battle.power, perf, { ...g, justBoost: E.justTimeline(prof, j0) }).mean;
+        const e0 = est(bt0);
+        const eW = est(E.battleRates(battle, 3, j0, prof));
+        lines.push(`${sid} ${prof.key}: estimate +${((eW / e0 - 1) * 100).toFixed(1)}%, simulated +${((simW / sim0 - 1) * 100).toFixed(1)}%, estimate/simulated ${(eW / simW).toFixed(3)}`);
+        assert.ok(simW > sim0 * 1.01, "windows raise the simulated score");
+        assert.ok(Math.abs(eW / simW - 1) < 0.03, `Just windows ${sid} ${prof.key}: estimate ${eW} vs simulated ${simW}`);
+        assert.ok(Math.abs(eW / e0 - simW / sim0) < 0.02, `Just windows' gain ${sid} ${prof.key}`);
+      }
+    }
+    console.log(`Just windows at Just rate 5%: ${lines.join("; ")}`);
   }
 
   // 「愛素 LUCK 隊」: on an all-LUCK chart with every card owned, the score objective pairs LUCKY RUSH 分數UP snaps with
