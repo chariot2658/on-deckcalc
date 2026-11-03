@@ -660,7 +660,8 @@
    * weights (score per unit of power and of factor of each kind at each position, Just play) and their parts in each
    * range's score (on the first spec.kindSeeds seeds, their mean in every entry: on 4 seeds within 0.4% of 64); the
    * seed means of each Gekisou skill shape's and support shape's increments (tail: outside the ranges); per
-   * range the Just play's Just count and notes. Without a Just-count range the Perfect play is the Just play.
+   * range the Just play's Just count and notes, and the ranges' [start, end] ms. Without a Just-count range the
+   * Perfect play is the Just play.
    * `progress(runs)`.
    */
   function measureBattleChart(session, scoreId, spec, progress) {
@@ -760,6 +761,8 @@
       apt: mean(apt),
       aptSupport: mean(aptSupport),
       justRanges,
+      // The ranges' times, which Engine.battleRates needs to play a deck's Just windows (music-data's startMs/endMs).
+      spans: JSON.parse(session.describeChart(scoreId)).fevers.map(([s, e]) => [s, e]),
     };
   }
 
