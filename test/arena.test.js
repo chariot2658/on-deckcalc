@@ -115,6 +115,8 @@ console.log("arena input: ok");
     const luck = missions.includes(2);
     const spec = S.battleSpec(m, battle, missions, { percents: E.rankBonusPercents(m, missions), probes, seeds: luck ? S.luckSeeds([], 8) : [0], kindSeeds: 4 });
     const got = S.measureBattleChart(session, sid, spec);
+    // The ranges' times, without which battleRates plays no Just windows.
+    assert.deepStrictEqual(got.spans, battle.byScore.get(sid).spans);
     const rG = E.battleRates({ ...battle, byScore: new Map([[sid, got]]) }, [1, 2, 3, 4, 5], 0.5);
     const rR = E.battleRates({ ...battle, byScore: new Map([[sid, battle.byScore.get(sid)]]) }, [1, 2, 3, 4, 5], 0.5);
     const errs = { perPower: rel(rG.perPower.get(sid), rR.perPower.get(sid)), weights: 0, apt: 0, support: 0 };
