@@ -297,13 +297,15 @@ async function search(msg) {
     if (rerank && out.results.length) {
       const cx = gekisouCtx(input);
       const s = await cx.session();
-      for (const d of out.results) {
+      const simOf = (d) => {
         const members = d.members.map((v) => ({ id: v.id, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel }));
         const gekisou = { ...out.gekisou, justBoost: Engine.deckJustBoost(d, out.gekisou.justRate) };
         d.sim = simulateDeck(s, d.chart.scoreId, d.displayPower, members, d.snaps.map((x) => (x ? { id: x.id, rank: x.rank } : null)), gekisou, cx.battle);
-      }
+      };
+      out.results.forEach(simOf);
       const mean = (d) => (d.sim ? d.sim.mean * d.accuracy : d.estScore);
       out.results.sort((a, b) => mean(b) - mean(a));
+      out.stats = { ...out.stats, alt: altAssignments(input, out.results, simOf, mean) };
       out.results.length = Math.min(out.results.length, input.topK || 5);
     }
     const results = out.results.map(slim);
@@ -319,6 +321,50 @@ async function search(msg) {
 
 // Decks simulated whole to rank a multiplayer score search (Gekisou on).
 const GEKISOU_POOL = 15;
+// The pool holds one snap assignment per member set, the best by the estimate, which leaves out how snaps interact with
+// each other and with the members (2026-10-31, against ournotes-team-builder's exact search: both misses kept the top
+// member set and differed in one snap). So the ALT_SETS best simulated sets are searched alone without each of their
+// snaps in turn, and those decks simulated too; a deck that becomes one of the best is expanded the same way, at most
+// ALT_ROUNDS times.
+const ALT_SETS = 3;
+const ALT_ROUNDS = 3;
+// Alternatives estimated this far below their deck are not simulated: on the user's roster (2026-11-03, 24 cases) none
+// further below came within 0.8% of it in the simulation, and the ones that won were within 0.2%.
+const ALT_MARGIN = 0.99;
+
+// Adds the alternative snap assignments (above) to `results` (simulated, sorted by `mean`, best first); simOf(d)
+// simulates a deck. Returns {searches, decks} for the stats.
+function altAssignments(input, results, simOf, mean) {
+  // A deck is its chart, leader (slot 2) and member/snap pairs: the other slots' order changes nothing.
+  const keyOf = (d) => d.chart.scoreId + "|" + d.members[2].id + "|" + d.members.map((v, i) => v.id + ":" + (d.snaps[i] ? d.snaps[i].id : 0)).sort().join(",");
+  const seen = new Set(results.map(keyOf));
+  const expanded = new Set();
+  const stats = { searches: 0, decks: 0 };
+  for (let round = 0; round < ALT_ROUNDS; round++) {
+    const todo = results.slice(0, ALT_SETS).filter((d) => !expanded.has(keyOf(d)));
+    if (!todo.length) break;
+    for (const d of todo) {
+      expanded.add(keyOf(d));
+      const ids = new Set(d.members.map((v) => v.id));
+      const members = input.members.filter((o) => ids.has(o.id));
+      for (const x of d.snaps) {
+        if (!x) continue;
+        const out = Engine.search({
+          ...input, members, snaps: input.snaps.filter((o) => o.id !== x.id), musicIds: [d.chart.musicId], topK: 1, compareSongs: false, songTopK: 1,
+        });
+        stats.searches++;
+        const alt = out.results[0];
+        if (!alt || seen.has(keyOf(alt)) || alt.estScore < d.estScore * ALT_MARGIN) continue;
+        seen.add(keyOf(alt));
+        simOf(alt);
+        stats.decks++;
+        results.push(alt);
+      }
+    }
+    results.sort((a, b) => mean(b) - mean(a));
+  }
+  return stats;
+}
 const gekisouOn = (input) => {
   const b = gekisouCtx(input).battle;
   return !!(input.mode === "normal" && input.multi && input.multi.players >= 1 && b && b.power);
