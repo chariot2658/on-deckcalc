@@ -609,6 +609,51 @@
   }
 
   /**
+   * A ReplaySession on deck data `deckText` (patched by patchDeck when `patch` is given) whose `run` plays skills the
+   * deck data has no effect rows for as none. The deck data is built with music-data, so after a masterdata update it
+   * can lag behind the master tables performers() reads (2026-11-02: member 75's Gekisou skill 24), and the replay
+   * rejects a whole request for one such skill ("unknown skill id/level"). Engine.skillGaps lists those skills as
+   * unmeasured (scored 0) and the UI says so, so the simulation leaves them out too instead of failing the deck.
+   */
+  function openSession(mod, deckText, patch) {
+    const text = patch ? patchDeck(deckText, patch) : deckText;
+    const session = new mod.ReplaySession(text);
+    const t = JSON.parse(text).master;
+    const keys = (name, col) => {
+      const tb = t[name];
+      const [i, l] = [tb.columns.indexOf(col), tb.columns.indexOf("_level")];
+      return new Set(tb.rows.map((r) => r[i] + ":" + r[l]));
+    };
+    const known = {
+      live: keys("MasterLiveSkillEffect", "_liveSkillID"),
+      support: keys("MasterSupportSkillEffect", "_supportSkillID"),
+      gekisou: keys("MasterGekisouSkillEffect", "_gekisouSkillID"),
+      gekisouSupport: keys("MasterGekisouSupportSkillEffect", "_gekisouSupportSkillID"),
+    };
+    const has = (set, s) => set.has(s[0] + ":" + s[1]);
+    const strip = (p) => ({
+      ...p,
+      liveSkill: p.liveSkill && has(known.live, p.liveSkill) ? p.liveSkill : null,
+      supportSkills: (p.supportSkills || []).filter((s) => has(known.support, s)),
+      gekisouSkill: p.gekisouSkill && has(known.gekisou, p.gekisouSkill) ? p.gekisouSkill : null,
+      gekisouSupportSkills: (p.gekisouSupportSkills || []).filter((s) => has(known.gekisouSupport, s)),
+    });
+    const run = session.run.bind(session);
+    // Requests are only parsed again when the replay rejects one, so the usual path costs nothing.
+    session.run = (request) => {
+      try {
+        return run(request);
+      } catch (e) {
+        if (!/unknown skill/.test(String((e && e.message) || e))) throw e;
+        const r = JSON.parse(request);
+        r.performers = r.performers.map(strip);
+        return run(JSON.stringify(r));
+      }
+    };
+    return session;
+  }
+
+  /**
    * What measureBattleChart plays on a chart whose ranges are all `missions` (plain data, so helpers need no master):
    * {power, seeds, kindSeeds (how many of the seeds measure the live skill weights), percents, missions, justTypes,
    * kinds: number of music-data kinds, probes (Engine.kindProbes, live skills patchDeck adds), members: [{shape, perf}]
@@ -796,7 +841,7 @@
     try {
       const mod = await import(url);
       mod.initSync({ module: wasm });
-      return new mod.ReplaySession(patch ? patchDeck(deck, patch) : deck);
+      return openSession(mod, deck, patch);
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -805,7 +850,7 @@
   const api = {
     ORDERS, performers, gekisouRequest, gekisouPlay, scoreOf, orderScores, chartRunner, meanScore, sampleScores, snapSkillRates, snapSkillJobs, measureSnapJobs,
     gekisouLevelFactors, gekisouSupportLevelFactors,
-    comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay, patchDeck, battleSpec, measureBattleChart,
+    comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay, patchDeck, openSession, battleSpec, measureBattleChart,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Simulate = api;

@@ -1797,8 +1797,8 @@
    * input: {master, event, mode: "normal"|"challenge", members: [owned], snaps: [owned], player, perPowerByScore,
    *         skillWeights (skillWeightsFromMusicData: adds the members' expected live skill score),
    *         snapSkill ({byScore: scoreId -> Map(snapSkillKey -> score per unit of power)}, Simulate.snapSkillRates: the
-   *         score objective adds the snap skills and plays only the charts measured; otherwise snap skills are left to
-   *         the simulation), maxLevel, difficulties, accuracy ({perfectRate, breaks}: see playShares; null plays all Perfect; with
+   *         score objective adds the snap skills and plays only the charts measured; points and items take them in place
+   *         of roughSnapRate's estimate, also playing only the charts measured), maxLevel, difficulties, accuracy ({perfectRate, breaks}: see playShares; null plays all Perfect; with
    *         combo breaks the score varies, and decks are ranked by their expected payoff over the ranks they may reach),
    *         boosts, objective: "points"|"items"|"score", topK, musicIds, fixed: {memberIds, excludeMemberIds},
    *         cpValue: event points one challenge point is worth (normal lives; 0 ignores the CP they earn),
@@ -1876,18 +1876,22 @@
     // unit of power)}. Only the measured charts are played.
     const snapSkill = scoreMode && input.snapSkill ? input.snapSkill : null;
     // Snaps' Gekisou support skills (a live with Gekisou): music-data's measured gain of each pairing on each chart
-    // (gekisouSupportTerms). Points have no measured snap skill rates: their snap skills are roughSnapRate's estimate
-    // (`roughSnaps`, off with input.roughSnapSkills false). With any of them, a snap adds score depending on its member
-    // and the chart (`pairX`; `pairPts` in points).
+    // (gekisouSupportTerms). Points' snap skills are roughSnapRate's estimate (`roughSnaps`, off with
+    // input.roughSnapSkills false), or with input.snapSkill the measured rates in its place (`measuredPts`: the worker
+    // measures a challenge live's charts, where the estimate ran 1.37× the replay on 怪物 EXPERT and showed an S deck as
+    // SS, 2026-11-07). With any of them, a snap adds score depending on its member and the chart (`pairX`; `pairPts` in
+    // points).
     const gkSup = !!(bt && battle.supportShapes && battle.supportShapes.size);
-    const roughSnaps = !scoreMode && !!sw && input.roughSnapSkills !== false;
+    const measuredPts = !scoreMode && input.snapSkill ? input.snapSkill : null;
+    const roughSnaps = !scoreMode && (!!measuredPts || (!!sw && input.roughSnapSkills !== false));
     const pairPts = !scoreMode && (gkSup || roughSnaps);
     const pairX = !!snapSkill || gkSup || roughSnaps;
     // The score objective plays one chart per group with pair rates; without measured snap skill rates, the charts
     // scoreScope would measure (a random song: one chart per song).
     const scope = scoreMode && gkSup && !snapSkill
       ? new Set(scoreScope(input, input.chartCandidateMargin ?? (randomSong ? 0 : undefined)).scoreIds) : null;
-    const chartList = snapSkill ? playable.filter((c) => snapSkill.byScore.has(c.scoreId)) : scope ? playable.filter((c) => scope.has(c.scoreId)) : playable;
+    const measured = snapSkill || measuredPts;
+    const chartList = measured ? playable.filter((c) => measured.byScore.has(c.scoreId)) : scope ? playable.filter((c) => scope.has(c.scoreId)) : playable;
     if (chartList.length === 0) return { error: "no-charts", results: [] };
 
     // Charts grouped by the song features that change deck power; with pair rates in the score objective, which
@@ -2173,12 +2177,17 @@
       return a;
     };
     // Rough snap skill gain (roughSnapRate) of snap j beside member v on each chart of chartList, or null; members of
-    // one live skill and level that get the same extension and score-up ramp rows share it.
+    // one live skill and level that get the same extension and score-up ramp rows share it. With measuredPts, the
+    // measured rate of the pairing's snapSkillKey instead.
     const roughKeys = new Map(); // member view -> cache key per snap
     const roughCache = new Map();
     const roughOf = (v, j) => {
       if (!roughSnaps) return null;
       if (!roughKeys.has(v)) roughKeys.set(v, snaps.map((s) => {
+        if (measuredPts) {
+          const k = snapSkillKey(m, v, s);
+          return k ? "=" + k : null;
+        }
         const ext = v.liveSkillId ? snapExtension(m, v, s) : 0;
         const ramps = v.liveSkillId ? snapRamps(m, v, s).map((e) => e._id).join(",") : "";
         return ext || ramps ? v.liveSkillId + ":" + v.liveSkillLevel + "|" + ext + "|" + ramps : null;
@@ -2186,7 +2195,9 @@
       const key = roughKeys.get(v)[j];
       if (!key) return null;
       if (!roughCache.has(key)) {
-        const a = Float64Array.from(chartList, (c) => roughSnapRate(m, [v], [snaps[j]], c.scoreId, sw));
+        const a = measuredPts
+          ? Float64Array.from(chartList, (c) => measuredPts.byScore.get(c.scoreId).get(key.slice(1)) || 0)
+          : Float64Array.from(chartList, (c) => roughSnapRate(m, [v], [snaps[j]], c.scoreId, sw));
         roughCache.set(key, a.some((x) => x !== 0) ? a : null);
       }
       return roughCache.get(key);
@@ -3172,7 +3183,7 @@
       if (best.x) deck.snapScore = Math.floor(best.power * Math.max(0, best.x - sup - dj) * deck.accuracy);
       if (roughSnaps) {
         deck.snapScore = Math.floor(best.power * deckSupport(order, snapObjs, best.chart, roughOf) * deck.accuracy);
-        deck.snapRough = true;
+        deck.snapRough = !measuredPts;
       }
       if (gkSup) deck.gekisouSupportScore = Math.floor(best.power * sup * deck.accuracy);
       if (bt) {
@@ -4297,7 +4308,7 @@
         if (gkSup) deck.gekisouSupportScore = Math.round(mean((d) => d.gekisouSupportScore));
         if (roughSnaps) {
           deck.snapScore = Math.round(mean((d) => d.snapScore || 0));
-          deck.snapRough = true;
+          deck.snapRough = !measuredPts;
         }
         justSummary(deck, perSong, best.st.prof);
         perSong.sort((a, b) => b.score - a.score || b.power - a.power);

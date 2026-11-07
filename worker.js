@@ -280,7 +280,10 @@ async function search(msg) {
     let input = await engineInput(msg);
     let approx = [];
     let snapError = null;
-    if (input.objective === "score") {
+    // Points and items in a challenge live (its few songs) also take measured snap skill rates, in place of
+    // roughSnapRate's estimate: the rank decides the payoff and decks sit within 1–3% of SS, where the estimate's error
+    // (1.37× the replay on 怪物 EXPERT, 2026-11-07) showed an S deck as SS. Without them the search keeps the estimate.
+    if (input.objective === "score" || input.mode === "challenge") {
       try {
         ({ input, approx } = await scoreInput(input, msg.id, randomRoom(input)));
       } catch (err) {

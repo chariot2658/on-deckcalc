@@ -14,5 +14,5 @@ module.exports = async function loadReplay(dir = path.join(__dirname, "..", ".."
   const mod = await import(pathToFileURL(js).href);
   mod.initSync({ module: fs.readFileSync(wasm) });
   const text = fs.readFileSync(deck, "utf8");
-  return new mod.ReplaySession(patch ? require("../simulate.js").patchDeck(text, patch) : text);
+  return require("../simulate.js").openSession(mod, text, patch);
 };
