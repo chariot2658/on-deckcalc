@@ -1790,6 +1790,45 @@
   }
 
   /**
+   * What Simulate.comboRankChart measures before a public-room search (multi.auto; input as for search) to rank its
+   * COMBO ranges by mission pt: every allowed chart with a COMBO range, the owned members' COMBO count-up skills
+   * (comboCountOf keys), and `pool`, every card an opponent may play ([{id, character, key}] at its top Gekisou level:
+   * every member card of the master, an arena league's band only), with comboScope's support and idle skills that
+   * Simulate.comboContext takes. null when there is nothing to rank.
+   */
+  function comboRankScope(input) {
+    const m = input.master;
+    const { multi, bt, battle, chartList } = liveSetup(input);
+    if (!bt || !multi || !multi.auto) return null;
+    const scoreIds = chartList.filter((c) => {
+      const b = battle.byScore.get(c.scoreId);
+      return b && (b.missions || []).includes(1);
+    }).map((c) => c.scoreId);
+    if (!scoreIds.length) return null;
+    const support = [...m.gekisouSupportSkills.keys()].find((id) => gekisouSupportKind(m, id) === "combo");
+    const idle = m.t.MasterGekisouSkill.find((g) => {
+      const rows = m.gekisouSkillEffects.get(g._id + ":1") || [];
+      return rows.length > 0 && rows.every((e) => e._skillEffectType === 13000);
+    });
+    if (!support || !idle) return null;
+    const band = input.arena ? input.arena.bandId : 0;
+    const pool = [];
+    for (const c of m.memberCards.values()) {
+      const ch = m.characters.get(c._characterID);
+      if (band && (!ch || ch._bandID !== band)) continue;
+      const id = c._gekisouSkillID;
+      const key = id ? comboCountOf(m, id, m.gekisouSkillMaxLevel.get(id) || 1) : null;
+      if (key) pool.push({ id: c._id, character: c._characterID, key });
+    }
+    const keys = new Set();
+    for (const o of input.members) {
+      const v = memberView(m, o, input.player || {});
+      if (v && v.comboCount) keys.add(v.comboCount);
+    }
+    return { scoreIds, pool, keys: [...keys].sort(), support, idle: idle._id, players: Math.min(5, Math.max(1, multi.players || 1)) };
+  }
+
+  /**
    * Finds the best decks for one event mode, or with objective "score" the decks of the highest expected score: no
    * event points, items or CP (boosts, cpValue and perMinute are ignored); a challenge live keeps the event's parameter
    * bonus and plays its challenge songs; a normal live needs no `event` (null); a multiplayer live scores with Gekisou
@@ -1913,6 +1952,164 @@
     // rates paired with it (per snap, aligned with `snaps`): snap skills and Gekisou support skills.
     const skillRateOf = (v, c) => liveRateOf(v, c.scoreId);
     const chartIdx = new Map(chartList.map((c, i) => [c, i]));
+    // Range ranks by mission pt (input.comboRank: per chart comboRankChart's {tl, ranges: [{i, lo, hi}]}; a public room's
+    // unknown others, multi.auto; the score objective). A COMBO range ranks the room by mission pt, the player's Gekisou
+    // combo there (comboRangeCounts), which only the members' COMBO count-up skills raise; the others' pt is taken
+    // uniform between no such skill (lo) and the strongest deck of every card (hi), each other player independently. A
+    // member set's expected bonus percent of each COMBO range (expectedPercent) then replaces the mean over the room's
+    // ranks the rates were built at (bt). Every rate is linear in a range's percent, so the deck's score moves by
+    // (pi - pibar) / 100 of its range score, the range's share of the chart's no-skill play and of the members' skills (a
+    // Gekisou skill's measured range parts, a live skill's as the chart's notes'; the pairs' as the members'): per chart
+    // a factor K on the deck's score (`at(vs, ci)`), at most `cap[ci]` (every COMBO range at rank 1). Decks carry
+    // `comboRank` (per COMBO range its pt, the chance of each rank and the percent) and `comboRankScore`.
+    const mrank = (() => {
+      const cr = scoreMode && (randomSong || pairX) && bt && multi.auto && input.comboRank && input.comboRank.byScore ? input.comboRank : null;
+      if (!cr) return null;
+      const n = Math.min(5, Math.max(1, multi.players || 1));
+      const ranks = gekisouRanks(multi);
+      const P = battle.power;
+      const j = bt.justRate;
+      const charts = chartList.map((c) => {
+        const e = cr.byScore.get(c.scoreId);
+        const b = battle.byScore.get(c.scoreId);
+        if (!e || !b || !e.ranges.length) return null;
+        const pbar = b.percents.map((row) => ranks.reduce((a, x) => a + row[x - 1], 0) / ranks.length);
+        // The no-skill range scores per unit of power, without the bonus.
+        const r0 = [0, 0, 0];
+        for (const sd of b.seeds) sd.ranges.forEach(([x, xP], i) => (r0[i] += (xP + j * (x - xP)) / P / b.seeds.length));
+        return { e, pbar, r0, rows: b.percents };
+      });
+      if (!charts.some(Boolean)) return null;
+      const keysOf = (vs) => vs.map((v) => v.comboCount).filter(Boolean).sort();
+      // Per COMBO count-up key list: per chart its COMBO ranges' combo and the change of their expected percents.
+      const byKeys = new Map();
+      const countsOf = (vs) => {
+        const keys = keysOf(vs);
+        const key = keys.join(",");
+        if (!byKeys.has(key)) {
+          byKeys.set(key, charts.map((x) => {
+            if (!x) return null;
+            const cnt = comboRangeCounts(x.e.tl, keys);
+            return x.e.ranges.map((r, t) => {
+              const q = aboveChance(cnt[t], r.lo, r.hi);
+              return { i: r.i, count: cnt[t], q, d: expectedPercent(x.rows[r.i], n, q) - x.pbar[r.i] };
+            });
+          }));
+        }
+        return byKeys.get(key);
+      };
+      // A member's range parts on each chart (index 4 ci + range) without the bonus, and its whole skill (4 ci + 3).
+      const parts = new Map();
+      const partsOf = (v) => {
+        if (!parts.has(v)) {
+          const a = new Float64Array(chartList.length * 4);
+          charts.forEach((x, k) => {
+            if (!x) return;
+            const c = chartList[k];
+            const all = liveRateOf(v, c.scoreId);
+            const gk = gekisouSkillRate(m, battle, bt, v, c.scoreId, input.gekisouLevels);
+            for (let i = 0; i < 3; i++) a[k * 4 + i] = c.perPower > 0 ? ((all - gk) * x.r0[i]) / c.perPower : 0;
+            if (gk > 0) {
+              const top = m.gekisouSkillMaxLevel.get(v.gekisouSkillId) || 1;
+              const g = bt.apt.get(c.scoreId).get(battle.shapes.get(v.gekisouSkillId + ":" + top));
+              // gekisouSkillRate's level factor: gk over the top level's whole increment.
+              const whole = g.tail + g.ranges.reduce((s, y) => s + y, 0);
+              const f = whole > 0 ? gk / whole : 0;
+              for (let i = 0; i < 3; i++) a[k * 4 + i] += (f * g.ranges[i]) / (1 + x.pbar[i] / 100);
+            }
+            a[k * 4 + 3] = all;
+          });
+          parts.set(v, a);
+        }
+        return parts.get(v);
+      };
+      const at = (vs, k) => {
+        const x = charts[k];
+        if (!x) return 1;
+        const cs = countsOf(vs)[k];
+        const ps = vs.map(partsOf);
+        let num = 0;
+        let den = chartList[k].perPower;
+        for (const a of ps) den += a[k * 4 + 3];
+        for (const { i, d } of cs) {
+          if (!d) continue;
+          let r = x.r0[i];
+          for (const a of ps) r += a[k * 4 + i];
+          num += (d / 100) * r;
+        }
+        return den > 0 ? Math.max(0, 1 + num / den) : 1;
+      };
+      // K's bound on each chart: the ranges' raw scores times (1 + pibar / 100) add up to at most the deck's score, so
+      // K - 1 is at most the largest (pi - pibar) / (100 + pibar) of a COMBO range, pi at the most combo any five owned
+      // members of different characters reach there (combos only grow with more count-up rows; every feasible multiset
+      // of the owned keys, at most 462).
+      const owned = new Map(); // key -> Set of characters
+      for (const v of members) {
+        if (!v.comboCount) continue;
+        if (!owned.has(v.comboCount)) owned.set(v.comboCount, new Set());
+        owned.get(v.comboCount).add(v.characterId);
+      }
+      const ks = [...owned.keys()].sort();
+      const feasible = (pick) => {
+        const used = new Set();
+        const go = (t) => {
+          if (t === pick.length) return true;
+          for (const ch of owned.get(pick[t])) {
+            if (used.has(ch)) continue;
+            used.add(ch);
+            if (go(t + 1)) return true;
+            used.delete(ch);
+          }
+          return false;
+        };
+        return go(0);
+      };
+      const best = charts.map((x) => (x ? x.e.ranges.map(() => -Infinity) : null));
+      const visitPick = (pick) => {
+        countsOf(pick.map((k) => ({ comboCount: k }))).forEach((cs, k) => {
+          if (cs) cs.forEach((r, t) => (best[k][t] = Math.max(best[k][t], r.count)));
+        });
+      };
+      const multisets = (from, pick) => {
+        if (pick.length && !feasible(pick)) return;
+        if (pick.length < 5) for (let a = from; a < ks.length; a++) multisets(a, pick.concat([ks[a]]));
+        visitPick(pick);
+      };
+      multisets(0, []);
+      const cap = Float64Array.from(charts, (x, k) => {
+        if (!x) return 1;
+        let c = 1;
+        x.e.ranges.forEach((r, t) => {
+          const q = aboveChance(best[k][t], r.lo, r.hi);
+          c = Math.max(c, 1 + Math.max(0, expectedPercent(x.rows[r.i], n, q) - x.pbar[r.i]) / (100 + x.pbar[r.i]));
+        });
+        return c;
+      });
+      // A deck's COMBO ranges on chart k.
+      const describe = (vs, k) => {
+        const x = charts[k];
+        if (!x) return null;
+        return countsOf(vs)[k].map(({ i, count, q }) => ({
+          range: i, pt: count + MISSION_PT_OFFSET, lo: x.e.ranges.find((r) => r.i === i).lo + MISSION_PT_OFFSET,
+          hi: x.e.ranges.find((r) => r.i === i).hi + MISSION_PT_OFFSET, above: q, chances: Array.from(rankChances(n, q)),
+          percent: expectedPercent(x.rows[i], n, q), meanPercent: x.pbar[i],
+        }));
+      };
+      // A score-objective deck (deckOf) on chart c with members `order`: its score times K.
+      const apply = (deck, order, c) => {
+        const k = chartIdx.get(c);
+        if (!charts[k]) return;
+        const K = at(order, k);
+        deck.comboRank = describe(order, k);
+        deck.comboRankFactor = K;
+        // What the simulation takes (Simulate.gekisouPlay's `rank`).
+        deck.rankModel = { players: n, ranges: charts[k].e.ranges.map(({ i, lo, hi }) => ({ i, lo, hi })) };
+        deck.comboRankScore = Math.floor(deck.estScore * (K - 1));
+        deck.estScore = Math.floor(deck.estScore * K);
+        deck.score *= K;
+      };
+      return { at, cap, apply };
+    })();
     // Just windows (justWindowsOf): a snap of effect 4004 beside a member with a Gekisou skill raises the deck's Just rate
     // in the JUST ranges, so a deck plays everything Gekisou at its Just profile (justProfile, battleRates with it): the
     // chart's rate and its members' skills (`jw.delta`, added to the deck's pair rate) and its pairs (supOf at the
@@ -2116,8 +2313,9 @@
           combo: [0, 1].map((match) => Float64Array.from(comboCharts, (cb) => (cb && members.some((v) => v.comboCount) ? cb.s[match] : 0))),
         }
       : null;
-    // A larger single-skill gain does not prove dominance beside other COMBO skills: gates can open earlier.
-    const comboAsGood = (b, a) => !comboData || !a.comboCount || a.comboCount === b.comboCount;
+    // A larger single-skill gain does not prove dominance beside other COMBO skills: gates can open earlier. Ranked by
+    // mission pt (mrank), a COMBO count-up skill also moves the deck's rank in the COMBO ranges.
+    const comboAsGood = (b, a) => (!comboData && !mrank) || !a.comboCount || a.comboCount === b.comboCount;
     // Gauge gains depend on the chart, not just the LIFE skill's activation chance.
     const gaugeAsGood = (b, a) => {
       const x = boostOf([b])?.rush, y = boostOf([a])?.rush;
@@ -2336,13 +2534,13 @@
       if (b.cardType !== a.cardType || !sameList(b.tags, a.tags) || !sameList(b.liveSkillCategories, a.liveSkillCategories) ||
         !sameList(b.gekisouSkillCategories, a.gekisouSkillCategories) || b.gekisouMissionType !== a.gekisouMissionType) return false;
       if (b.musicTypeRate < a.musicTypeRate || b.musicTagRate < a.musicTagRate || !leaderAsGood(b, a) || !skillAsGood(b, a)) return false;
-      if (gMax && (!gaugeAsGood(b, a) || !comboAsGood(b, a))) return false;
+      if ((gMax && !gaugeAsGood(b, a)) || !comboAsGood(b, a)) return false;
       const ea = ctx.memberBonus.get(a), eb = ctx.memberBonus.get(b);
       const sa = statBase.get(a), sb = statBase.get(b);
       if (eb.point < ea.point || eb.item < ea.item || sb.some((x, i) => x < sa[i])) return false;
       const gt = eb.point > ea.point || eb.item > ea.item || sb.some((x, i) => x > sa[i]) ||
         b.musicTypeRate > a.musicTypeRate || b.musicTagRate > a.musicTagRate || b.leaderSkillLevel > a.leaderSkillLevel ||
-        (!!gMax && (!gaugeAsGood(a, b) || (!!comboData && !!b.comboCount && !a.comboCount)));
+        (!!gMax && !gaugeAsGood(a, b)) || ((!!comboData || !!mrank) && !!b.comboCount && !a.comboCount);
       return gt || !leaderAsGood(a, b) || !skillAsGood(a, b) || b.id < a.id;
     };
     const byChar = new Map();
@@ -2611,9 +2809,9 @@
       for (let s = 0; s < nSets; s++) binOrder[fill[binOf(binPow[s])]++] = s;
       return { start, max, order: binOrder };
     }
-    function walkScore(T, bMax, powBound, ubOf, threshold, visit, refine = null) {
+    function walkScore(T, bMax, powBound, ubOf, threshold, visit, refine = null, kc = 1) {
       const { start, max, order } = bins;
-      const rMax = T.rate.get(T.best);
+      const rMax = T.rate.get(T.best) * kc;
       const sets = new Heap((x, y) => x.key > y.key || (x.key === y.key && x.e < y.e));
       let b = NB - 1;
       for (;;) {
@@ -3191,6 +3389,7 @@
         const g = order.reduce((a, v) => a + gekisouSkillRate(m, battle, bt, v, best.chart.scoreId, input.gekisouLevels), 0);
         deck.gekisouScore = Math.floor(best.power * g * deck.accuracy);
       }
+      if (mrank) mrank.apply(deck, order, best.chart);
       return deck;
     }
 
@@ -3532,6 +3731,7 @@
       const list = [...pickBy.values()].map((x) => x.c);
       const nS = list.length;
       const w = list.map((c) => shares(c).mean);
+      const wBase = w;
       const gKey = new Map();
       const gl = [];
       const gOf = new Int32Array(nS);
@@ -3552,8 +3752,10 @@
         return setSU[s] + f[setV[o]] + f[setV[o + 1]] + f[setV[o + 2]] + f[setV[o + 3]] + f[setV[o + 4]];
       };
       // Cheap bound: sum over groups of W_g * powB(g, s), W_g the group's charts' best rates (weighted by play share).
+      // Ranked by mission pt (mrank): each song's score times the set's K there (kAll), at most its cap.
+      const kAll = mrank ? (vs) => Float64Array.from(list, (c) => mrank.at(vs, chartIdx.get(c))) : null;
       const Wg = new Float64Array(nG);
-      list.forEach((c, k) => (Wg[gOf[k]] += w[k] * (c.perPower + (sk.anySkill ? sk.maxSkill[k] : 0))));
+      list.forEach((c, k) => (Wg[gOf[k]] += w[k] * (mrank ? mrank.cap[chartIdx.get(c)] : 1) * (c.perPower + (sk.anySkill ? sk.maxSkill[k] : 0))));
       const Wtot = Wg.reduce((a, b) => a + b, 0);
       const h = Float64Array.from(allCand, (_, vi) => {
         let x = 0;
@@ -3592,8 +3794,9 @@
         const b = sk.anySkill ? sk.setBound(vs, boostOf(vs), coarse) : null;
         const pg = new Float64Array(nG);
         for (let g = 0; g < nG; g++) pg[g] = powB(g, s);
+        const K = kAll ? kAll(vs) : null;
         let x = 0;
-        for (let k = 0; k < nS; k++) x += w[k] * pg[gOf[k]] * (list[k].perPower + (b ? b[k] : 0));
+        for (let k = 0; k < nS; k++) x += w[k] * (K ? K[k] : 1) * pg[gOf[k]] * (list[k].perPower + (b ? b[k] : 0));
         return x;
       };
       // Pair sums of a snap assignment on each chart (xr[k]: member view -> rates per snap).
@@ -3756,10 +3959,18 @@
         if (x > r.out) r.out = x;
       };
 
+      // refine's bounds play every song at the set's largest K (all their terms are at least 0).
+      const kMaxOf = (s) => (kAll ? Math.max(...kAll(setVs(s))) : 1);
+
       function exact(s) {
         evaluated++;
         const o = s * 5;
         const vs = setVs(s);
+        // Ranked by mission pt, each song's weight times the set's K there.
+        const w = kAll ? (() => {
+          const K = kAll(vs);
+          return Float64Array.from(wBase, (x, k) => x * K[k]);
+        })() : wBase;
         const skill = sk.anySkill ? sk.setSkill(vs) : null;
         const leads = [];
         for (let L = 0; L < 5; L++) {
@@ -3879,9 +4090,9 @@
           continue;
         }
         if (!x.refined) {
-          const r = x.r || refineStart(x.s);
-          if (r.n) refineStep(x.s, r, threshold());
-          const key = Math.min(x.key, refineKey(r));
+          const r = x.r || Object.assign(refineStart(x.s), { k: kMaxOf(x.s) });
+          if (r.n) refineStep(x.s, r, threshold() / r.k);
+          const key = Math.min(x.key, refineKey(r) * r.k);
           if (key >= threshold()) heap.push({ key, s: x.s, e: x.e, r, refined: r.i >= r.n });
           continue;
         }
@@ -3934,6 +4145,7 @@
         };
         if (bt) deck.gekisouScore = Math.round(mean((d) => d.gekisouScore));
         if (gkSup) deck.gekisouSupportScore = Math.round(mean((d) => d.gekisouSupportScore));
+        if (mrank && perSong.some((d) => d.comboRank)) deck.comboRankScore = Math.round(mean((d) => d.comboRankScore));
         justSummary(deck, perSong, best.st.prof);
         perSong.sort((a, b2) => b2.score - a.score || b2.power - a.power);
         return { deck, perSong: perSong.map(withChartCandidates) };
@@ -4471,6 +4683,10 @@
             return Xm && !wk ? Math.min(bound, shares(gc[0]).mean * productBound(so, bf, gc[0].perPower + (sk ? sk[0] : 0), profile)) : bound;
           }
         : (s, T) => upperBound(setOf(s), bestF(s), T);
+      // Ranked by mission pt (mrank): a set's score on the group's chart (one per group) times its K.
+      const kci = mrank ? chartIdx.get(gc[0]) : -1;
+      const kOf = mrank ? (s) => mrank.at(setOf(s).vs, kci) : null;
+      const ubK = kOf ? (s, T) => ubOf(s, T) * kOf(s) : ubOf;
       const walk = scoreMode ? walkScore : bestFirst;
       // With pair rates (one chart per group), ubOf gives every member its best pairing; `refine` gives each snap to one
       // slot: a deck of power F + P scores share (F + P) (c + x), at most share (F c + the best assignment of
@@ -4563,22 +4779,33 @@
             return { start, step, key, done: (r) => r.i >= r.cand.length };
           })()
         : null;
+      const refineK = refine && kOf
+        ? {
+            start: (s) => Object.assign(refine.start(s), { k: kOf(s) }),
+            step: (s, r, th) => refine.step(s, r, th / r.k),
+            key: (r) => refine.key(r) * r.k,
+            done: refine.done,
+          }
+        : refine;
+      const kc = kOf ? mrank.cap[kci] : 1;
+      // evaluate's floor before K.
+      const floorOf = (s, x) => (kOf && x > -Infinity ? x / kOf(s) : x);
 
       const groupFound = [];
       let kth = -Infinity;
       // walkScore visits a set only when its own bound (ubOf) reaches the threshold.
-      walk(rt, bMax, powBound, ubOf, () => (groupFound.length >= searchK ? kth : -Infinity), (s) => {
+      walk(rt, bMax, powBound, ubK, () => (groupFound.length >= searchK ? kth : -Infinity), (s) => {
         const so = setOf(s);
         const bf = bestF(s);
         const t = anySkill || stochastic ? tables(so.vs) : { bound: rt, mean: null };
         if (!scoreMode && groupFound.length >= searchK && !canEnter(so, bf, t.bound, gc, boundSkill(so.vs), groupFound[searchK - 1])) return;
-        const d = evaluate(so, bf, t.mean || t.bound, music, Xm, t.px, groupFound.length >= searchK ? kth - Math.abs(kth) * 1e-9 : -Infinity);
+        const d = evaluate(so, bf, t.mean || t.bound, music, Xm, t.px, floorOf(s, groupFound.length >= searchK ? kth - Math.abs(kth) * 1e-9 : -Infinity));
         if (!d) return;
         groupFound.push(d);
         groupFound.sort((a, b) => b.score - a.score || b.power - a.power);
         if (groupFound.length > searchK) groupFound.length = searchK;
         if (groupFound.length >= searchK) kth = groupFound[searchK - 1].score;
-      }, refine);
+      }, refineK, kc);
       foundBy[gi].push(...groupFound);
 
       // Song comparison: the best deck of every song of the group, from the same leader terms. The set with the
@@ -4608,7 +4835,7 @@
           };
           const best = [];
           const threshold = () => best.length >= songTopK ? best[best.length - 1].score : -Infinity;
-          walk(srt, bMax, powBound, ubOf, threshold, (s) => {
+          walk(srt, bMax, powBound, ubK, threshold, (s) => {
             const so = setOf(s);
             const bf = bestF(s);
             const ti = songTables(so.vs);
@@ -4617,12 +4844,12 @@
               if (!canEnter(so, bf, ti.bound, list, sk && pick(sk), best[best.length - 1])) return;
             }
             const th = threshold();
-            const d = evaluate(so, bf, ti.mean || ti.bound, music, Xm, ti.px, th - Math.abs(th) * 1e-9);
+            const d = evaluate(so, bf, ti.mean || ti.bound, music, Xm, ti.px, floorOf(s, th - Math.abs(th) * 1e-9));
             if (!d) return;
             best.push(d);
             best.sort((a, b) => b.score - a.score || b.power - a.power);
             if (best.length > songTopK) best.length = songTopK;
-          });
+          }, null, kc);
           songsBy[gi].push(...best);
         }
       }
@@ -5545,6 +5772,77 @@
    * deck (gekisouSupportKind "combo") sooner: by 30–190% of their gain (measured 2026-10-07, by skill, level and chart;
    * Simulate.comboBoosts measures it per chart).
    */
+  // ---------------------------------------------------------------------------------------------------------------
+  // Range ranks by mission pt
+
+  // A COMBO range's mission pt (its BEST PERFORMER points, which rank the room's players in it) is the replay's Gekisou
+  // combo of the range plus 8: the 1st place's deck of results/IMG_0177–0182 (2026-11-08) simulates 935/1015/1487, the
+  // screen shows 943/1023/1495. Only the offset of the display: the rank compares pt with pt.
+  const MISSION_PT_OFFSET = 8;
+
+  /**
+   * The final Gekisou combo of each COMBO range of a timeline (Simulate.comboRankTimeline, aligned with tl.ranges) with
+   * the COMBO count-up skills `keys` (comboCountOf keys, one per member: a key twice for two members of it). Rows act
+   * as comboTimelineGain plays them. Within 4 of the replay's (275 sets of every card's COMBO count-up skills at random
+   * levels on 11 charts, 2026-11-08; a note at a range's edge).
+   */
+  function comboRangeCounts(tl, keys) {
+    const rows = keys.flatMap((k) => tl.rows.get(k) || []);
+    return tl.ranges.map((r) => {
+      const starts = new Float64Array(rows.length).fill(Infinity);
+      let count = 0;
+      let n = 0;
+      for (const f of r.frames) {
+        const before = count;
+        let added = 0;
+        for (let k = 0; k < rows.length; k++) {
+          const row = rows[k];
+          if (starts[k] === Infinity && before >= row.threshold) {
+            starts[k] = row.backdate ? (row.threshold > 0 && n ? r.notes[n - 1].time : r.start) : f.time;
+            if (row.backdate && row.threshold > 0 && n) added += row.value;
+          }
+        }
+        count += added;
+        for (const note of f.notes) {
+          let active = 0;
+          for (let k = 0; k < rows.length; k++) if (note.time >= starts[k] && (!rows[k].duration || note.time < starts[k] + rows[k].duration)) active += rows[k].value;
+          count += 1 + active;
+          n++;
+        }
+      }
+      return count;
+    });
+  }
+
+  /** The chance of ranks 1..players when each other player's mission pt beats one's with chance q, independently. */
+  function rankChances(players, q) {
+    const n = Math.max(0, players - 1);
+    const out = new Float64Array(n + 1);
+    let c = 1;
+    for (let k = 0; k <= n; k++) {
+      out[k] = c * Math.pow(q, k) * Math.pow(1 - q, n - k);
+      c = (c * (n - k)) / (k + 1);
+    }
+    return out;
+  }
+
+  /**
+   * The chance another player's mission pt beats `own` when the others' are uniform between `lo` (no COMBO count-up
+   * skill) and `hi` (the strongest deck of every card): the assumption the UI states (the user chose it 2026-11-08).
+   */
+  function aboveChance(own, lo, hi) {
+    if (!(hi > lo)) return own >= hi ? 0 : 1;
+    return Math.min(1, Math.max(0, (hi - own) / (hi - lo)));
+  }
+
+  /** A range's expected bonus percent: row[rank - 1] over the rank chances of `players` players at chance q. */
+  function expectedPercent(row, players, q) {
+    const p = rankChances(players, q);
+    let x = 0;
+    for (let k = 0; k < p.length; k++) x += p[k] * row[k];
+    return x;
+  }
+
   function comboCountOf(m, id, level) {
     for (const e of (id && m.gekisouSkillEffects.get(id + ":" + level)) || []) if (e._skillEffectType === 12000) return id + ":" + level;
     return null;
@@ -5624,7 +5922,7 @@
     battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
     gekisouSupportRate, gekisouSupportJustStack, justStackShare, widenedJustRate, justWindowRows, justWindowsOf, justProfile,
     deckJustProfile, justTimeline, deckJustBoost, justSegments, snapSkillKey, snapSkillClass, skillGaps, scoreScope, roughSnapRate,
-    luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, comboTimelineGain, gekisouSongType, gekisouSongGroups, roomPayoff, opponentLevels, gekisouRanks, gekisouKey, gekisouOut, OPPONENT_RANGE,
+    luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, comboTimelineGain, comboRankScope, comboRangeCounts, rankChances, aboveChance, expectedPercent, MISSION_PT_OFFSET, gekisouSongType, gekisouSongGroups, roomPayoff, opponentLevels, gekisouRanks, gekisouKey, gekisouOut, OPPONENT_RANGE,
     arenaRule, arenaSongs, arenaPlacePoints, rankBonusPercents, arenaInput, kindProbes, deckEventBonus,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

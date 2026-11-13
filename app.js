@@ -335,6 +335,7 @@
       snaps: d.snaps.map((x) => (x ? { id: x.id, rank: x.rank || 1 } : null)),
       gekisou: gekisou ? { ...gekisou, justBoost: Engine.deckJustBoost(d, gekisou.justRate) } : null,
       arena: arena ? { missions: arena.missions } : null,
+      rankModel: d.rankModel || null,
     }));
     const keys = reqs.map((r) => JSON.stringify(r));
     const todo = reqs.filter((_, i) => !state.simCache.has(keys[i]));
@@ -444,6 +445,7 @@
   const wan = (x) => `${fmt(Math.round(x / 1e4))} 萬`;
   const OPPONENTS_HELP = `選隊時還不知道會配到誰。「不確定」時，把其他玩家的平均分數當成 ${wan(Engine.OPPONENT_RANGE[0])}～${wan(Engine.OPPONENT_RANGE[1])}之間的各種情況，激奏每段的名次當成第 1 名到最後一名的各種情況，選平均起來最好的隊伍（全卡池實測：比事先知道對手的平均分數只少約 1%）。和朋友開私人房、知道對手大概多強時，選「我知道大概」再填數字。`;
   // The Gekisou rank a search assumed (its `gekisou`, else the settings): "第 3 名" or "第 1～5 名平均".
+  const COMBO_RANK_NOTE = "COMBO 段的名次不取平均，改看隊伍的任務 pt（激奏 COMBO 數 + 8，只有成員的 COMBO 激奏技能會提高）。其他玩家的任務 pt 無法得知，這裡假設平均分布在「沒有 COMBO 激奏技能」到「全部卡片滿級的最強組合」之間（激奏舞台只算該樂團的卡片），實際對手可能比這個上限弱，名次可能偏保守。JUST 段和 LUCK 段仍取各名次的平均。";
   const rankText = (gk, multi) => {
     const g = gk || (multi && multi.auto ? { ranks: Engine.gekisouRanks(multi) } : { rank: multi ? multi.gekisouRank : 1 });
     return g.ranks ? `第 ${g.ranks[0]}～${g.ranks[g.ranks.length - 1]} 名平均` : `第 ${g.rank} 名`;
@@ -813,7 +815,7 @@
     }
     // The worker measures on the replay first (progress messages by stage): COMBO count-up shares and, for the score
     // objective, snap skills; saved decks then search and simulate.
-    const STAGES = { arena: "量激奏舞台的譜面", combo: "量 COMBO 激奏數加成", rates: "模擬快照技能", search: arena ? "搜尋隊伍" : "搜尋預存隊伍", simulate: arena ? "模擬隊伍" : "模擬預存隊伍" };
+    const STAGES = { arena: "量激奏舞台的譜面", combo: "量 COMBO 激奏數加成", rank: "量 COMBO 段的任務 pt 範圍", rates: "模擬快照技能", search: arena ? "搜尋隊伍" : "搜尋預存隊伍", simulate: arena ? "模擬隊伍" : "模擬預存隊伍" };
     const progress = (done, total, stage) => {
       if (btn.isConnected) btn.textContent = `${STAGES[stage] || STAGES.rates}… ${Math.floor((done / Math.max(1, total)) * 100)}%`;
     };
@@ -884,6 +886,7 @@
         <div><div class="big">預估${out.gekisou ? "激奏" : ""}分數 <span class="points">${fmt(shown)}</span></div>
           <div class="small">${skillParts(d, true)}${d.sim && shown !== d.estScore ? `，模擬的激奏部分 ${shown > d.estScore ? "+" : ""}${fmt(shown - d.estScore)}` : ""}</div>
           ${justLine(d, out)}
+          ${comboRankLine(d)}
           <div class="muted small">${esc(label)} · 依你的準度的期望值（出場順序隨機）${out.input.mode === "challenge" ? " · 含活動數值加成" : ""}</div></div>`
       : null;
     return `<div class="result">
@@ -970,15 +973,25 @@
     const gkSnap = d.gekisouSupportScore || 0;
     const snap = d.snapScore || 0;
     const just = d.justScore || 0;
-    const live = d.baseScore ? d.estScore - d.baseScore - gk - gkSnap - snap - just : 0;
+    const rank = d.comboRankScore || 0;
+    const live = d.baseScore ? d.estScore - d.baseScore - gk - gkSnap - snap - just - rank : 0;
     const parts = [];
     if (live > 0) parts.push(`演出技能 +${fmt(live)}`);
     if (snap > 0) parts.push(`快照技能${d.snapRough ? "（粗估）" : ""} +${fmt(snap)}`);
     if (gk > 0) parts.push(`激奏技能 +${fmt(gk)}`);
     if (gkSnap > 0) parts.push(`快照激奏技能 +${fmt(gkSnap)}`);
     if (just > 0) parts.push(`JUST 判定範圍 UP +${fmt(just)}`);
+    if (rank) parts.push(`COMBO 段名次（和平均名次比）${rank > 0 ? "+" : "−"}${fmt(Math.abs(rank))}`);
     if (bare) return [`無技能 ${fmt(d.baseScore)}`].concat(parts).join("，");
     return parts.length ? `（${parts.join("，")}）` : "";
+  }
+
+  // A public room's COMBO ranges rank by mission pt: the deck's pt per range and the bonus it expects from it.
+  function comboRankLine(d) {
+    if (!d.comboRank || !d.comboRank.length) return "";
+    const parts = d.comboRank.map((r) => `第 ${r.range + 1} 段 ${fmt(r.pt)} pt（名次加成約 +${Math.round(r.percent)}%，隨機名次時平均 +${Math.round(r.meanPercent)}%）`).join("、");
+    const span = d.comboRank.map((r) => `${fmt(r.lo)}～${fmt(r.hi)}`).join("、");
+    return `<div class="small" title="COMBO 段的名次看任務 pt（激奏 COMBO 數 + 8），只有成員的 COMBO 激奏技能會提高。其他玩家的任務 pt 無法得知，這裡假設平均分布在「沒有 COMBO 激奏技能」到「全部卡片滿級的最強組合」之間（各段：${span}），激奏舞台只算該樂團的卡片。">COMBO 段的任務 pt：${parts}</div>`;
   }
 
   // Snaps' JUST 判定範圍 UP (Just windows): the Just rate the deck plays the JUST ranges at, from the player's.
@@ -1283,6 +1296,7 @@
       `每組先用搜尋找出該組歌曲平均最好的幾隊（估計值在第 1 名 5% 以內，最多 8 隊），再逐首用 ournotes-deck 的整場模擬比較，取平均最高的：每首歌模擬 ${out.runs ? out.runs.rank : 5} 局，每局換出場順序（5 局剛好每人每個位置各一次）；有 LUCK 區間的歌每局換抽選的種子，所有隊伍用同一批種子，所以兩隊的差距只差約 0.3%（單一隊伍每局差約 10%）。顯示的分數在 LUCK 歌用 ${out.runs ? out.runs.show : 10} 局（單首約 ±3%）。`,
       `每隊也會模擬估計分數接近的可玩難度，再依目前目標選分數或收益較好的。「該歌最佳隊」會比較最多 8 支估計接近的候選，並納入該歌的預存隊與一隊打全部；表示這批候選中最好，候選以外仍可能有更好的隊伍。`,
       `激奏${score ? "分數" : ""}的條件：每段${rankText(gk, out.input.multi)}、JUST 率 ${Math.round((gk ? gk.justRate : s.multiJustRate / 100) * 100)}%${score ? `，依你的準度（Perfect 率 ${s.perfectRate}%、斷 combo ${s.comboBreaks} 次）打折` : `；收益看房間評級（自己的模擬分數＋${othersText(out.input.multi)}），依你的準度算各評級的機率`}。${out.input.multi.auto ? `對手不確定：選的是在各種對手和名次下平均最好的隊伍，不會因為猜錯一個數字而偏掉。` : ""}`,
+      ...(score && out.input.multi.auto ? [COMBO_RANK_NOTE] : []),
       `搜尋的估計已包含兩種成員激奏技能和快照激奏技能的交互作用：成員的 LUCK 量條技能讓 RUSH 變多，快照的 LUCKY RUSH 分數 UP 跟著多（全 LUCK 歌約 +17%、混合歌約 +32%）；成員的 COMBO 激奏數 UP 讓快照的激奏 COMBO 分數 UP 更快疊滿（依譜面逐首模擬量，可達 +30%～+190%）。`,
     ];
     if (score && !out.snapSkills) notes.push(`<span class="warn">這次沒能模擬快照技能${out.snapError ? `（${esc(out.snapError)}）` : ""}，搜尋的估計沒算快照技能。</span>`);
@@ -1328,6 +1342,7 @@
       `激奏分數的條件：每段的名次在 ${out.input.multi.players} 人房的各名次平均、JUST 率 ${Math.round((gk ? gk.justRate : s.multiJustRate / 100) * 100)}%，依你的準度（Perfect 率 ${s.perfectRate}%、斷 combo ${s.comboBreaks} 次）打折。名次看分數高低，分數越高名次越前（${esc(arenaTierNames()[s.arenaTier] || "")} ${out.input.multi.players} 人房：${lp.map((p, i) => `第 ${i + 1} 名 ${p > 0 ? "+" : ""}${p} LP`).join("、")}）。`,
       `激奏舞台也會依房間評級發活動 pt、道具和 CP（可以用加成道具），算法和一般多人 Live 一樣。隊伍只依分數排名，下面另外列出用 ${out.input.boosts || 0} 個加成道具時平均拿到多少（房間評級照其他人分數不確定估計，只供參考）。`,
     ];
+    notes.push(COMBO_RANK_NOTE);
     if (!out.snapSkills) notes.push(`<span class="warn">這次沒能模擬快照技能${out.snapError ? `（${esc(out.snapError)}）` : ""}，搜尋的估計沒算快照技能。</span>`);
     if (!out.simulated) notes.push(`<span class="warn">沒有模擬資料，以下是搜尋的估計值，沒有用模擬比較候選。</span>`);
     const gaps = gapNote(out);

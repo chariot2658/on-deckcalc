@@ -6,6 +6,7 @@
 //   {type: "combo", scoreId, ctx, bt: {rank, justRate}, keys, entry}: COMBO count-up shares (Simulate.comboBoostsWith)
 //   {type: "search", master: {raw, lang}, input}: one complete Engine.search (no song splitting)
 //   {type: "arena", scoreId, spec}: a chart measured with 激奏舞台's missions (Simulate.measureBattleChart) -> entry
+//   {type: "comboRank", scoreId, ctx, pool}: what ranks a chart's COMBO ranges by mission pt (Simulate.comboRankChart)
 // A task with `patch` (Simulate.patchDeck: 激奏舞台's missions) plays on a replay of the patched deck data.
 // Replies {type: "done", out}, {type: "progress", done} (jobs or runs) meanwhile, or {type: "error", message}.
 importScripts("engine.js", "simulate.js");
@@ -41,7 +42,8 @@ self.onmessage = async (e) => {
       self.postMessage({ type: "done", out: [...out] });
     } else if (msg.type === "mean" || msg.type === "samples") {
       const g = msg.gekisou;
-      const key = sk + "|" + msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate + (g.mean ? ":" + JSON.stringify(g.mean) : "") + (g.justBoost ? ":" + JSON.stringify(g.justBoost) : "") : "");
+      const key = sk + "|" + msg.scoreId + "|" + (g ? g.ranks.join(",") + ":" + g.justRate + (g.mean ? ":" + JSON.stringify(g.mean) : "") + (g.justBoost ? ":" + JSON.stringify(g.justBoost) : "") +
+        (g.rankModel ? ":" + JSON.stringify([g.rankModel.players, g.rankModel.ranges]) : "") : "");
       if (!runners.has(key)) runners.set(key, Simulate.chartRunner(s, msg.scoreId, g));
       const run = runners.get(key);
       let runs = 0;
@@ -53,6 +55,8 @@ self.onmessage = async (e) => {
       self.postMessage({ type: "done", out: msg.items.map((it) => measure(counted, it.power, it.perf, it.seeds, it.total, it.from)) });
     } else if (msg.type === "combo") {
       self.postMessage({ type: "done", out: Simulate.comboBoostsWith(s, msg.ctx, msg.bt, msg.scoreId, msg.keys, msg.entry) });
+    } else if (msg.type === "comboRank") {
+      self.postMessage({ type: "done", out: Simulate.comboRankChart(s, msg.ctx, msg.scoreId, msg.pool) });
     } else if (msg.type === "arena") {
       self.postMessage({ type: "done", out: Simulate.measureBattleChart(s, msg.scoreId, msg.spec, progress) });
     }

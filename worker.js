@@ -35,6 +35,7 @@ self.onmessage = (e) => {
       levelFactors.clear();
       supportFactors.clear();
       comboShares.clear();
+      comboRanks.clear();
       snapRates.clear();
       savedSamples.clear();
       savedResults.clear();
@@ -215,6 +216,13 @@ async function engineInput(msg, pool = null) {
     session = null;
     console.warn("COMBO count-up shares unavailable", err);
   }
+  try {
+    input.comboRank = await comboRankOf(input, msg.id, pool);
+  } catch (err) {
+    prepareFailed = true;
+    session = null;
+    console.warn("COMBO range ranks unavailable", err);
+  }
   if (prepareFailed) input.prepareFailed = true;
   return input;
 }
@@ -272,6 +280,61 @@ async function comboBoostOf(input, id, pool = null) {
   return { byScore, byMusic: new Map([...scope.byMusic].map(([mid, sid]) => [mid, byScore.get(sid)])) };
 }
 
+// What ranks a public room's COMBO ranges by mission pt (Simulate.comboRankChart), by chart, the arena's missions and
+// the opponents' cards (every card, or an arena league's band): {tl: {ranges}, ranges: [{i, lo, hi}]}.
+const comboRanks = new Map();
+// Engine search input `comboRank` for a public room (multi.auto): {players, byScore: scoreId -> {tl: {rows (the owned
+// COMBO count-up keys' rows), ranges}, ranges}}, or null. Progress: stage "rank". The charts go to helpers (`pool`, or its
+// own) when there are two or more. A card whose COMBO count-up skill Simulate.comboContext does not take is left out
+// of the opponents' (and the owned members count no COMBO for it), with a warning.
+async function comboRankOf(input, id, pool = null) {
+  const scope = replay ? Engine.comboRankScope(input) : null;
+  if (!scope) return null;
+  const cx = gekisouCtx(input);
+  const supported = (k) => {
+    try {
+      Simulate.comboContext(master, [k], scope.support, scope.idle);
+      return true;
+    } catch (err) {
+      console.warn("COMBO count-up skill left out of the range ranks", k, err);
+      return false;
+    }
+  };
+  const poolKeys = [...new Set(scope.pool.map((c) => c.key))].filter(supported);
+  const opp = scope.pool.filter((c) => poolKeys.includes(c.key));
+  const own = scope.keys.filter(supported);
+  const keyOf = (sid) => cx.key + sid + "|" + (input.arena ? input.arena.bandId : 0);
+  const todo = scope.scoreIds.filter((sid) => !comboRanks.has(keyOf(sid)));
+  let done = 0;
+  const finish = (sid, out) => {
+    comboRanks.set(keyOf(sid), { tl: { ranges: out.tl.ranges }, ranges: out.ranges });
+    self.postMessage({ type: "progress", id, stage: "rank", done: ++done, total: todo.length });
+  };
+  if (todo.length) {
+    const ctx = Simulate.comboContext(master, poolKeys, scope.support, scope.idle);
+    const helpers = todo.length > 1 ? pool || helperPool(todo.length) : null;
+    try {
+      if (helpers) {
+        await helpers.run(todo.map((sid) => ({ type: "comboRank", scoreId: sid, ctx, pool: opp, patch: cx.patch })), (k, out) => finish(todo[k], out), () => {});
+      }
+    } catch (err) {
+      console.warn("COMBO range rank helpers failed", err);
+    } finally {
+      if (helpers && helpers !== pool) helpers.close();
+    }
+    const left = todo.filter((sid) => !comboRanks.has(keyOf(sid)));
+    const s = left.length ? await cx.session() : null;
+    for (const sid of left) finish(sid, Simulate.comboRankChart(s, ctx, sid, opp));
+  }
+  const rows = own.length ? Simulate.comboContext(master, own, scope.support, scope.idle).countRows : new Map();
+  const byScore = new Map();
+  for (const sid of scope.scoreIds) {
+    const e = comboRanks.get(keyOf(sid));
+    byScore.set(sid, { tl: { rows, ranges: e.tl.ranges }, ranges: e.ranges });
+  }
+  return { players: scope.players, byScore };
+}
+
 // A public room's random song (multi without pickSong): decks by the mean over the songs.
 const randomRoom = (input) => !!(input.mode === "normal" && input.multi && input.multi.players >= 1 && !input.multi.pickSong);
 
@@ -303,7 +366,7 @@ async function search(msg) {
       for (const d of out.results) {
         const members = d.members.map((v) => ({ id: v.id, skillLevel: v.liveSkillLevel, gekisouSkillLevel: v.gekisouSkillLevel }));
         const gekisou = { ...out.gekisou, justBoost: Engine.deckJustBoost(d, out.gekisou.justRate) };
-        d.sim = simulateDeck(s, d.chart.scoreId, d.displayPower, members, d.snaps.map((x) => (x ? { id: x.id, rank: x.rank } : null)), gekisou, cx.battle);
+        d.sim = simulateDeck(s, d.chart.scoreId, d.displayPower, members, d.snaps.map((x) => (x ? { id: x.id, rank: x.rank } : null)), gekisou, cx.battle, d.rankModel);
       }
       const mean = (d) => (d.sim ? d.sim.mean * d.accuracy : d.estScore);
       out.results.sort((a, b) => mean(b) - mean(a));
@@ -334,12 +397,12 @@ const LUCK_SEEDS = 64;
 // Simulate.orderScores of one deck; gekisou ({rank, ranks, justRate}, a search's, with the deck's `justBoost` when it has
 // Just windows: Engine.deckJustBoost) plays with Gekisou on: a chart with a LUCK range on LUCK_SEEDS seeds, others on
 // their first published seed (nothing else draws from the seed). `bat`: the Gekisou data of the live (gekisouCtx).
-function simulateDeck(s, scoreId, power, members, snaps, gekisou, bat = battle) {
+function simulateDeck(s, scoreId, power, members, snaps, gekisou, bat = battle, rank = null) {
   let gk = null;
   if (gekisou) {
     const b = bat && bat.byScore.get(scoreId);
     const seeds = !b ? [0] : b.luck ? Simulate.luckSeeds(b.replaySeeds, LUCK_SEEDS) : [b.seeds[0].seed];
-    gk = Simulate.gekisouPlay(gekisou, b && b.percents, master.justTypes, seeds);
+    gk = Simulate.gekisouPlay(gekisou, b && b.percents, master.justTypes, seeds, rank);
     if (gekisou.justBoost && gekisou.justBoost.length) gk.justBoost = gekisou.justBoost;
   }
   return Simulate.orderScores(s, scoreId, power, Simulate.performers(master, members, snaps), gk);
@@ -621,9 +684,14 @@ async function savedDecks(msg) {
     const sim = replay && gkOut ? await cx.session() : null;
     // A deck with Just windows plays them (justBoost, Engine.deckJustBoost); runners and tasks go by chart and boost.
     const boostOf = (d) => (gkOut ? Engine.deckJustBoost(d, gkOut.justRate) : []);
+    // Ranked by mission pt (input.comboRank): the chart's COMBO ranges' rank follows each run's combo.
+    const rankOf = (sid) => {
+      const e = input.comboRank && input.comboRank.byScore.get(sid);
+      return e ? { players: input.comboRank.players, ranges: e.ranges } : null;
+    };
     const gkRun = (sid, boost = []) => {
       if (!gkOut) return null;
-      const g = Simulate.gekisouPlay(gkOut, (gb.byScore.get(sid) || {}).percents, master.justTypes);
+      const g = Simulate.gekisouPlay(gkOut, (gb.byScore.get(sid) || {}).percents, master.justTypes, undefined, rankOf(sid));
       if (boost.length) g.justBoost = boost;
       return g;
     };
@@ -662,7 +730,7 @@ async function savedDecks(msg) {
         requested += it.total - it.from;
         const perf = perfOf(it.d);
         const boost = boostOf(it.d);
-        const key = JSON.stringify([cx.key, gkOut, it.sid, it.d.displayPower, perf, boost]);
+        const key = JSON.stringify([cx.key, gkOut, it.sid, it.d.displayPower, perf, boost, rankOf(it.sid)]);
         if (!unique.has(key)) {
           const scores = savedSamples.get(key) || [];
           savedSamples.delete(key);
@@ -834,7 +902,7 @@ async function simulate(msg) {
     const out = [];
     for (const d of msg.decks) {
       const cx = gekisouCtx(d);
-      out.push(simulateDeck(await cx.session(), d.scoreId, d.power, d.members, d.snaps, d.gekisou, cx.battle));
+      out.push(simulateDeck(await cx.session(), d.scoreId, d.power, d.members, d.snaps, d.gekisou, cx.battle, d.rankModel));
     }
     self.postMessage({ type: "sim", id: msg.id, out });
   } catch (err) {
