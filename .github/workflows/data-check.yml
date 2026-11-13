@@ -117,6 +117,7 @@ jobs:
           node test/check-combo-interactions.js --extended
           node test/check-combo-interactions.js --extended --support=27
           node test/combo-search.test.js
+          node test/combo-rank.test.js
       - name: saved.test.js（預存隊伍候選與難度）
         if: ${{ !cancelled() && steps.replay.conclusion == 'success' }}
         working-directory: deckcalc

@@ -106,13 +106,16 @@
    * percent of each rank): every range at gk.rank, or with gk.ranks one play at the first of them, which scoreOf turns
    * into their mean (`mean`: per range the percents of those ranks). `seeds` as for orderScores.
    */
-  function gekisouPlay(gk, percents, justTypes, seeds) {
+  function gekisouPlay(gk, percents, justTypes, seeds, rank = null) {
     const r = gk.ranks ? gk.ranks[0] : gk.rank;
     const out = { ranks: [r, r, r], justRate: gk.justRate, justTypes };
     if (seeds) out.seeds = seeds;
     if (gk.ranks) {
       if (!percents) throw new Error("no rank bonus percents for the mean over ranks");
       out.mean = percents.map((row) => gk.ranks.map((x) => row[x - 1]));
+      // Ranked by mission pt (`rank`: {players, ranges} of comboRankChart, a public room): a COMBO range's rank chances
+      // follow the run's combo there (scoreOf).
+      if (rank && rank.ranges && rank.ranges.length) out.rankModel = { players: rank.players, percents, ranges: rank.ranges };
     }
     return out;
   }
@@ -125,11 +128,20 @@
   function scoreOf(res, gekisou) {
     if (!gekisou || !gekisou.mean) return res.score;
     let s = res.score;
+    const rm = gekisou.rankModel;
+    const engine = rm ? (typeof module !== "undefined" && module.exports ? require("./engine.js") : root.Engine) : null;
     gekisou.mean.forEach((pcts, i) => {
       const x = res.ranges && res.ranges[i];
       if (!x) return;
       const range = x.endScore - x.startScore;
-      s += pcts.reduce((a, p) => a + Math.trunc((range * p) / 100), 0) / pcts.length - x.rankBonus;
+      const r = rm && rm.ranges.find((y) => y.i === i);
+      if (r) {
+        // The rank by mission pt: each other player above with chance q (Engine.aboveChance on the run's combo).
+        const p = engine.rankChances(rm.players, engine.aboveChance(x.combo, r.lo, r.hi));
+        let b = 0;
+        for (let k = 0; k < p.length; k++) b += p[k] * Math.trunc((range * rm.percents[i][k]) / 100);
+        s += b - x.rankBonus;
+      } else s += pcts.reduce((a, p) => a + Math.trunc((range * p) / 100), 0) / pcts.length - x.rankBonus;
     });
     return s;
   }
@@ -494,7 +506,7 @@
     const ranges = [];
     d.fevers.forEach(([start, end], ri) => {
       if (d.missions[ri] !== 1) return;
-      const r = { start, notes: [], frames: [] };
+      const r = { index: ri, start, notes: [], frames: [] };
       const percents = bt.percents && bt.percents[ri];
       const rank = percents ? 1 + (bt.ranks || [bt.rank]).reduce((a, k) => a + percents[k - 1], 0) / (bt.ranks || [bt.rank]).length / 100 : 1;
       for (const f of tpl.frames) {
@@ -521,6 +533,49 @@
     const weight = ranges.reduce((a, r) => a + r.notes.reduce((b, n) => b + n.weight, 0), 0);
     tl.upper = tl.support.map((sup, match) => tl.base[match] > 0 ? Math.max(0, weight * tl.combo[tl.combo.length - 1][1] * sup.max / tl.base[match] - 1) : 0);
     return tl;
+  }
+
+  /**
+   * What ranks a public room's COMBO ranges on chart `scoreId` by mission pt (Engine.comboRangeCounts): the chart's
+   * COMBO timeline (`tl`: the count-up rows of `keys` only, and its ranges' note times) and per COMBO range its index
+   * among the three (`i`) and the Gekisou combo without any COMBO count-up skill (`lo`) and of the strongest deck of
+   * `pool` (`hi`; Engine.comboRankScope: every card an opponent may play, at its top level). The strongest deck: five
+   * cards of different characters, the best five of the ten characters whose best card adds the most alone (counts
+   * add up within a few, 2026-11-08), each range on its own (`hi` bounds the others' pt; one deck need not top all
+   * three). `ctx`: comboContext with every key of `pool` and `keys`.
+   */
+  function comboRankChart(session, ctx, scoreId, pool, keys = []) {
+    const full = comboTimeline(session, ctx, { rank: 1, ranks: null }, scoreId);
+    const engine = typeof module !== "undefined" && module.exports ? require("./engine.js") : root.Engine;
+    const lo = engine.comboRangeCounts(full, []);
+    const gain = (k) => engine.comboRangeCounts(full, [k]).reduce((a, x, i) => a + x - lo[i], 0);
+    const byChar = new Map();
+    const gains = new Map();
+    for (const c of pool) {
+      if (!ctx.countRows.has(c.key)) continue;
+      if (!gains.has(c.key)) gains.set(c.key, gain(c.key));
+      const g = gains.get(c.key);
+      if (!byChar.has(c.character) || g > byChar.get(c.character).g) byChar.set(c.character, { key: c.key, g });
+    }
+    const top = [...byChar.values()].sort((a, b) => b.g - a.g).slice(0, 10);
+    let hi = lo.slice();
+    const pick = (from, chosen) => {
+      if (chosen.length === Math.min(5, top.length)) {
+        const x = engine.comboRangeCounts(full, chosen);
+        hi = hi.map((h, i) => Math.max(h, x[i]));
+        return;
+      }
+      for (let i = from; i < top.length; i++) pick(i + 1, chosen.concat([top[i].key]));
+    };
+    pick(0, []);
+    const time = (n) => ({ time: n.time });
+    return {
+      tl: {
+        rows: new Map(keys.filter((k) => ctx.countRows.has(k)).map((k) => [k, ctx.countRows.get(k)])),
+        ranges: full.ranges.map((r) => ({ index: r.index, start: r.start, notes: r.notes.map(time), frames: r.frames.map((f) => ({ time: f.time, notes: f.notes.map(time) })) })),
+      },
+      ranges: full.ranges.map((r, j) => ({ i: r.index, lo: lo[j], hi: hi[j] })),
+    };
   }
 
   function comboBoostsWith(session, ctx, bt, scoreId, keys, entry) {
@@ -606,6 +661,51 @@
       le.rows.push(le.columns.map((c) => (p.row[c] === undefined ? 0 : p.row[c])));
     }
     return JSON.stringify(d);
+  }
+
+  /**
+   * A ReplaySession on deck data `deckText` (patched by patchDeck when `patch` is given) whose `run` plays skills the
+   * deck data has no effect rows for as none. The deck data is built with music-data, so after a masterdata update it
+   * can lag behind the master tables performers() reads (2026-11-02: member 75's Gekisou skill 24), and the replay
+   * rejects a whole request for one such skill ("unknown skill id/level"). Engine.skillGaps lists those skills as
+   * unmeasured (scored 0) and the UI says so, so the simulation leaves them out too instead of failing the deck.
+   */
+  function openSession(mod, deckText, patch) {
+    const text = patch ? patchDeck(deckText, patch) : deckText;
+    const session = new mod.ReplaySession(text);
+    const t = JSON.parse(text).master;
+    const keys = (name, col) => {
+      const tb = t[name];
+      const [i, l] = [tb.columns.indexOf(col), tb.columns.indexOf("_level")];
+      return new Set(tb.rows.map((r) => r[i] + ":" + r[l]));
+    };
+    const known = {
+      live: keys("MasterLiveSkillEffect", "_liveSkillID"),
+      support: keys("MasterSupportSkillEffect", "_supportSkillID"),
+      gekisou: keys("MasterGekisouSkillEffect", "_gekisouSkillID"),
+      gekisouSupport: keys("MasterGekisouSupportSkillEffect", "_gekisouSupportSkillID"),
+    };
+    const has = (set, s) => set.has(s[0] + ":" + s[1]);
+    const strip = (p) => ({
+      ...p,
+      liveSkill: p.liveSkill && has(known.live, p.liveSkill) ? p.liveSkill : null,
+      supportSkills: (p.supportSkills || []).filter((s) => has(known.support, s)),
+      gekisouSkill: p.gekisouSkill && has(known.gekisou, p.gekisouSkill) ? p.gekisouSkill : null,
+      gekisouSupportSkills: (p.gekisouSupportSkills || []).filter((s) => has(known.gekisouSupport, s)),
+    });
+    const run = session.run.bind(session);
+    // Requests are only parsed again when the replay rejects one, so the usual path costs nothing.
+    session.run = (request) => {
+      try {
+        return run(request);
+      } catch (e) {
+        if (!/unknown skill/.test(String((e && e.message) || e))) throw e;
+        const r = JSON.parse(request);
+        r.performers = r.performers.map(strip);
+        return run(JSON.stringify(r));
+      }
+    };
+    return session;
   }
 
   /**
@@ -796,7 +896,7 @@
     try {
       const mod = await import(url);
       mod.initSync({ module: wasm });
-      return new mod.ReplaySession(patch ? patchDeck(deck, patch) : deck);
+      return openSession(mod, deck, patch);
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -805,7 +905,7 @@
   const api = {
     ORDERS, performers, gekisouRequest, gekisouPlay, scoreOf, orderScores, chartRunner, meanScore, sampleScores, snapSkillRates, snapSkillJobs, measureSnapJobs,
     gekisouLevelFactors, gekisouSupportLevelFactors,
-    comboBoosts, comboContext, comboBoostsWith, luckSeeds, loadReplay, patchDeck, battleSpec, measureBattleChart,
+    comboBoosts, comboContext, comboBoostsWith, comboRankChart, luckSeeds, loadReplay, patchDeck, openSession, battleSpec, measureBattleChart,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Simulate = api;
