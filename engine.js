@@ -5781,10 +5781,27 @@
   const MISSION_PT_OFFSET = 8;
 
   /**
+   * The Gekisou combo count-up the rows add to note i of frame f (rows started at `starts`). A timed row acts from its
+   * start to start + duration; a note exactly at the end still gets it when its frame's time is that end and it is not
+   * the frame's last note. The replay ends the effect in that frame and recounts the frame's judgements with the end's
+   * command after all but the last of them (2026-11-17: 924 such notes, every one as the replay).
+   */
+  function comboActive(rows, starts, f, i) {
+    const t = f.notes[i].time, last = i === f.notes.length - 1;
+    let active = 0;
+    for (let k = 0; k < rows.length; k++) {
+      if (t < starts[k]) continue;
+      const end = starts[k] + rows[k].duration;
+      if (!rows[k].duration || t < end || (t === end && f.time === end && !last)) active += rows[k].value;
+    }
+    return active;
+  }
+
+  /**
    * The final Gekisou combo of each COMBO range of a timeline (Simulate.comboRankTimeline, aligned with tl.ranges) with
    * the COMBO count-up skills `keys` (comboCountOf keys, one per member: a key twice for two members of it). Rows act
-   * as comboTimelineGain plays them. Within 4 of the replay's (275 sets of every card's COMBO count-up skills at random
-   * levels on 11 charts, 2026-11-08; a note at a range's edge).
+   * as comboTimelineGain plays them. Equal to the replay's (275 sets of every card's COMBO count-up skills at random
+   * levels on 11 charts; exact since the edge rule of comboActive, 2026-11-17).
    */
   function comboRangeCounts(tl, keys) {
     const rows = keys.flatMap((k) => tl.rows.get(k) || []);
@@ -5803,10 +5820,8 @@
           }
         }
         count += added;
-        for (const note of f.notes) {
-          let active = 0;
-          for (let k = 0; k < rows.length; k++) if (note.time >= starts[k] && (!rows[k].duration || note.time < starts[k] + rows[k].duration)) active += rows[k].value;
-          count += 1 + active;
+        for (let i = 0; i < f.notes.length; i++) {
+          count += 1 + comboActive(rows, starts, f, i);
           n++;
         }
       }
@@ -5891,10 +5906,8 @@
         // The support ramp reads before the recount, even when a member's gate opens in this frame.
         if (before !== lastSupportCount) { steps.push([f.time, before]); lastSupportCount = before; }
         if (added) { count += added; counts[n - 1] = count; }
-        for (const note of f.notes) {
-          let active = 0;
-          for (let k = 0; k < rows.length; k++) if (note.time >= starts[k] && (!rows[k].duration || note.time < starts[k] + rows[k].duration)) active += rows[k].value;
-          count += 1 + active;
+        for (let i = 0; i < f.notes.length; i++) {
+          count += 1 + comboActive(rows, starts, f, i);
           counts[n++] = count;
         }
       }
