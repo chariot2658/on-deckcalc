@@ -37,7 +37,7 @@ jobs:
       - name: haneoka.org 的 release
         id: release
         run: |
-          release=$(curl -fsSI --retry 3 https://haneoka.org/api/v1/servers/intl/release | tr -d '\r' | awk -F': ' 'tolower($1) == "x-haneoka-release-id" { print $2 }')
+          release=$(curl -fsSI --retry 3 https://haneoka.org/api/v1/servers/intl/sources/tree | tr -d '\r' | awk -F': ' 'tolower($1) == "x-haneoka-release-id" { print $2 }')
           test -n "$release"
           echo "release=$release" >> "$GITHUB_OUTPUT"
       - name: 譜面（快取）

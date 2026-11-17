@@ -71,7 +71,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=16)
     args = ap.parse_args()
 
-    _, h = request(f"{API}/api/v1/servers/intl/release", "HEAD")
+    # The release route itself is not public since 2026-11-17; the source tree names the current release too.
+    _, h = request(f"{API}/api/v1/servers/intl/sources/tree", "HEAD")
     release = h["X-Haneoka-Release-Id"]
     if not release or not release.startswith("r-"):
         sys.exit("haneoka.org 沒有回傳 release")
