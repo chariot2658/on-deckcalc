@@ -68,6 +68,30 @@ const REF = [
       ` ${todo.length} pairings measured in ${t1 - t0} ms, search ${Date.now() - t1} ms`);
   }
 
+  // Points in a challenge live take the measured rates in place of roughSnapRate (the worker measures them there): the
+  // estimate then matches the simulation as in the score objective, so the rank shown is the rank simulated. The rough
+  // estimate ran 1.37× the replay on 怪物 EXPERT (2026-11-07) and showed an S deck as SS.
+  {
+    const ch = REF.filter((r) => r.mode === "challenge");
+    const input = {
+      master: m, event: m.events.get(1), mode: "challenge", objective: "points", boosts: 1600,
+      members: roster.members, snaps: roster.snaps, player: roster.player, perPowerByScore: perPower, skillWeights: sw,
+      maxLevel: 40, difficulties: ["expert"], musicIds: ch.map((r) => r.musicId), topK: 3, compareSongs: true, now,
+    };
+    const out = E.search({ ...input, snapSkill: { byScore: new Map(ch.map((r) => [r.scoreId, rates.get(r.scoreId)])) } });
+    assert.ok(out.results.length && out.songs.length === ch.length);
+    for (const d of out.results.concat(out.songs)) {
+      assert.strictEqual(d.snapRough, false);
+      const sim = S.orderScores(session, d.chart.scoreId, d.power, S.performers(m, d.members.map((v) => ({ id: v.id, skillLevel: v.liveSkillLevel })), d.snaps.map((s) => (s ? { id: s.id, rank: s.rank } : null))));
+      assert.ok(Math.abs(d.estScore / sim.mean - 1) < 5e-4, `points ${d.chart.scoreId}: estimate ${d.estScore} vs simulated ${sim.mean}`);
+      assert.strictEqual(d.rank, E.scoreRankOf(E.rankThresholds(m, d.chart.musicId), sim.mean), `points ${d.chart.scoreId}: rank`);
+    }
+    const rough = E.search(input).results[0];
+    assert.ok(rough.snapRough);
+    console.log(`challenge points with measured snap skills: estimate = simulation within 0.05% on ${out.results.length + out.songs.length} decks` +
+      ` (#1 ${out.results[0].points} pt ${out.results[0].rankName}; rough estimate's #1 ${rough.points} pt ${rough.rankName})`);
+  }
+
   // Five copies in one run = the mean of the pairing alone at each position; pairings of one key score alike.
   const sid = 10010903;
   const P = 1e6;
