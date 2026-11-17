@@ -2,7 +2,7 @@
 
 根據最新的活動資料和你持有的卡片，找出活動點數（或活動道具）最多的配隊，或分數最高的配隊（挑戰 Live 的歌曲排行榜、衝高分）。
 
-本專案為非官方愛好者專案，與遊戲的開發和營運方無關。倉庫不包含任何遊戲資源：卡面縮圖、masterdata 和譜面資料都是開啟時從下方「資料來源」下載。
+本專案為非官方愛好者專案，與遊戲的開發和營運方無關。倉庫不包含任何遊戲資源：卡面縮圖、masterdata 和譜面都是開啟時從下方「資料來源」下載。部署的網站另外帶有從這些資料算出的統計數字和整場模擬要用的數值表；遊戲內容的權利屬於原權利人。
 
 ## 使用方式
 
@@ -48,9 +48,18 @@
 | 資料 | 來源 | 更新時機 |
 |---|---|---|
 | masterdata（活動、卡片、加成、評級門檻…） | [StarMoe-org/moenotes-masterdata](https://github.com/StarMoe-org/moenotes-masterdata) | 每次開啟時檢查版本，有新版就重新下載 |
-| 譜面的「每點綜合力分數」、演出技能權重與激奏資料 | nnnotes 的 `music-data.json`（storage.bdon.moe） | 每天一次，或按「更新資料」 |
-| 整場模擬（ournotes-deck 的 WASM 引擎與譜面資料，約 5 MB） | `music-data.json` 指向的 replay 資料（storage.bdon.moe） | 第一次模擬時下載，版本變了才重新下載 |
+| 譜面的「每點綜合力分數」、演出技能權重與激奏資料 | 本站部署時建的 `music-data.json` | 每天一次，或按「更新資料」 |
+| 整場模擬的 WASM 引擎與數值表（約 2 MB） | `music-data.json` 指向的 replay 資料（本站部署時建的） | 第一次模擬時下載，版本變了才重新下載 |
+| 整場模擬用的譜面（約 6 MB） | [haneoka.org](https://haneoka.org) 公開的國際服譜面檔（固定在建置時的 release），瀏覽器直接下載，用 `charts.js` 轉換 | 同上 |
 | 卡面縮圖 | assets.bdon.moe | 瀏覽器快取 |
+
+`music-data.json` 原本由 nnnotes 發布（storage.bdon.moe），但它的建置從 2026-11-02 起一直失敗，所以改成自己建：GitHub Actions（`.github/workflows/pages.yml`）每小時看台服 masterdata 和 haneoka.org 的譜面有沒有更新，有就用 nnnotes 自己的匯出程式和 ournotes-deck 重新量一次（`tools/build-music-data.py`），和網站一起部署。和 nnnotes 最後發布的 372 張譜面比對，量出來的分數資料完全相同。
+
+網站上不放音符：部署的資料只有統計數字和整場模擬要用的數值表（`tools/publish-music-data.js` 拿掉音符、歌名、作詞作曲和技能文字）。音符由瀏覽器第一次模擬時從 haneoka.org 下載建置時那個 release 的譜面檔並換算，多花幾秒，之後讀快取（譜面原本放在 haneoka-gakuen/ournotes-charts，2026-11-10 下架；haneoka.org 上是同樣的檔案）。換算的 `charts.js` 是 nnnotes 轉換程式的移植，部署前會逐張和 Python 版比對，有一張不同就不部署；瀏覽器組回來後也會核對整份資料的 SHA-256。
+
+本機也能自己建：`python -I deckcalc/tools/build-local.py`（需要工作區的 nnnotes 和 moenotes-masterdata clone，以及 git、cargo、node、numpy；約 3 分鐘）。結果和部署的一樣不含音符，放在 `music-data/`（git 不追蹤）和測試用的 `../data`，本機網站會優先用它，按「更新資料」生效。
+
+ournotes-deck 對每張譜面有一項自我檢查，卡住 nnnotes 的就是它：10009100（EASY）差 2353 分、上限 2208 分，約分數的 0.03%。自己建的版本把這項檢查放寬到 0.1%（`tools/deck-model-tolerance.patch`，超過原上限的譜面會印在建置紀錄裡），其他計算不變。
 
 ## 計算方式
 
@@ -68,7 +77,7 @@
   - 沒有快照技能的舊版「只看分數」會挑到低 1.6～2.2% 的隊伍。
   - 從全部歌曲找時，先不含快照技能估每首歌（加上粗估的快照加分），只精算最好的 10 首以內；其他歌標「粗估」。
   - 激奏時成員的激奏技能會觸發搭配快照的激奏技能，而且成員之間互相影響，不能逐組相加；搜尋只估計這部分，所以先找 15 支候選隊伍，逐一完整模擬後依模擬分數排名。
-- **模擬分數**：結果卡片上的隊伍會再交給 [ournotes-deck](https://github.com/empty-sekai/ournotes-deck) 的整場模擬（WASM，nnnotes 發布在 music-data 旁邊）。它照遊戲客戶端的邏輯逐幀計算，包含演出技能和快照技能，條件是全 Perfect；單人不開激奏，多人開激奏（見下方「激奏」）。
+- **模擬分數**：結果卡片上的隊伍會再交給 [ournotes-deck](https://github.com/empty-sekai/ournotes-deck) 的整場模擬（WASM，部署在 music-data 旁邊）。它照遊戲客戶端的邏輯逐幀計算，包含演出技能和快照技能，條件是全 Perfect；單人不開激奏，多人開激奏（見下方「激奏」）。
   - 工具列出 120 種發動順序的分數範圍，以及有多少比例的順序能達到各評級。
   - 實測（夢現妄想世界 EXPERT，綜合力 378,468）：模擬平均 1,767,907，遊戲最高分 1,767,821 落在範圍內。
 - **準度**：分數損失幾乎都來自斷 combo，不是 Great。
@@ -184,7 +193,7 @@
 cd ..                                   # deckcalc 的上一層
 git clone --depth 1 https://github.com/StarMoe-org/moenotes-masterdata.git
 mkdir data
-curl -o data/music-data.json https://storage.bdon.moe/moenotes/music-data/music-data.json
+curl -o data/music-data.json https://chariot2658.github.io/on-deckcalc/music-data/music-data.json
 cd deckcalc
 ```
 
@@ -210,7 +219,7 @@ node test/speed.js --quick --helpers --check-cache # 小卡池驗證平行搜尋
 
 GitHub Actions 的「資料檢查」（`.github/workflows/data-check.yml`）用最新的 masterdata 和 music-data 跑上面全部的測試：
 push、PR 時跑，另外每小時看一次這份程式、masterdata、music-data 有沒有變，有變就測一次（同一組資料只測一次），
-失敗時 GitHub 會寄信。masterdata 更新後 nnnotes 要 1.5～2 小時重建 music-data，這段期間新技能還沒量、測試必然失敗，
+失敗時 GitHub 會寄信。masterdata 更新後最多要一小時多才重建好 music-data，這段期間新技能還沒量、測試必然失敗，
 所以 music-data 還沒追上最新的台服 masterdata 時先等（最多 6 小時，`test/ci-wait.js`）；手動執行可以勾選「照測」。
 
 檔案：`engine.js`（計算核心，瀏覽器與 Node 共用）、`data.js`（下載與快取）、`worker.js`（背景搜尋與模擬）、

@@ -32,7 +32,7 @@ jobs:
         id: inputs
         run: |
           master=$(git ls-remote https://github.com/StarMoe-org/moenotes-masterdata HEAD | cut -f1)
-          etag=$(curl -fsSI --retry 3 https://storage.bdon.moe/moenotes/music-data/music-data.json | tr -d '\r' | awk -F': ' 'tolower($1) == "etag" { print $2 }')
+          etag=$(curl -fsSI --retry 3 https://chariot2658.github.io/on-deckcalc/music-data/music-data.json | tr -d '\r' | awk -F': ' 'tolower($1) == "etag" { print $2 }')
           echo "masterdata $master, music-data $etag"
           echo "master=$master" >> "$GITHUB_OUTPUT"
           echo "key=$(printf '%s %s %s' "$GITHUB_SHA" "$master" "$etag" | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
@@ -65,7 +65,7 @@ jobs:
         if: steps.seen.outputs.cache-hit != 'true'
         run: |
           mkdir -p data
-          curl -fsSL --retry 3 --compressed -o data/music-data.json https://storage.bdon.moe/moenotes/music-data/music-data.json
+          curl -fsSL --retry 3 --compressed -o data/music-data.json https://chariot2658.github.io/on-deckcalc/music-data/music-data.json
       - name: music-data 追上 masterdata 了嗎
         id: wait
         if: steps.seen.outputs.cache-hit != 'true'

@@ -3,8 +3,9 @@
 // Run: node test/fetch-replay.js
 const fs = require("fs");
 const path = require("path");
+const Charts = require("../charts.js");
 
-const MUSIC_DATA_URL = "https://storage.bdon.moe/moenotes/music-data/music-data.json";
+const MUSIC_DATA_URL = "https://chariot2658.github.io/on-deckcalc/music-data/music-data.json";
 const dataDir = path.join(__dirname, "..", "..", "data");
 const out = path.join(dataDir, "replay");
 
@@ -24,6 +25,13 @@ const out = path.join(dataDir, "replay");
   for (const f of [manifest.engine.js, manifest.engine.wasm, manifest.engine.build, manifest.deckData]) {
     fs.writeFileSync(path.join(out, f.url), await get(new URL(f.url, manifestUrl).href));
     console.log(f.url, f.bytes, "bytes");
+  }
+  // The site publishes the deck data without notes; the tests need it whole, as the browser makes it.
+  if (manifest.chartSource) {
+    const file = path.join(out, manifest.deckData.url);
+    const whole = await Charts.fullDeck(fs.readFileSync(file, "utf8"), manifest.chartSource);
+    fs.writeFileSync(file, whole);
+    console.log(manifest.deckData.url, Buffer.byteLength(whole), "bytes with", manifest.chartSource.charts.length, "charts");
   }
 })().catch((e) => {
   console.error(e);

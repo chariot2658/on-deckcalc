@@ -229,7 +229,7 @@
       setLoading("整理資料…");
       const lang = (Data.REGIONS[region] || Data.REGIONS["hk-tw-mo"]).text;
       state.master = Engine.buildMaster(mst.raw, lang);
-      // nnnotes publishes a new song's chart data a while after the master lists it (a new event's song), so while
+      // A new song's charts come out a while after the master lists it (a new event's song), so while
       // music-data lacks a song, check it again hourly instead of daily.
       if (md && !force) {
         const have = new Set((md.songs || []).map((x) => x.id));
@@ -1117,7 +1117,7 @@
       })
       : [];
     if (missing.length) {
-      notes.push(`<span class="warn">挑戰曲${missing.map((id) => `「${esc(musicTitle(id))}」`).join("、")}還沒有譜面資料（nnnotes 的 music-data 通常在 masterdata 更新後幾小時內補上），這次沒列入計算。補上後按「更新資料」重新計算。</span>`);
+      notes.push(`<span class="warn">挑戰曲${missing.map((id) => `「${esc(musicTitle(id))}」`).join("、")}還沒有譜面資料（通常在 masterdata 更新後幾小時內補上），這次沒列入計算。補上後按「更新資料」重新計算。</span>`);
     }
     return notes.join("<br>");
   }

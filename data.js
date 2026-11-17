@@ -1,12 +1,14 @@
 /*
- * Loads the master tables from StarMoe-org/moenotes-masterdata (raw GitHub) and nnnotes' music-data.json from
- * storage.bdon.moe, caching both with the Cache API (keyed by the masterdata version of the region).
+ * Loads the master tables from StarMoe-org/moenotes-masterdata (raw GitHub) and music-data.json from music-data/ beside
+ * the page: the deployment's (.github/workflows/pages.yml), or on a local copy the one tools/build-local.py wrote, else
+ * the deployment's. Both are cached with the Cache API (keyed by the masterdata version of the region).
  */
 (function (root) {
   "use strict";
 
   const MASTER_ROOT = "https://raw.githubusercontent.com/StarMoe-org/moenotes-masterdata/main";
-  const MUSIC_DATA_URL = "https://storage.bdon.moe/moenotes/music-data/music-data.json";
+  const DEPLOYED_MUSIC_DATA = "https://chariot2658.github.io/on-deckcalc/music-data/music-data.json";
+  const OWN_MUSIC_DATA = new URL("music-data/music-data.json", self.location.href).href;
   const ASSET_ROOT = "https://assets.bdon.moe";
   const MUSIC_DATA_MAX_AGE = 24 * 3600 * 1000;
 
@@ -76,7 +78,21 @@
       await caches.delete(cacheName);
       safeSet("deckcalc:musicDataAt", String(Date.now()));
     }
-    return cachedJson(cacheName, MUSIC_DATA_URL);
+    musicDataUrl = await chooseMusicData();
+    return cachedJson(cacheName, musicDataUrl);
+  }
+
+  let musicDataUrl = DEPLOYED_MUSIC_DATA;
+
+  /** The local build when this page's server has one (or the page is the deployment), else the deployment's. */
+  async function chooseMusicData() {
+    try {
+      const res = await fetch(OWN_MUSIC_DATA, { method: "HEAD", cache: "no-store" });
+      if (res.ok) return OWN_MUSIC_DATA;
+    } catch (e) {
+      /* offline: the deployment's entry in the cache may still serve */
+    }
+    return DEPLOYED_MUSIC_DATA;
   }
 
   async function clearAll() {
@@ -118,5 +134,7 @@
     }
   }
 
-  root.Data = { REGIONS, MUSIC_DATA_URL, loadMaster, loadMusicData, clearAll, memberThumb, snapThumb, safeGet, safeSet, safeRemove };
+  root.Data = {
+    REGIONS, get MUSIC_DATA_URL() { return musicDataUrl; }, loadMaster, loadMusicData, clearAll, memberThumb, snapThumb, safeGet, safeSet, safeRemove,
+  };
 })(self);

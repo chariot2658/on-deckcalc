@@ -2,3 +2,4 @@ __pycache__/
 .speed/
 presets/browser-roster*.json
 presets/browser-roster*.json.tmp
+music-data/

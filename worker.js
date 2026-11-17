@@ -1,5 +1,5 @@
 // Runs the deck search and the live simulation off the main thread.
-importScripts("engine.js", "simulate.js");
+importScripts("engine.js", "charts.js", "simulate.js");
 
 let master = null;
 let masterLang = null;
