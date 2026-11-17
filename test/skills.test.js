@@ -4,6 +4,7 @@
 // Run: node test/skills.test.js
 const fs = require("fs");
 const path = require("path");
+const loadMusicData = require("./music-data.js");
 const assert = require("assert");
 const E = require("../engine.js");
 const S = require("../simulate.js");
@@ -13,7 +14,7 @@ const root = path.join(__dirname, "..", "..");
 const raw = {};
 for (const t of E.TABLES) raw[t] = JSON.parse(fs.readFileSync(path.join(root, "moenotes-masterdata", "hk-tw-mo", t + ".json"), "utf8"));
 const m = E.buildMaster(raw, "_traditionalChinese");
-const md = JSON.parse(fs.readFileSync(path.join(root, "data", "music-data.json"), "utf8"));
+const md = loadMusicData(root);
 const perPower = E.perPowerFromMusicData(md);
 const sw = E.skillWeightsFromMusicData(md);
 const roster = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "presets", "my-roster.json"), "utf8"));

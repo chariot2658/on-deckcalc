@@ -159,10 +159,13 @@ async function gekisouLevels(input) {
   if (!supportFactors.has(key)) supportFactors.set(key, new Map());
   const known = levelFactors.get(key);
   const knownSupport = supportFactors.get(key);
+  // Levels music-data's gekisou-levels.json measured on every chart need no factor (Engine.memberGekisouInc and
+  // gekisouSupportTerms take their own increments). 激奏舞台's charts are measured apart, with the top levels only.
+  const measured = (shapes, id, level) => !!battle.levelsMeasured && shapes.has(id + ":" + level);
   const pairs = [];
   for (const o of input.members) {
     const v = Engine.memberView(master, o, {});
-    if (v && v.gekisouSkillId && !known.has(v.gekisouSkillId + ":" + v.gekisouSkillLevel)) pairs.push([v.gekisouSkillId, v.gekisouSkillLevel]);
+    if (v && v.gekisouSkillId && !known.has(v.gekisouSkillId + ":" + v.gekisouSkillLevel) && !measured(battle.shapes, v.gekisouSkillId, v.gekisouSkillLevel)) pairs.push([v.gekisouSkillId, v.gekisouSkillLevel]);
   }
   // Support skills below the top level that Engine.gekisouSupportLevelRatio cannot scale, for either member match
   // (the per-Just score-ups are modelled instead).
@@ -171,6 +174,7 @@ async function gekisouLevels(input) {
     const s = Engine.snapView(master, o);
     for (const [id, level] of (s && s.gekisouSupportSkills) || []) {
       if (level >= (master.gekisouSupportSkillMaxLevel.get(id) || 1) || Engine.gekisouSupportLevelRatio(master, id, level) !== null) continue;
+      if (measured(battle.supportShapes, id, level)) continue;
       for (const match of [0, 1]) {
         const k = id + ":" + level + ":" + match;
         if (Engine.gekisouSupportJustStack(master, id, level, match)) continue;

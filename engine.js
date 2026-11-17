@@ -2010,12 +2010,9 @@
             const gk = gekisouSkillRate(m, battle, bt, v, c.scoreId, input.gekisouLevels);
             for (let i = 0; i < 3; i++) a[k * 4 + i] = c.perPower > 0 ? ((all - gk) * x.r0[i]) / c.perPower : 0;
             if (gk > 0) {
-              const top = m.gekisouSkillMaxLevel.get(v.gekisouSkillId) || 1;
-              const g = bt.apt.get(c.scoreId).get(battle.shapes.get(v.gekisouSkillId + ":" + top));
-              // gekisouSkillRate's level factor: gk over the top level's whole increment.
-              const whole = g.tail + g.ranges.reduce((s, y) => s + y, 0);
-              const f = whole > 0 ? gk / whole : 0;
-              for (let i = 0; i < 3; i++) a[k * 4 + i] += (f * g.ranges[i]) / (1 + x.pbar[i] / 100);
+              // gekisouSkillRate's increment: a lower level's own, or the top level's times its factor.
+              const { g, factor } = memberGekisouInc(m, battle, bt, v, c.scoreId, input.gekisouLevels);
+              for (let i = 0; i < 3; i++) a[k * 4 + i] += (factor * g.ranges[i]) / (1 + x.pbar[i] / 100);
             }
             a[k * 4 + 3] = all;
           });
@@ -4981,6 +4978,18 @@
       // What Simulate.measureBattleChart plays for the shape: its first skill, at the level measured.
       if (sh.skills.length) out.shapeList.push({ id: sh.id, source: sh.source, mission: sh.mission, skill: [sh.skills[0].id, sh.skills[0].level] });
     }
+    // The lower levels' own increments (gekisou-levels.json, tools/build-music-data.py: measured as music-data measures
+    // the highest ones), when built with this music-data; their shapes get ids after music-data's.
+    const lv = gekisouLevelsOf(md);
+    const base = Math.max(-1, ...((dk.gekisouAptitude && dk.gekisouAptitude.shapes) || []).map((sh) => sh.id)) + 1;
+    if (lv) {
+      lv.shapes.forEach((sh, k) => {
+        const to = sh.source === "member" ? out.shapes : sh.source === "support" ? out.supportShapes : null;
+        if (to) for (const [id, level] of sh.skills) if (!to.has(id + ":" + level)) to.set(id + ":" + level, base + k);
+      });
+    }
+    let withApt = 0;
+    let withLevels = 0;
     const inc = (v) => ({ tail: v.tail[0], tailPerfect: v.tailPerfect[0], ranges: v.ranges.map((r) => [r.rangeScore[0], r.rangeScorePerfect[0]]) });
     const est = (x) => (Array.isArray(x) ? x[0] : x);
     const rows = (a, depth) => a && a.map((x) => (x === null ? null : depth > 1 ? rows(x, depth - 1) : est(x)));
@@ -5003,6 +5012,16 @@
           if (v.bandMatch === null || v.bandMatch === undefined) apt.set(v.shape, inc(v));
           else aptSupport.set(v.shape + ":" + (v.bandMatch ? 1 : 0), inc(v));
         }
+        // Keyed as apt (member) and aptSupport ("shape:match") are.
+        const rowsLv = lv && lv.charts[c.scoreId];
+        const aptLevels = rowsLv ? new Map() : null;
+        for (const [shape, match, tail, tailPerfect, a, aP, b, bP, x, xP] of rowsLv || []) {
+          aptLevels.set(match < 0 ? base + shape : base + shape + ":" + match, { tail, tailPerfect, ranges: [[a, aP], [b, bP], [x, xP]] });
+        }
+        if (d.gekisouAptitude) {
+          withApt++;
+          if (aptLevels) withLevels++;
+        }
         out.byScore.set(c.scoreId, {
           seeds: seeds.map((x) => ({
             seed: x.seed || 0,
@@ -5018,12 +5037,28 @@
           luck: (s.gekisouMissions || []).includes(2),
           apt,
           aptSupport,
+          aptLevels,
           justRanges: seeds[0].ranges.map((r) => [r.justCount || 0, r.maxCombo || 0]),
           spans: d.ranges.map((r) => [r.startMs || 0, r.endMs || 0]),
         });
       }
     }
+    // Every measured chart has the lower levels too: the worker then measures no level factor for a level they cover.
+    out.levelsMeasured = !!lv && withApt > 0 && withLevels === withApt;
     return out;
+  }
+
+  /**
+   * music-data's attached gekisou-levels.json (Data.loadMusicData) when it was built with that music-data (the same
+   * masterdata, chart release and power), else null.
+   */
+  function gekisouLevelsOf(md) {
+    const lv = md && md.gekisouLevels;
+    const p = (md && md.provenance) || {};
+    const b = (lv && lv.basedOn) || {};
+    const power = md && md.deck && md.deck.model && md.deck.model.power;
+    if (!lv || lv.format !== "deckcalc.gekisou-levels/1" || !p.master || !p.catalog) return null;
+    return b.master === p.master.version && b.catalog === p.catalog.sha256 && lv.power === power ? lv : null;
   }
 
   /**
@@ -5058,6 +5093,7 @@
     const aptSupport = new Map();
     const aptSupportJust = new Map();
     const justRanges = new Map();
+    const levelRates = new Map();
     for (const [sid, b] of battle.byScore) {
       if (only && !only.has(sid)) continue;
       const p = b.percents.map((row) => [row[0], pctOf(row)]);
@@ -5120,6 +5156,8 @@
         tail: (a.tailPerfect + jt * (a.tail - a.tailPerfect)) / P,
         ranges: a.ranges.map(([rs, rsP], i) => ((rsP + jr[i] * (rs - rsP)) * (1 + p[i][1] / 100)) / P),
       });
+      // The Just play's increments at the rank (what the per-Just stacks scale).
+      const atJust = (a) => ({ tail: a.tail / P, ranges: a.ranges.map(([y], i) => (y * (1 + p[i][1] / 100)) / P) });
       const g = new Map();
       for (const [shape, a] of b.apt) g.set(shape, at(a));
       apt.set(sid, g);
@@ -5128,29 +5166,63 @@
       for (const [key, a] of b.aptSupport || []) {
         const x = at(a);
         gs.set(key, x.tail + x.ranges.reduce((s, y) => s + y, 0));
-        gj.set(key, { tail: a.tail / P, ranges: a.ranges.map(([y], i) => (y * (1 + p[i][1] / 100)) / P) });
+        gj.set(key, atJust(a));
       }
       aptSupport.set(sid, gs);
       aptSupportJust.set(sid, gj);
+      // The lower levels' increments are many and few decks hold them: levelIncrement converts them when asked.
+      if (b.aptLevels) levelRates.set(sid, { at, atJust });
       if (b.justRanges) justRanges.set(sid, b.justRanges.map(([J, n], i) => [J, n, js[i], segs ? segs[i] : null]));
     }
-    return { rank: r, ranks, justRate: j, prof, perPower, weights, apt, aptSupport, aptSupportJust, justRanges, memo: new Map() };
+    return { rank: r, ranks, justRate: j, prof, perPower, weights, apt, aptSupport, aptSupportJust, justRanges, levelRates, memo: new Map() };
   }
 
   /**
-   * Expected score per unit of power a member's Gekisou skill adds on chart `scoreId`: nnnotes' measured increment of
-   * its shape (alone, at the top level) times `levels` ("skillId:level" -> factor, Simulate.gekisouLevelFactors) for a
-   * lower level, whose trigger conditions or activation time differ. 0 when the shape was not measured on the chart or a
-   * lower level has no factor. Skills of one deck are added up, which is approximate (the simulation plays them all).
+   * A lower level's own increment on chart `scoreId` at bt's rank and Just rate, as bt.apt holds the highest levels'
+   * ({tail, ranges} per unit of power; with `just` the Just play's at the rank, as bt.aptSupportJust), or null when the
+   * data has none for the chart (gekisou-levels.json absent, or a chart measured apart such as 激奏舞台's). `key`:
+   * battle.shapes' id of a member skill's level, or "shape:match" of a support skill's.
+   */
+  function levelIncrement(battle, bt, scoreId, key, just = false) {
+    const b = battle.byScore.get(scoreId);
+    const raw = b && b.aptLevels && b.aptLevels.get(key);
+    const f = raw && bt.levelRates && bt.levelRates.get(scoreId);
+    if (!f) return null;
+    const k = (just ? "lvJust|" : "lv|") + scoreId + "|" + key;
+    if (!bt.memo.has(k)) bt.memo.set(k, just ? f.atJust(raw) : f.at(raw));
+    return bt.memo.get(k);
+  }
+
+  /**
+   * A member's Gekisou skill on chart `scoreId` as {g: increment ({tail, ranges} per unit of power at bt's rank and Just
+   * rate), factor}: at a lower level its own measured increment (factor 1) when the data has it, else nnnotes' measured
+   * increment of the shape at the top level times `levels` ("skillId:level" -> factor, Simulate.gekisouLevelFactors).
+   * null when neither was measured on the chart or a lower level has no factor.
+   */
+  function memberGekisouInc(m, battle, bt, v, scoreId, levels) {
+    if (!v.gekisouSkillId) return null;
+    const id = v.gekisouSkillId;
+    const top = m.gekisouSkillMaxLevel.get(id) || 1;
+    if (v.gekisouSkillLevel < top) {
+      const own = battle.shapes.get(id + ":" + v.gekisouSkillLevel);
+      const g = own !== undefined ? levelIncrement(battle, bt, scoreId, own) : null;
+      if (g) return { g, factor: 1 };
+    }
+    const factor = v.gekisouSkillLevel >= top ? 1 : (levels && levels.get(id + ":" + v.gekisouSkillLevel)) || 0;
+    const shape = battle.shapes.get(id + ":" + top);
+    const g = factor && shape !== undefined && bt.apt.get(scoreId) && bt.apt.get(scoreId).get(shape);
+    return g ? { g, factor } : null;
+  }
+
+  /**
+   * Expected score per unit of power a member's Gekisou skill adds on chart `scoreId`: the measured increment of its
+   * shape alone, at its level (memberGekisouInc: a lower level's own when gekisou-levels.json has it, else the top
+   * level's times `levels`' factor, as a lower level's trigger conditions or activation time differ). 0 when it was not
+   * measured on the chart. Skills of one deck are added up, which is approximate (the simulation plays them all).
    */
   function gekisouSkillRate(m, battle, bt, v, scoreId, levels) {
-    if (!v.gekisouSkillId) return 0;
-    const top = m.gekisouSkillMaxLevel.get(v.gekisouSkillId) || 1;
-    const factor = v.gekisouSkillLevel >= top ? 1 : (levels && levels.get(v.gekisouSkillId + ":" + v.gekisouSkillLevel)) || 0;
-    const shape = battle.shapes.get(v.gekisouSkillId + ":" + top);
-    const g = factor && shape !== undefined && bt.apt.get(scoreId) && bt.apt.get(scoreId).get(shape);
-    if (!g) return 0;
-    return factor * (g.tail + g.ranges.reduce((a, x) => a + x, 0));
+    const x = memberGekisouInc(m, battle, bt, v, scoreId, levels);
+    return x ? x.factor * (x.g.tail + x.g.ranges.reduce((a, y) => a + y, 0)) : 0;
   }
 
   /**
@@ -5273,13 +5345,14 @@
   /**
    * What the Gekisou support skills of snap `s` add paired with member `v` on chart `scoreId`, per unit of power, as
    * [[mission, gain, kind (gekisouSupportKind: what other members' Gekisou skills raise), match]] (one per skill):
-   * nnnotes' measured increment of the skill's shape (at the top level, beside a
-   * Gekisou skill that does nothing) for whether `v` meets its member condition, times the level's factor below the top
-   * level: gekisouSupportLevelRatio, else `levels` ("skillId:level:match" -> factor, Simulate.gekisouSupportLevelFactors;
-   * 0 without one). A score-up per Just up to a cap (gekisouSupportJustStack) depends on the Just rate and the cap, not
-   * in proportion: each range's increment of the Just play is scaled by the modelled stack (justStackShare) at the Just
-   * rate and level over the Just play's at the top level, and by the range's score (Just notes score more); this is
-   * within a few % of the simulation (13% low at worst, at Just rate 20%). Nothing when the member has no Gekisou
+   * the measured increment of the skill's shape (beside a Gekisou skill that does nothing) for whether `v` meets its
+   * member condition: at its level when gekisou-levels.json measured it on the chart, else nnnotes' at the top level
+   * times the level's factor: gekisouSupportLevelRatio, else `levels` ("skillId:level:match" -> factor,
+   * Simulate.gekisouSupportLevelFactors; 0 without one). A score-up per Just up to a cap (gekisouSupportJustStack)
+   * depends on the Just rate and the cap, not in proportion: each range's increment of the Just play (the level's own,
+   * else the top level's) is scaled by the modelled stack (justStackShare) at the Just rate and level over the stack the
+   * increment was measured with on the Just play, and by the range's score (Just notes score more); from the top level
+   * this is within a few % of the simulation (13% low at worst, at Just rate 20%). Nothing when the member has no Gekisou
    * skill: the client builds support skills only beside one. Pairings are added up, which is approximate: the
    * simulation plays them together with the members' Gekisou skills (a member's LUCK gauge skill brings more of the
    * rushes that LUCKY RUSH 分數UP acts in, a COMBO count-up skill stacks the COMBO range's score-up sooner: the search
@@ -5295,15 +5368,20 @@
       const row = m.gekisouSupportSkills.get(id);
       if (shape === undefined || !row) continue;
       const match = gekisouSupportMatch(m, v, id, top) ? 1 : 0;
+      // A lower level's own increment when gekisou-levels.json measured it on the chart (then no ratio or factor).
+      const ownShape = level < top ? battle.supportShapes.get(id + ":" + level) : undefined;
+      const ownKey = ownShape !== undefined ? ownShape + ":" + match : null;
       const stack = gekisouSupportJustStack(m, id, Math.min(level, top), match);
       const gj = stack && bt.aptSupportJust && bt.aptSupportJust.get(scoreId);
       if (gj) {
-        const a = gj.get(shape + ":" + match);
+        const own = ownKey && levelIncrement(battle, bt, scoreId, ownKey, true);
+        const a = own || gj.get(shape + ":" + match);
         const jr = bt.justRanges.get(scoreId);
         if (!a || !jr) continue;
         const k = scoreId + "|" + id + ":" + level + ":" + match;
         if (!bt.memo.has(k)) {
-          const st1 = gekisouSupportJustStack(m, id, top, match);
+          // The stack the measured increments were played with: the level's own, or the top level's.
+          const st1 = gekisouSupportJustStack(m, id, own ? level : top, match);
           let x = 0;
           let x1 = 0;
           a.ranges.forEach((y, i) => {
@@ -5316,6 +5394,12 @@
         }
         const gain = bt.memo.get(k);
         if (gain) out.push([row._gekisouMissionType, gain, null, match]);
+        continue;
+      }
+      const own = ownKey && levelIncrement(battle, bt, scoreId, ownKey);
+      if (own) {
+        const gain = own.tail + own.ranges.reduce((s, y) => s + y, 0);
+        if (gain) out.push([row._gekisouMissionType, gain, gekisouSupportKind(m, id), match]);
         continue;
       }
       const factor = level >= top ? 1 : gekisouSupportLevelRatio(m, id, level) ?? (levels && levels.get(id + ":" + level + ":" + match)) ?? 0;
@@ -5512,8 +5596,9 @@
    * reference RUSH support gain / its effect value gives the original exposure. Their ratio estimates the extra
    * share, including this rank's range bonuses. Native and support activation frames differ, so this remains an
    * estimate; final deck comparisons use replay. Taking the largest single avoids adding overlapping gauge gains.
-   * Lower levels use the LIFE probability ratio (11003) or the top-level exposure (11001). The latter approximates
-   * the shorter activation window. Single-seed member level factors are too noisy to scale RUSH interactions.
+   * Lower levels use their own expected gain when gekisou-levels.json measured it on the chart, else the LIFE
+   * probability ratio (11003) or the top-level exposure (11001). The latter approximates the shorter activation window.
+   * Single-seed member level factors are too noisy to scale RUSH interactions.
    */
   function luckGaugeBoost(m, battle, bt, members, scoreId) {
     const b = battle && battle.byScore.get(scoreId);
@@ -5547,8 +5632,10 @@
       const effects = m.gekisouSkillEffects.get(id + ":" + top) || [];
       // Only a pure gauge gain can be attributed to RUSH exposure.
       if (!effects.length || effects.some((e) => e._skillEffectType !== 11001 && e._skillEffectType !== 11003)) continue;
-      const factor = level >= top ? 1 : v.luckGauge / luckGaugeOf(m, id, top);
-      const a = bt.apt.get(scoreId)?.get(battle.shapes.get(id + ":" + top));
+      const own = level < top ? battle.shapes.get(id + ":" + level) : undefined;
+      const g = own !== undefined ? levelIncrement(battle, bt, scoreId, own) : null;
+      const factor = g || level >= top ? 1 : v.luckGauge / luckGaugeOf(m, id, top);
+      const a = g || bt.apt.get(scoreId)?.get(battle.shapes.get(id + ":" + top));
       if (a) best = Math.max(best, factor * (a.tail + a.ranges.reduce((s, x) => s + x, 0)) * scale);
     }
     return best;
@@ -5919,7 +6006,7 @@
     leaderBonuses, cardEventBonus, eventEffects, describeEventBonus, payoff, boostRate, eventPoints, eventItems,
     charts, rankThresholds, battleThresholds, battleRequiredScore, scoreRankOf, search, planEvent, currentEvent, perPowerFromMusicData, chartLengthsFromMusicData, musicView,
     parseTime, comboBreakFactors, playShares, accuracyFactor, shareQuantiles, skillWeightsFromMusicData, skillFactor, skillKindOf, liveSkillTerms, liveSkillRate,
-    battleFromMusicData, battleRates, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
+    battleFromMusicData, gekisouLevelsOf, battleRates, levelIncrement, memberGekisouInc, gekisouSkillRate, gekisouSupportMatch, gekisouSupportLevelRatio, gekisouSupportTerms, comboScope,
     gekisouSupportRate, gekisouSupportJustStack, justStackShare, widenedJustRate, justWindowRows, justWindowsOf, justProfile,
     deckJustProfile, justTimeline, deckJustBoost, justSegments, snapSkillKey, snapSkillClass, skillGaps, scoreScope, roughSnapRate,
     luckGaugeOf, luckGaugeBoost, gekisouSupportKind, comboCountOf, comboCountBoost, comboTimelineGain, comboRankScope, comboRangeCounts, rankChances, aboveChance, expectedPercent, MISSION_PT_OFFSET, gekisouSongType, gekisouSongGroups, roomPayoff, opponentLevels, gekisouRanks, gekisouKey, gekisouOut, OPPONENT_RANGE,

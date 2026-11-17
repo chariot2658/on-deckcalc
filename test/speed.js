@@ -9,6 +9,7 @@
 // --baseline skips the new candidate guarantees when measuring an older --worker/--engine implementation.
 const fs = require("fs");
 const path = require("path");
+const loadMusicData = require("./music-data.js");
 const vm = require("vm");
 const crypto = require("crypto");
 const assert = require("assert");
@@ -21,7 +22,7 @@ const S = require(path.resolve(option("simulate") || path.join(__dirname, "../si
 const root = path.resolve(option("data-root") || path.join(__dirname, "../.."));
 const raw = {};
 for (const t of E.TABLES) raw[t] = JSON.parse(fs.readFileSync(path.join(root, "moenotes-masterdata/hk-tw-mo", t + ".json"), "utf8"));
-const md = JSON.parse(fs.readFileSync(path.join(root, "data/music-data.json"), "utf8"));
+const md = loadMusicData(root);
 const rosterFile = path.join(__dirname, "../presets/browser-roster-hk-tw-mo.json");
 const roster = JSON.parse(fs.readFileSync(option("roster") || (fs.existsSync(rosterFile) ? rosterFile : path.join(__dirname, "../presets/my-roster.json")), "utf8"));
 const master = E.buildMaster(raw, "_traditionalChinese");

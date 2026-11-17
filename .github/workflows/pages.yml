@@ -3,7 +3,8 @@ name: 網站
 # Publishes the site together with its own music-data (tools/build-music-data.py), rebuilt when the TW masterdata, the
 # charts or the build tool change: nnnotes' music-data has not been rebuilt since 2026-10-30. The data exists only in
 # the deployed site, not in this repository, and without the notes or game text (tools/publish-music-data.js; the
-# browser rebuilds the notes from haneoka.org's chart files). Hourly it only looks for a change; a push publishes the new
+# browser rebuilds the notes from haneoka.org's chart files). music-data/gekisou-levels.json (the Gekisou skills' lower
+# levels, measured by the same build) is published beside it. Hourly it only looks for a change; a push publishes the new
 # code with the data of the current inputs (cached). While a build fails the last deployment stays up and GitHub mails
 # the failure.
 on:
@@ -53,7 +54,7 @@ jobs:
         run: |
           master=$(curl -fsSL --retry 3 https://raw.githubusercontent.com/StarMoe-org/moenotes-masterdata/main/current_version.json | jq -er '.regions["hk-tw-mo"].version')
           charts=$(jq -er .servers.intl.sha256 charts/manifest.json)
-          tool=$(cat deckcalc/tools/build-music-data.py deckcalc/tools/publish-music-data.js deckcalc/tools/fetch-charts.py deckcalc/charts.js deckcalc/tools/deck-model.json deckcalc/tools/deck-model-tolerance.patch | sha256sum | cut -c1-32)
+          tool=$(cat deckcalc/tools/build-music-data.py deckcalc/tools/publish-music-data.js deckcalc/tools/fetch-charts.py deckcalc/charts.js deckcalc/tools/deck-model.json deckcalc/tools/deck-model-tolerance.patch deckcalc/tools/deck-gekisou-levels.patch | sha256sum | cut -c1-32)
           echo "masterdata $master, charts $charts, tool $tool"
           echo "key=music-data-$(printf '%s ' "$master" "$charts" "$tool" "$DECK_COMMIT" "$NNNOTES_COMMIT" | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
 
@@ -89,7 +90,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: deck-bin
-          key: deck-bin-${{ env.DECK_COMMIT }}-${{ hashFiles('deckcalc/tools/deck-model-tolerance.patch') }}
+          key: deck-bin-${{ env.DECK_COMMIT }}-${{ hashFiles('deckcalc/tools/deck-model-tolerance.patch', 'deckcalc/tools/deck-gekisou-levels.patch') }}
       - uses: actions/checkout@v7
         if: steps.data.outputs.cache-hit != 'true' && steps.deck-bin.outputs.cache-hit != 'true'
         with:
@@ -100,6 +101,7 @@ jobs:
         if: steps.data.outputs.cache-hit != 'true' && steps.deck-bin.outputs.cache-hit != 'true'
         run: |
           patch -p1 -d ournotes-deck < deckcalc/tools/deck-model-tolerance.patch
+          patch -p1 -d ournotes-deck < deckcalc/tools/deck-gekisou-levels.patch
           (cd ournotes-deck && cargo build --release -p ournotes-search --bin ournotes-deck)
           mkdir -p deck-bin
           cp ournotes-deck/target/release/ournotes-deck deck-bin/

@@ -4,11 +4,12 @@
 // Run: node test/coverage.test.js
 const fs = require("fs");
 const path = require("path");
+const loadMusicData = require("./music-data.js");
 const assert = require("assert");
 const E = require("../engine.js");
 
 const root = path.join(__dirname, "..", "..");
-const md = JSON.parse(fs.readFileSync(path.join(root, "data", "music-data.json"), "utf8"));
+const md = loadMusicData(root);
 const data = { skillWeights: E.skillWeightsFromMusicData(md), battle: E.battleFromMusicData(md) };
 const load = (region) => {
   const raw = {};

@@ -27,6 +27,8 @@ SITE = TOOLS.parent
 ROOT = SITE.parent
 BUILD = ROOT / "data" / "build"
 DECK_URL = "https://github.com/empty-sekai/ournotes-deck.git"
+# Applied to ournotes-deck in this order (tools/build-music-data.py says why).
+PATCHES = ("deck-model-tolerance.patch", "deck-gekisou-levels.patch")
 
 
 def remove(path):
@@ -74,8 +76,8 @@ def engine_package(pins):
 
 
 def deck_tool(pins):
-    patch = TOOLS / "deck-model-tolerance.patch"
-    exe = BUILD / f"ournotes-deck-{pins['DECK_COMMIT'][:12]}-{sha256(patch)[:12]}{'.exe' if os.name == 'nt' else ''}"
+    patches = [TOOLS / n for n in PATCHES]
+    exe = BUILD / f"ournotes-deck-{pins['DECK_COMMIT'][:12]}-{sha256(*patches)[:12]}{'.exe' if os.name == 'nt' else ''}"
     if exe.is_file():
         return exe
     print("第一次要編譯 ournotes-deck（幾分鐘）…", flush=True)
@@ -83,7 +85,8 @@ def deck_tool(pins):
     remove(src)
     run("git", "clone", "-q", "-c", "core.autocrlf=false", "--filter=blob:none", DECK_URL, src)
     run("git", "-C", src, "checkout", "-q", pins["DECK_COMMIT"])
-    run("git", "-C", src, "apply", patch)
+    for patch in patches:
+        run("git", "-C", src, "apply", patch)
     run("cargo", "build", "--release", "-p", "ournotes-search", "--bin", "ournotes-deck", cwd=src, env={**os.environ, "CARGO_TARGET_DIR": str(target)})
     shutil.copy2(target / "release" / ("ournotes-deck.exe" if os.name == "nt" else "ournotes-deck"), exe)
     remove(src)
@@ -99,6 +102,7 @@ def install(out, whole_deck):
     remove(tests)
     (tests / "engine").mkdir(parents=True)
     shutil.copy2(out / "music-data.json", data / "music-data.json")
+    shutil.copy2(out / "gekisou-levels.json", data / "gekisou-levels.json")
     shutil.copy2(replay / "manifest.json", tests / "manifest.json")
     shutil.copy2(whole_deck, tests / "deck-data.json")
     for f in (replay / "engine").iterdir():
@@ -125,7 +129,7 @@ def main():
         print(f"注意：nnnotes 是 {have[:8]}，部署用的是 {pins['NNNOTES_COMMIT'][:8]}", flush=True)
 
     charts = update_charts()
-    tools = [TOOLS / n for n in ("build-music-data.py", "publish-music-data.js", "fetch-charts.py", "build-pins.env", "deck-model.json", "deck-model-tolerance.patch")] + [SITE / "charts.js"]
+    tools = [TOOLS / n for n in ("build-music-data.py", "publish-music-data.js", "fetch-charts.py", "build-pins.env", "deck-model.json", *PATCHES)] + [SITE / "charts.js"]
     version = json.loads((ROOT / "moenotes-masterdata" / "current_version.json").read_text(encoding="utf-8"))["regions"]["hk-tw-mo"]["version"]
     charts_sha = json.loads((charts / "manifest.json").read_text(encoding="utf-8"))["servers"]["intl"]["sha256"]
     stamp = f"{version} {charts_sha} {sha256(*tools)}"

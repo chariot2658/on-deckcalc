@@ -1,7 +1,8 @@
 /*
- * Loads the master tables from StarMoe-org/moenotes-masterdata (raw GitHub) and music-data.json from music-data/ beside
- * the page: the deployment's (.github/workflows/pages.yml), or on a local copy the one tools/build-local.py wrote, else
- * the deployment's. Both are cached with the Cache API (keyed by the masterdata version of the region).
+ * Loads the master tables from StarMoe-org/moenotes-masterdata (raw GitHub) and music-data.json (with the
+ * gekisou-levels.json beside it) from music-data/ beside the page: the deployment's (.github/workflows/pages.yml), or
+ * on a local copy the one tools/build-local.py wrote, else the deployment's. Both are cached with the Cache API (keyed
+ * by the masterdata version of the region).
  */
 (function (root) {
   "use strict";
@@ -70,7 +71,12 @@
     return { ...info, raw };
   }
 
-  /** music-data.json, refreshed once a day (or after `maxAge` ms, or when forced). */
+  /**
+   * music-data.json, refreshed once a day (or after `maxAge` ms, or when forced), with `gekisouLevels` attached: the
+   * gekisou-levels.json the same build wrote beside it (the Gekisou skills' lower levels, measured; see
+   * tools/build-music-data.py; Engine.battleFromMusicData uses it only when it was made from the same masterdata and
+   * charts). Without it (an older build) the search falls back to sampled level factors.
+   */
   async function loadMusicData(force, maxAge = MUSIC_DATA_MAX_AGE) {
     const stamp = Number(safeGet("deckcalc:musicDataAt") || 0);
     const cacheName = "deckcalc-musicdata";
@@ -79,7 +85,10 @@
       safeSet("deckcalc:musicDataAt", String(Date.now()));
     }
     musicDataUrl = await chooseMusicData();
-    return cachedJson(cacheName, musicDataUrl);
+    const md = await cachedJson(cacheName, musicDataUrl);
+    const levels = await cachedJson(cacheName, new URL("gekisou-levels.json", musicDataUrl).href).catch(() => null);
+    if (md && levels) md.gekisouLevels = levels;
+    return md;
   }
 
   let musicDataUrl = DEPLOYED_MUSIC_DATA;

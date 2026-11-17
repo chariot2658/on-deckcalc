@@ -7,7 +7,8 @@ exporter (nnnotes.musicdata.export, with all its checks) with the inputs it coul
     the same files (then from haneoka-gakuen/ournotes-charts, gone since 2026-11-10) gave the notes, skill events and
     fevers of all 372 charts published on 2026-10-30, exactly;
   - the deck model: the `ournotes-deck chart-stats` command instead of the Python extension, the same Rust code at the
-    commit deck-model.json names, built with deck-model-tolerance.patch (the check that stopped nnnotes' builds);
+    commit deck-model.json names, built with deck-model-tolerance.patch (the check that stopped nnnotes' builds) and
+    deck-gekisou-levels.patch (below);
   - a song's BGM length: its last note + 1 s. Only the replay's clock reads it: 192 cases of decks, charts and Gekisou
     on/off scored the same as with the real length.
 
@@ -17,12 +18,20 @@ exporter (nnnotes.musicdata.export, with all its checks) with the inputs it coul
 DIR gets music-data.json and replay/<sha256>/ (manifest.json, deck-data.json, engine/, and files only nnnotes' site
 reads). A song whose charts haneoka.org does not have yet is left out and named. .github/workflows/pages.yml runs
 this and deploys the result.
+
+DIR also gets gekisou-levels.json, which nnnotes does not make: music-data measures each Gekisou skill at its highest
+level only (a member card's skill, a snap's support skill at its highest rank), so the levels below are measured the
+same way, alone on each chart under the nominal lottery expectation (`chart-stats --gekisou-lower-levels`), instead
+of the site sampling a level factor (one per level for every chart, while a level's share of the highest level's gain
+runs from 0 to 0.72 by chart, and one seed per chart on LUCK charts). Data.loadMusicData attaches it to music-data
+when `basedOn` matches; Engine.battleFromMusicData reads it.
 """
 import argparse
 import dataclasses
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -125,6 +134,71 @@ def main():
         replay_dir=args.out / "replay", replay_engine=pathlib.Path(args.engine),
     )
     print(json.dumps(r, ensure_ascii=False))
+    gekisou_levels()
+
+
+LEVELS_FORMAT = "deckcalc.gekisou-levels/1"
+
+
+def gekisou_levels():
+    """gekisou-levels.json (the docstring above): {format, basedOn {master, catalog} (music-data's provenance), power,
+    shapes [{source, skills [[id, level]]}] (a shape: skills with the same effect rows, its index its id here),
+    charts {scoreId: [[shape, match (-1 for a member skill, else whether the member meets the support skill's member
+    condition), tail, tailPerfect, then each range's rangeScore and rangeScorePerfect]]}}: the centers of chart-stats'
+    estimates, the increments Engine.battleFromMusicData reads of music-data's own variants."""
+    md = json.loads((args.out / "music-data.json").read_text(encoding="utf-8"))
+    deck = next((args.out / "replay").iterdir()) / "deck-data.json"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pathlib.Path(tmp) / "levels.json"
+        done = subprocess.run(
+            [args.deck_bin, "chart-stats", "--data", str(deck), "--gekisou-lower-levels", "--seeds", "1", "--jobs", str(args.jobs), "-o", str(out)],
+            stderr=subprocess.PIPE, text=True,
+        )
+        # Per-chart timings are noise in the log; anything else (a tolerated check, an error) is kept.
+        for line in done.stderr.splitlines():
+            if not re.fullmatch(r"chart \d+ [\d.]+ s", line.strip()):
+                print(line, file=sys.stderr)
+        if done.returncode:
+            sys.exit("build-music-data: chart-stats --gekisou-lower-levels failed")
+        stats = json.loads(out.read_text(encoding="utf-8"))
+    if stats["model"]["power"] != md["deck"]["model"]["power"]:
+        sys.exit(f"build-music-data: lower levels at power {stats['model']['power']}, music-data at {md['deck']['model']['power']}")
+    tops = {(s["source"], k["id"], k["level"]) for s in md["deck"]["gekisouAptitude"]["shapes"] for k in s["skills"]}
+    shapes = []
+    for s in stats["gekisouAptitude"]["shapes"]:
+        skills = [[k["id"], k["level"]] for k in s["skills"]]
+        clash = [k for k in skills if (s["source"], *k) in tops]
+        if clash:
+            sys.exit(f"build-music-data: lower levels {clash} are music-data's highest")
+        shapes.append({"source": s["source"], "skills": skills})
+
+    def num(x):
+        x = round(float(x), 2)
+        return int(x) if x == int(x) else x
+
+    charts = {}
+    measured = {c["scoreId"] for s in md["songs"] for c in s["charts"] if (c.get("deck") or {}).get("gekisouAptitude")}
+    for c in stats["charts"]:
+        apt = c.get("gekisouAptitude")
+        if not apt or c["scoreId"] not in measured:
+            continue
+        rows = []
+        for v in apt["variants"]:
+            if len(v["ranges"]) != 3:
+                sys.exit(f"build-music-data: chart {c['scoreId']} shape {v['shape']}: {len(v['ranges'])} ranges")
+            match = -1 if v["bandMatch"] is None else int(bool(v["bandMatch"]))
+            nums = [v["tail"][0], v["tailPerfect"][0]] + [x for r in v["ranges"] for x in (r["rangeScore"][0], r["rangeScorePerfect"][0])]
+            rows.append([v["shape"], match, *map(num, nums)])
+        charts[str(c["scoreId"])] = rows
+    missing = sorted(measured - {int(k) for k in charts})
+    if missing:
+        sys.exit(f"build-music-data: no lower levels on charts {missing[:10]}")
+    prov = md["provenance"]
+    doc = {"format": LEVELS_FORMAT, "basedOn": {"master": prov["master"]["version"], "catalog": prov["catalog"]["sha256"]},
+           "power": stats["model"]["power"], "shapes": shapes, "charts": charts}
+    text = json.dumps(doc, separators=(",", ":")) + "\n"
+    (args.out / "gekisou-levels.json").write_bytes(text.encode("utf-8"))
+    print(f"gekisou-levels.json: {sum(len(s['skills']) for s in shapes)} skill levels in {len(shapes)} shapes on {len(charts)} charts, {len(text) // 1024} KB")
 
 
 def read_one(src, name):
