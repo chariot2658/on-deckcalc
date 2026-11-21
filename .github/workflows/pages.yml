@@ -109,7 +109,8 @@ jobs:
       - name: 下載 masterdata 和模擬引擎
         if: steps.data.outputs.cache-hit != 'true'
         run: |
-          pip install 'numpy>=2.0'
+          # nnnotes' chart code imports numpy, and its addressables module Crypto.Cipher (pycryptodome), on import.
+          pip install 'numpy>=2.0' 'pycryptodome>=3.20'
           git clone -q --depth 1 --filter=blob:none --sparse https://github.com/StarMoe-org/moenotes-masterdata.git masterdata
           git -C masterdata sparse-checkout set hk-tw-mo
           engine="ournotes-replay-wasm-$DECK_TAG.tar.gz"

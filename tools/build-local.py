@@ -4,8 +4,8 @@
 
 Run it from anywhere in the workspace layout (CLAUDE.md): it reads ../moenotes-masterdata/hk-tw-mo and ../nnnotes, and
 keeps what it downloads in ../data/build (the charts of haneoka.org's current release, tools/fetch-charts.py; the
-replay engine; and the `ournotes-deck` tool built once for the versions in build-pins.env; needs git, cargo, node and
-numpy). The result goes through tools/publish-music-data.js like the deployment's, so the browser rebuilds the notes
+replay engine; and the `ournotes-deck` tool built once for the versions in build-pins.env; needs git, cargo, node,
+numpy and pycryptodome, which nnnotes imports). The result goes through tools/publish-music-data.js like the deployment's, so the browser rebuilds the notes
 from haneoka.org here too. It is written to music-data/ beside the site, which data.js prefers over the deployment's, and to ../data for the
 tests (with the deck data whole, as test/fetch-replay.js leaves it). Then press 「更新資料」 in the site. It stops early
 when the masterdata, the charts and these tools are as the last time.

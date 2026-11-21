@@ -57,7 +57,7 @@
 
 網站上不放音符：部署的資料只有統計數字和整場模擬要用的數值表（`tools/publish-music-data.js` 拿掉音符、歌名、作詞作曲和技能文字）。音符由瀏覽器第一次模擬時從 haneoka.org 下載建置時那個 release 的譜面檔並換算，多花幾秒，之後讀快取（譜面原本放在 haneoka-gakuen/ournotes-charts，2026-11-10 下架；haneoka.org 上是同樣的檔案）。換算的 `charts.js` 是 nnnotes 轉換程式的移植，部署前會逐張和 Python 版比對，有一張不同就不部署；瀏覽器組回來後也會核對整份資料的 SHA-256。
 
-本機也能自己建：`python -I deckcalc/tools/build-local.py`（需要工作區的 nnnotes 和 moenotes-masterdata clone，以及 git、cargo、node、numpy；約 3 分鐘）。結果和部署的一樣不含音符，放在 `music-data/`（git 不追蹤）和測試用的 `../data`，本機網站會優先用它，按「更新資料」生效。
+本機也能自己建：`python -I deckcalc/tools/build-local.py`（需要工作區的 nnnotes 和 moenotes-masterdata clone，以及 git、cargo、node 和 Python 的 numpy、pycryptodome；約 12 分鐘）。結果和部署的一樣不含音符，放在 `music-data/`（git 不追蹤）和測試用的 `../data`，本機網站會優先用它，按「更新資料」生效。
 
 ournotes-deck 對每張譜面有一項自我檢查，卡住 nnnotes 的就是它：10009100（EASY）差 2353 分、上限 2208 分，約分數的 0.03%。自己建的版本把這項檢查放寬到 0.1%（`tools/deck-model-tolerance.patch`，超過原上限的譜面會印在建置紀錄裡），其他計算不變。
 
