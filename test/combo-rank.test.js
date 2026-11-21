@@ -114,8 +114,8 @@ function comboRankOf(session, input) {
       sets++;
     }
   }
-  assert.ok(worst <= 4, `timeline vs replay: worst ${worst}`);
-  console.log(`mission pt of IMG_0177–0182 exact; ${sets} sets on ${jobs.length} charts within ${worst} of the replay`);
+  assert.strictEqual(worst, 0, `timeline vs replay: worst ${worst}`);
+  console.log(`mission pt of IMG_0177–0182 exact; ${sets} sets on ${jobs.length} charts equal to the replay`);
 
   // Searches: a small roster holding COMBO count-up members beside stronger ones of the same characters.
   const allM = roster.members.filter((o) => E.memberView(m, o, roster.player));
