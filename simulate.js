@@ -887,10 +887,24 @@
     const manifest = await (await get(manifestUrl)).json();
     if (!manifest.engine) throw new Error("replay manifest without an engine");
     const at = (u) => new URL(u, manifestUrl).href;
+    // A deck data published without notes is completed from the charts once (Charts.fullDeck, a few seconds) and kept
+    // whole; the lock has the worker and its helpers, starting together, do that once.
+    const deckText = async () => {
+      if (!manifest.chartSource) return (await get(at(manifest.deckData.url))).text();
+      const key = at(manifest.deckData.url) + "?charts";
+      const build = async () => {
+        const hit = cache && (await cache.match(key));
+        if (hit) return hit.text();
+        const text = await root.Charts.fullDeck(await (await get(at(manifest.deckData.url))).text(), manifest.chartSource);
+        if (cache) await cache.put(key, new Response(text));
+        return text;
+      };
+      return typeof navigator !== "undefined" && navigator.locks ? navigator.locks.request("deckcalc-charts", build) : build();
+    };
     const [js, wasm, deck] = await Promise.all([
       get(at(manifest.engine.js.url)).then((r) => r.text()),
       get(at(manifest.engine.wasm.url)).then((r) => r.arrayBuffer()),
-      get(at(manifest.deckData.url)).then((r) => r.text()),
+      deckText(),
     ]);
     const url = URL.createObjectURL(new Blob([js], { type: "text/javascript" }));
     try {

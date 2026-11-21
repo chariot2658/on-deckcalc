@@ -2,13 +2,14 @@
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
+const loadMusicData = require("./music-data.js");
 const E = require("../engine.js");
 const S = require("../simulate.js");
 const loadReplay = require("./replay.js");
 const root = path.join(__dirname, "../..");
 const raw = Object.fromEntries(E.TABLES.map((t) => [t, JSON.parse(fs.readFileSync(path.join(root, "moenotes-masterdata/hk-tw-mo", t + ".json")))]));
 const master = E.buildMaster(raw, "_traditionalChinese");
-const md = JSON.parse(fs.readFileSync(path.join(root, "data/music-data.json")));
+const md = loadMusicData(root);
 const battle = E.battleFromMusicData(md);
 const roster = JSON.parse(fs.readFileSync(path.join(__dirname, "../presets/my-roster.json")));
 

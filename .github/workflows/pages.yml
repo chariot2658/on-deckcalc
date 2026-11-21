@@ -1,0 +1,157 @@
+name: 網站
+
+# Publishes the site together with its own music-data (tools/build-music-data.py), rebuilt when the TW masterdata, the
+# charts or the build tool change: nnnotes' music-data has not been rebuilt since 2026-10-30. The data exists only in
+# the deployed site, not in this repository, and without the notes or game text (tools/publish-music-data.js; the
+# browser rebuilds the notes from haneoka.org's chart files). music-data/gekisou-levels.json (the Gekisou skills' lower
+# levels, measured by the same build) is published beside it. Hourly it only looks for a change; a push publishes the new
+# code with the data of the current inputs (cached). While a build fails the last deployment stays up and GitHub mails
+# the failure.
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      publish: ${{ steps.publish.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: deckcalc
+      - name: 固定的工具版本
+        run: cat deckcalc/tools/build-pins.env >> "$GITHUB_ENV"
+
+      # The charts of haneoka.org's current release (tools/fetch-charts.py), downloaded once per release. A new release
+      # rebuilds the data only when the charts changed.
+      - name: haneoka.org 的 release
+        id: release
+        run: |
+          release=$(curl -fsSI --retry 3 https://haneoka.org/api/v1/servers/intl/sources/tree | tr -d '\r' | awk -F': ' 'tolower($1) == "x-haneoka-release-id" { print $2 }')
+          test -n "$release"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+      - name: 譜面（快取）
+        uses: actions/cache@v6
+        with:
+          path: charts
+          key: charts-${{ steps.release.outputs.release }}
+      - name: 下載譜面
+        run: python3 -I deckcalc/tools/fetch-charts.py --out charts
+
+      - name: 資料版本
+        id: inputs
+        run: |
+          master=$(curl -fsSL --retry 3 https://raw.githubusercontent.com/StarMoe-org/moenotes-masterdata/main/current_version.json | jq -er '.regions["hk-tw-mo"].version')
+          charts=$(jq -er .servers.intl.sha256 charts/manifest.json)
+          tool=$(cat deckcalc/tools/build-music-data.py deckcalc/tools/publish-music-data.js deckcalc/tools/fetch-charts.py deckcalc/charts.js deckcalc/tools/deck-model.json deckcalc/tools/deck-model-tolerance.patch deckcalc/tools/deck-gekisou-levels.patch | sha256sum | cut -c1-32)
+          echo "masterdata $master, charts $charts, tool $tool"
+          echo "key=music-data-$(printf '%s ' "$master" "$charts" "$tool" "$DECK_COMMIT" "$NNNOTES_COMMIT" | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      # A scheduled run stops here when these inputs were built already; the others need the data to publish it.
+      - name: 這份資料建過了嗎
+        id: data
+        uses: actions/cache/restore@v6
+        with:
+          path: music-data
+          key: ${{ steps.inputs.outputs.key }}
+          lookup-only: ${{ github.event_name == 'schedule' }}
+      - name: 要不要發布
+        id: publish
+        run: echo "publish=${{ github.event_name != 'schedule' || steps.data.outputs.cache-hit != 'true' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v7
+        if: steps.data.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        if: steps.data.outputs.cache-hit != 'true'
+        with:
+          node-version: 22
+      - uses: actions/checkout@v7
+        if: steps.data.outputs.cache-hit != 'true'
+        with:
+          repository: StarMoe-org/nnnotes
+          ref: ${{ env.NNNOTES_COMMIT }}
+          path: nnnotes
+      - name: 量譜面的工具（快取）
+        id: deck-bin
+        if: steps.data.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: deck-bin
+          key: deck-bin-${{ env.DECK_COMMIT }}-${{ hashFiles('deckcalc/tools/deck-model-tolerance.patch', 'deckcalc/tools/deck-gekisou-levels.patch') }}
+      - uses: actions/checkout@v7
+        if: steps.data.outputs.cache-hit != 'true' && steps.deck-bin.outputs.cache-hit != 'true'
+        with:
+          repository: empty-sekai/ournotes-deck
+          ref: ${{ env.DECK_COMMIT }}
+          path: ournotes-deck
+      - name: 建置量譜面的工具
+        if: steps.data.outputs.cache-hit != 'true' && steps.deck-bin.outputs.cache-hit != 'true'
+        run: |
+          patch -p1 -d ournotes-deck < deckcalc/tools/deck-model-tolerance.patch
+          patch -p1 -d ournotes-deck < deckcalc/tools/deck-gekisou-levels.patch
+          (cd ournotes-deck && cargo build --release -p ournotes-search --bin ournotes-deck)
+          mkdir -p deck-bin
+          cp ournotes-deck/target/release/ournotes-deck deck-bin/
+
+      - name: 下載 masterdata 和模擬引擎
+        if: steps.data.outputs.cache-hit != 'true'
+        run: |
+          pip install 'numpy>=2.0'
+          git clone -q --depth 1 --filter=blob:none --sparse https://github.com/StarMoe-org/moenotes-masterdata.git masterdata
+          git -C masterdata sparse-checkout set hk-tw-mo
+          engine="ournotes-replay-wasm-$DECK_TAG.tar.gz"
+          curl -fsSL --retry 3 -o "$engine" "https://github.com/empty-sekai/ournotes-deck/releases/download/$DECK_TAG/$engine"
+          echo "$ENGINE_SHA256  $engine" | sha256sum -c -
+      - name: 建 music-data
+        if: steps.data.outputs.cache-hit != 'true'
+        run: |
+          python -I deckcalc/tools/build-music-data.py --out music-data --deck-bin deck-bin/ournotes-deck \
+            --engine "ournotes-replay-wasm-$DECK_TAG.tar.gz" --charts charts --masterdata masterdata/hk-tw-mo \
+            --nnnotes nnnotes/src --jobs "$(nproc)"
+          # The engine is published with its license.
+          pkg="ournotes-replay-wasm-$DECK_TAG"
+          tar -xzf "$pkg.tar.gz" --strip-components=1 -C music-data/replay/*/engine "$pkg/LICENSE-MIT" "$pkg/LICENSE-APACHE"
+          node deckcalc/tools/publish-music-data.js --data music-data --charts charts
+      - uses: actions/cache/save@v6
+        if: steps.data.outputs.cache-hit != 'true'
+        with:
+          path: music-data
+          key: ${{ steps.inputs.outputs.key }}
+
+      - name: 組合網站
+        if: steps.publish.outputs.publish == 'true'
+        run: |
+          mkdir _site
+          git -C deckcalc archive HEAD | tar -x -C _site
+          cp -r music-data _site/music-data
+      - uses: actions/upload-pages-artifact@v5
+        if: steps.publish.outputs.publish == 'true'
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

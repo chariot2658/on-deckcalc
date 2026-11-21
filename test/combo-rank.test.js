@@ -4,13 +4,14 @@
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
+const loadMusicData = require("./music-data.js");
 const E = require("../engine.js");
 const S = require("../simulate.js");
 const loadReplay = require("./replay.js");
 const root = path.join(__dirname, "../..");
 const raw = Object.fromEntries(E.TABLES.map((t) => [t, JSON.parse(fs.readFileSync(path.join(root, "moenotes-masterdata/hk-tw-mo", t + ".json"), "utf8"))]));
 const m = E.buildMaster(raw, "_traditionalChinese");
-const md = JSON.parse(fs.readFileSync(path.join(root, "data/music-data.json"), "utf8"));
+const md = loadMusicData(root);
 const battle = E.battleFromMusicData(md);
 const roster = JSON.parse(fs.readFileSync(path.join(__dirname, "../presets/my-roster.json"), "utf8"));
 const near = (a, b, eps, what) => assert.ok(Math.abs(a - b) <= eps, `${what}: ${a} vs ${b}`);

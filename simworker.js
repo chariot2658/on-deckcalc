@@ -9,7 +9,7 @@
 //   {type: "comboRank", scoreId, ctx, pool}: what ranks a chart's COMBO ranges by mission pt (Simulate.comboRankChart)
 // A task with `patch` (Simulate.patchDeck: 激奏舞台's missions) plays on a replay of the patched deck data.
 // Replies {type: "done", out}, {type: "progress", done} (jobs or runs) meanwhile, or {type: "error", message}.
-importScripts("engine.js", "simulate.js");
+importScripts("engine.js", "charts.js", "simulate.js");
 
 const sessions = new Map(); // the patch's missions ("" without) -> Promise of a ReplaySession
 let master = null; // lazily indexed for whole-scope searches

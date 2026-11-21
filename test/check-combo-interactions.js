@@ -3,6 +3,7 @@
 // Requires the local replay engine; synthetic hosts isolate the support interaction from other score errors.
 const fs = require("fs");
 const path = require("path");
+const loadMusicData = require("./music-data.js");
 const assert = require("assert");
 const E = require("../engine.js");
 const S = require("../simulate.js");
@@ -19,7 +20,7 @@ async function main() {
   for (const k of keys) assert.strictEqual(E.comboCountOf(m, ...k.split(":").map(Number)), k);
   const support = Number((process.argv.find((s) => s.startsWith("--support=")) || "--support=16").split("=")[1]);
   const ctx = S.comboContext(m, keys, support, 1);
-  const battle = E.battleFromMusicData(JSON.parse(fs.readFileSync(path.join(root, "data/music-data.json"), "utf8")));
+  const battle = E.battleFromMusicData(loadMusicData(root));
   const combos = new Map();
   const add = (ks) => { const sorted = ks.slice().sort(); combos.set(sorted.join("+"), sorted); };
   for (const id of [12, 13]) for (const other of [4, 5, 6, 12, 13, 18, 19, 23]) {

@@ -6,6 +6,7 @@
 // Run: node test/gekisou.test.js [--replay-only (skip the two exhaustive search sections)]
 const fs = require("fs");
 const path = require("path");
+const loadMusicData = require("./music-data.js");
 const assert = require("assert");
 const E = require("../engine.js");
 const S = require("../simulate.js");
@@ -15,7 +16,7 @@ const root = path.join(__dirname, "..", "..");
 const raw = {};
 for (const t of E.TABLES) raw[t] = JSON.parse(fs.readFileSync(path.join(root, "moenotes-masterdata", "hk-tw-mo", t + ".json"), "utf8"));
 const m = E.buildMaster(raw, "_traditionalChinese");
-const md = JSON.parse(fs.readFileSync(path.join(root, "data", "music-data.json"), "utf8"));
+const md = loadMusicData(root);
 const perPower = E.perPowerFromMusicData(md);
 const sw = E.skillWeightsFromMusicData(md);
 const battle = E.battleFromMusicData(md);
@@ -29,7 +30,7 @@ for (const [sid, b] of battle.byScore) {
   const mean = b.seeds.reduce((a, s) => a + s.score, 0) / b.seeds.length;
   assert.ok(Math.abs(top.perPower.get(sid) * P - mean) < 1e-6, "chart " + sid);
 }
-console.log(`${battle.byScore.size} charts with Gekisou data, ${battle.shapes.size} member Gekisou skills measured`);
+console.log(`${battle.byScore.size} charts with Gekisou data, ${battle.shapes.size} member Gekisou skill levels measured`);
 
 // IMG_0030–31: TearJerker EXPERT, own score 1152964 (C) — the score without Gekisou — while the room reached B. The
 // room's B threshold for 5 players is 20638445; with Gekisou the own score per unit of power is much higher.
@@ -401,11 +402,13 @@ if (!process.argv.includes("--replay-only")) {
   }
 
   // A member's Gekisou skill alone at the top level adds what music-data measured (charts without luck ranges, where
-  // the seed does not matter); a lower level is the measured gain times its simulated level factor.
+  // the seed does not matter); a lower level adds what gekisou-levels.json measured, the same way, or without it the
+  // top level's gain times its simulated level factor (one per level for every chart, so a chart may be a third off).
   const bt = E.battleRates(battle, 3, 1);
   const cards = m.t.MasterMemberCard.filter((c, i, a) => a.findIndex((x) => x._gekisouSkillID === c._gekisouSkillID) === i);
   const pairs = cards.flatMap((c) => [1, 3].map((l) => [c._gekisouSkillID, l]));
-  const levels = S.gekisouLevelFactors(session, m, battle, bt, pairs);
+  const levels = battle.levelsMeasured ? null : S.gekisouLevelFactors(session, m, battle, bt, pairs);
+  console.log(battle.levelsMeasured ? "lower Gekisou skill levels: measured (gekisou-levels.json)" : "lower Gekisou skill levels: sampled level factors");
   for (const missions of ["111", "333"]) {
     const song = md.songs.find((s) => s.gekisouMissions.join("") === missions);
     const sid = song.charts[2].scoreId;
@@ -419,7 +422,7 @@ if (!process.argv.includes("--replay-only")) {
         const inc = S.orderScores(session, sid, P, perf, gk(sid, 3, 1)).base - base;
         if (!est && !inc) continue;
         console.log(`  ${sid} Gekisou skill ${c._gekisouSkillID} Lv${lv}: search ${Math.round(est)}, simulated ${inc}`);
-        if (lv === 5) assert.ok(Math.abs(est - inc) <= 3);
+        if (lv === 5 || battle.levelsMeasured) assert.ok(Math.abs(est - inc) <= 3);
         else assert.ok(Math.abs(est / inc - 1) < 0.35);
       }
     }

@@ -1,0 +1,2 @@
+# build-local.py applies it with git apply to a clone checked out with LF line endings.
+tools/*.patch -text

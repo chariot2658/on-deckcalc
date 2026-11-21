@@ -2,7 +2,7 @@
 
 根據最新的活動資料和你持有的卡片，找出活動點數（或活動道具）最多的配隊，或分數最高的配隊（挑戰 Live 的歌曲排行榜、衝高分）。
 
-本專案為非官方愛好者專案，與遊戲的開發和營運方無關。倉庫不包含任何遊戲資源：卡面縮圖、masterdata 和譜面資料都是開啟時從下方「資料來源」下載。
+本專案為非官方愛好者專案，與遊戲的開發和營運方無關。倉庫不包含任何遊戲資源：卡面縮圖、masterdata 和譜面都是開啟時從下方「資料來源」下載。部署的網站另外帶有從這些資料算出的統計數字和整場模擬要用的數值表；遊戲內容的權利屬於原權利人。
 
 ## 使用方式
 
@@ -48,9 +48,18 @@
 | 資料 | 來源 | 更新時機 |
 |---|---|---|
 | masterdata（活動、卡片、加成、評級門檻…） | [StarMoe-org/moenotes-masterdata](https://github.com/StarMoe-org/moenotes-masterdata) | 每次開啟時檢查版本，有新版就重新下載 |
-| 譜面的「每點綜合力分數」、演出技能權重與激奏資料 | nnnotes 的 `music-data.json`（storage.bdon.moe） | 每天一次，或按「更新資料」 |
-| 整場模擬（ournotes-deck 的 WASM 引擎與譜面資料，約 5 MB） | `music-data.json` 指向的 replay 資料（storage.bdon.moe） | 第一次模擬時下載，版本變了才重新下載 |
+| 譜面的「每點綜合力分數」、演出技能權重與激奏資料 | 本站部署時建的 `music-data.json` | 每天一次，或按「更新資料」 |
+| 整場模擬的 WASM 引擎與數值表（約 2 MB） | `music-data.json` 指向的 replay 資料（本站部署時建的） | 第一次模擬時下載，版本變了才重新下載 |
+| 整場模擬用的譜面（約 6 MB） | [haneoka.org](https://haneoka.org) 公開的國際服譜面檔（固定在建置時的 release），瀏覽器直接下載，用 `charts.js` 轉換 | 同上 |
 | 卡面縮圖 | assets.bdon.moe | 瀏覽器快取 |
+
+`music-data.json` 原本由 nnnotes 發布（storage.bdon.moe），但它的建置從 2026-11-02 起一直失敗，所以改成自己建：GitHub Actions（`.github/workflows/pages.yml`）每小時看台服 masterdata 和 haneoka.org 的譜面有沒有更新，有就用 nnnotes 自己的匯出程式和 ournotes-deck 重新量一次（`tools/build-music-data.py`），和網站一起部署。和 nnnotes 最後發布的 372 張譜面比對，量出來的分數資料完全相同。
+
+網站上不放音符：部署的資料只有統計數字和整場模擬要用的數值表（`tools/publish-music-data.js` 拿掉音符、歌名、作詞作曲和技能文字）。音符由瀏覽器第一次模擬時從 haneoka.org 下載建置時那個 release 的譜面檔並換算，多花幾秒，之後讀快取（譜面原本放在 haneoka-gakuen/ournotes-charts，2026-11-10 下架；haneoka.org 上是同樣的檔案）。換算的 `charts.js` 是 nnnotes 轉換程式的移植，部署前會逐張和 Python 版比對，有一張不同就不部署；瀏覽器組回來後也會核對整份資料的 SHA-256。
+
+本機也能自己建：`python -I deckcalc/tools/build-local.py`（需要工作區的 nnnotes 和 moenotes-masterdata clone，以及 git、cargo、node、numpy；約 3 分鐘）。結果和部署的一樣不含音符，放在 `music-data/`（git 不追蹤）和測試用的 `../data`，本機網站會優先用它，按「更新資料」生效。
+
+ournotes-deck 對每張譜面有一項自我檢查，卡住 nnnotes 的就是它：10009100（EASY）差 2353 分、上限 2208 分，約分數的 0.03%。自己建的版本把這項檢查放寬到 0.1%（`tools/deck-model-tolerance.patch`，超過原上限的譜面會印在建置紀錄裡），其他計算不變。
 
 ## 計算方式
 
@@ -68,7 +77,7 @@
   - 沒有快照技能的舊版「只看分數」會挑到低 1.6～2.2% 的隊伍。
   - 從全部歌曲找時，先不含快照技能估每首歌（加上粗估的快照加分），只精算最好的 10 首以內；其他歌標「粗估」。
   - 激奏時成員的激奏技能會觸發搭配快照的激奏技能，而且成員之間互相影響，不能逐組相加；搜尋只估計這部分，所以先找 15 支候選隊伍，逐一完整模擬後依模擬分數排名。
-- **模擬分數**：結果卡片上的隊伍會再交給 [ournotes-deck](https://github.com/empty-sekai/ournotes-deck) 的整場模擬（WASM，nnnotes 發布在 music-data 旁邊）。它照遊戲客戶端的邏輯逐幀計算，包含演出技能和快照技能，條件是全 Perfect；單人不開激奏，多人開激奏（見下方「激奏」）。
+- **模擬分數**：結果卡片上的隊伍會再交給 [ournotes-deck](https://github.com/empty-sekai/ournotes-deck) 的整場模擬（WASM，部署在 music-data 旁邊）。它照遊戲客戶端的邏輯逐幀計算，包含演出技能和快照技能，條件是全 Perfect；單人不開激奏，多人開激奏（見下方「激奏」）。
   - 工具列出 120 種發動順序的分數範圍，以及有多少比例的順序能達到各評級。
   - 實測（夢現妄想世界 EXPERT，綜合力 378,468）：模擬平均 1,767,907，遊戲最高分 1,767,821 落在範圍內。
 - **準度**：分數損失幾乎都來自斷 combo，不是 Great。
@@ -107,13 +116,14 @@
   - 遊戲同時算兩個分數：含激奏的分數，以及完全不含激奏的分數（存成最高分、結算畫面大字顯示的 SCORE）。房間評級用的是含激奏的分數：多人的基準分是單人門檻的 2 倍以上，只有含激奏的分數才可能達到（例如 TearJerker 5 人房 B 要 2,064 萬，平均每人 413 萬）。這是從門檻推論的，遊戲客戶端看不到伺服器怎麼用。
   - 多人時工具用含激奏的分數。計算條件是「激奏每段的名次」（對手「不確定」時取第 1 名到最後一名的平均，COMBO 段在最高分數模式改看隊伍的任務 pt，見「限制」；「我知道大概」時三段都假設同一名次，房間人數以內）和「JUST 區間的 JUST 率」。名次只改變每段結束時的加成（該段分數 × 名次的百分比），其他都不變，所以名次的平均是精確的：搜尋用平均百分比，模擬跑一次再依三段的分數換算成各名次的平均。基本分數與演出技能權重來自 `music-data.json` 的開激奏資料，名次的換算是精確的；JUST 率在 0% 與 100% 之間線性內插（誤差約 0.2%）。
     演出技能權重是在全 JUST 的打法下量的，JUST 率較低時，各區間那一部分依「該 JUST 率的區間分數 ÷ 全 JUST 的區間分數」縮放（和模擬差 2% 以內；沒縮放時 JUST 率 20% 的全 JUST 歌高估到 60%）。
-  - 搜尋裡成員的激奏技能：用 `music-data.json` 量好的「該技能單獨滿級時」的加分。未滿級的等級改的是發動條件或時間，所以第一次多人計算時會用整場模擬在幾首歌上量出「該等級 ÷ 滿級」的比例（每種技能約 0.05 秒）。
-  - 搜尋裡快照的激奏技能：只在搭配的成員有激奏技能時發動，加分同樣來自 `music-data.json`（滿級，配同團／不同團成員各量一次），依「成員×快照」配對和綜合力一起最佳化。未滿級時：
+  - 搜尋裡成員的激奏技能：用 `music-data.json` 量好的「該技能單獨滿級時」的加分。`music-data.json` 只量滿級，所以自建資料時另外用同樣的方法（每張譜面、該技能單獨、抽獎取名目機率的期望值，不靠種子）把每個未滿級的等級也量好，放在旁邊的 `gekisou-levels.json`（本機 `tools/build-local.py` 和網站的部署都會建），搜尋直接用該等級在該譜面的加分。
+    沒有這個檔案時（舊的資料、激奏舞台當天重新量的譜面），才退回舊方法：第一次多人計算時用整場模擬在 24 張譜面上量出「該等級 ÷ 滿級」的比例，所有譜面共用一個比例。這個比例實際上隨譜面差很多（例如 COMBO 50 才發動的技能，音符少的譜面完全不加分，多的到滿級的 0.72），LUCK 技能每張譜面又只抽一個種子，單一譜面可能差到三成以上。
+  - 搜尋裡快照的激奏技能：只在搭配的成員有激奏技能時發動，加分同樣來自 `music-data.json`（滿級，配同團／不同團成員各量一次），依「成員×快照」配對和綜合力一起最佳化。未滿級時用 `gekisou-levels.json` 量好的該等級加分（各突破階段的等級都有量）；JUST 區間「每個 JUST 累積加分、有上限」的技能另外依 JUST 率換算（見下）。沒有這個檔案時：
     - LUCKY RUSH 分數 UP、COMBO 區間的累積加分：各等級只差數值，按比例換算。
-    - JUST 區間「每個 JUST 累積加分、有上限」：加分和 JUST 率、上限不成比例，改用「每段的 JUST 平均分布、逐顆累積到上限」的模型，再用滿級全 JUST 的實測值校正（和模擬差 6% 以內；原本的線性換算差到 0.4～1.6 倍）。
+    - JUST 區間「每個 JUST 累積加分、有上限」：加分和 JUST 率、上限不成比例，改用「每段的 JUST 平均分布、逐顆累積到上限」的模型，再用全 JUST 的實測值校正（有 `gekisou-levels.json` 時用該等級自己的實測值，否則用滿級的；滿級校正和模擬差 6% 以內，原本的線性換算差到 0.4～1.6 倍）。
     - 其他：用整場模擬量「該等級 ÷ 滿級」的比例。
   - 幾個技能的加分直接相加，是近似值。兩種成員激奏技能會讓整隊的快照激奏技能變多，搜尋有另外算：
-    - 成員的 LUCK 量條技能讓 RUSH 變多，整隊的 LUCKY RUSH 分數 UP 跟著變多：依每張譜面在 music-data 量到的量條技能收益，除以遊戲本身的 RUSH 加分比例，再與 RUSH 快照的原有收益比較，估計增加的比例。同隊多個量條技能取該譜面增益最高的一個，避免重複累加；LIFE 型的低等級按發動機率比例換算，一般量條的低等級暫用滿級比例。發動時機與多技能重疊仍有近似，最後由 replay 模擬比較候選隊伍。
+    - 成員的 LUCK 量條技能讓 RUSH 變多，整隊的 LUCKY RUSH 分數 UP 跟著變多：依每張譜面在 music-data 量到的量條技能收益，除以遊戲本身的 RUSH 加分比例，再與 RUSH 快照的原有收益比較，估計增加的比例。同隊多個量條技能取該譜面增益最高的一個，避免重複累加；低等級用 `gekisou-levels.json` 量好的該等級收益，沒有時 LIFE 型按發動機率比例換算，一般量條暫用滿級比例。發動時機與多技能重疊仍有近似，最後由 replay 模擬比較候選隊伍。
     - 成員的 COMBO 激奏數 UP 讓整隊「每 10 個激奏 COMBO 累積」的快照更早疊到上限。單技能逐譜面模擬量測；多技能依譜面的發動時間、持續時間、COMBO 門檻和快照上限一起推算，包含其他技能讓 GK12／13 提早發動的效果，同團／不同團分開計算。各難度使用自己的譜面資料，不套用較高難度的加成。全 Perfect 回歸測試包含混合任務、Lv1～Lv5 和 2～5 技能組合：快照加分誤差在 0.58% 內，隔離這項近似後總分誤差在 0.22% 內；這不是整個搜尋模型的總誤差，結果仍以完整模擬比較。
     - JUST 獲得量 UP 和快照的 JUST 累積加分沒有交互作用（累積看的是實際打出的 JUST）；快照的「激奏 COMBO 支援」「LUCK 抽選量條 UP」和其他快照的交互作用量不到或很小，沒有算。
   - 快照的「JUST 判定範圍 UP」（JUST時機支援的一種）：JUST 區間開始後 2～5 秒（Lv1～4）或整段（Lv5）把 JUST 的判定範圍（±2 ms）加寬 N%（搭配同團成員時較大），只在搭配的成員有激奏技能時發動。
@@ -184,7 +194,7 @@
 cd ..                                   # deckcalc 的上一層
 git clone --depth 1 https://github.com/StarMoe-org/moenotes-masterdata.git
 mkdir data
-curl -o data/music-data.json https://storage.bdon.moe/moenotes/music-data/music-data.json
+curl -o data/music-data.json https://chariot2658.github.io/on-deckcalc/music-data/music-data.json
 cd deckcalc
 ```
 
@@ -210,7 +220,7 @@ node test/speed.js --quick --helpers --check-cache # 小卡池驗證平行搜尋
 
 GitHub Actions 的「資料檢查」（`.github/workflows/data-check.yml`）用最新的 masterdata 和 music-data 跑上面全部的測試：
 push、PR 時跑，另外每小時看一次這份程式、masterdata、music-data 有沒有變，有變就測一次（同一組資料只測一次），
-失敗時 GitHub 會寄信。masterdata 更新後 nnnotes 要 1.5～2 小時重建 music-data，這段期間新技能還沒量、測試必然失敗，
+失敗時 GitHub 會寄信。masterdata 更新後最多要一小時多才重建好 music-data，這段期間新技能還沒量、測試必然失敗，
 所以 music-data 還沒追上最新的台服 masterdata 時先等（最多 6 小時，`test/ci-wait.js`）；手動執行可以勾選「照測」。
 
 檔案：`engine.js`（計算核心，瀏覽器與 Node 共用）、`data.js`（下載與快取）、`worker.js`（背景搜尋與模擬）、

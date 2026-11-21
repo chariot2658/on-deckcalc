@@ -1,6 +1,6 @@
-// CI (.github/workflows/data-check.yml): whether to wait for music-data before testing. nnnotes rebuilds music-data
-// after each masterdata update, which takes 1.5–2 hours; until then new skills are unmeasured and the tests fail for
-// nothing but the wait. Writes wait=true to $GITHUB_OUTPUT while music-data was built from another TW masterdata
+// CI (.github/workflows/data-check.yml): whether to wait for music-data before testing. The site's workflow
+// (pages.yml) rebuilds music-data within about an hour of a masterdata update; until then new skills are unmeasured
+// and the tests fail for nothing but the wait. Writes wait=true to $GITHUB_OUTPUT while music-data was built from another TW masterdata
 // version than the current one and the masterdata commit is under 6 hours old (later the tests run and fail, so a
 // rebuild that never comes shows). FORCE=true never waits.
 // Run: node test/ci-wait.js
@@ -18,7 +18,7 @@ const hours = (Date.now() / 1000 - committed) / 3600;
 const wait = built !== current && hours < 6 && process.env.FORCE !== "true";
 if (built !== current) {
   console.log(`::notice::music-data 是用 masterdata ${built.slice(0, 8)} 建的，最新的是 ${current.slice(0, 8)}` +
-    `（${hours.toFixed(1)} 小時前更新）${wait ? "：等 nnnotes 重建完再測" : ""}`);
+    `（${hours.toFixed(1)} 小時前更新）${wait ? "：等重建完再測" : ""}`);
 }
 if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `wait=${wait}\n`);
 else console.log("wait =", wait);
